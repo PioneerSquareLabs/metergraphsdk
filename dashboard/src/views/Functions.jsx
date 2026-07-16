@@ -63,10 +63,10 @@ function FunctionDetail({ func, query }) {
             key: 'status',
             label: 'Status',
             render: (c) =>
-              c.status === 'ok' ? (
-                <span className="pill ok">ok</span>
-              ) : (
+              c.error ? (
                 <span className="pill err">{c.error_type || 'error'}</span>
+              ) : (
+                <span className="pill ok">{c.status || 'ok'}</span>
               ),
           },
         ]}

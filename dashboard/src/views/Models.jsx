@@ -20,11 +20,13 @@ export default function Models({ query }) {
   )
   const catalog = useApi(() => api('/v1/catalog'), [])
 
-  // model key -> publisher, matching canonical_id or aliases
+  // fallback when the usage row lacks a provider: match catalog aliases
   const providerFor = (key) => {
     if (!catalog.data) return null
+    const wanted = String(key).toLowerCase()
     for (const m of catalog.data.models || []) {
-      if (m.canonical_id === key || (m.aliases || []).includes(key)) return m.publisher
+      if (m.canonical_id === wanted) return m.publisher
+      if ((m.aliases || []).some((a) => a.alias === wanted)) return m.publisher
     }
     return null
   }
@@ -48,7 +50,9 @@ export default function Models({ query }) {
           {
             key: 'provider',
             label: 'Provider',
-            render: (r) => providerFor(r.key) || <span className="muted">unknown</span>,
+            render: (r) =>
+              (r.provider !== '(unknown)' && r.provider) ||
+              providerFor(r.key) || <span className="muted">unknown</span>,
           },
           { key: 'calls', label: 'Calls', align: 'right', render: (r) => fmtInt(r.calls) },
           {
