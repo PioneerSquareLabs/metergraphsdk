@@ -17,6 +17,11 @@ from metergraph._template import template_hash
 from metergraph._transport import Writer
 
 
+# wrap() auto-initializes from the environment; keep the suite hermetic.
+os.environ.pop("METERGRAPH_APP_TOKEN", None)
+os.environ.pop("METERGRAPH_INGEST_URL", None)
+
+
 class Rows:
     def __init__(self):
         self.rows = []
@@ -42,6 +47,21 @@ def response(text="done"):
         usage=usage,
         choices=[SimpleNamespace(message=message, finish_reason="stop")],
     )
+
+
+def test_wrap_auto_init_does_not_latch_before_a_token_is_available():
+    class Completions:
+        def create(self, **kwargs):
+            return response()
+
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=Completions()), responses=None
+    )
+    assert metergraph.wrap(client, provider="openai") is client
+    assert metergraph._writer is None  # no token: capture stays off
+    metergraph.init(token="mg_test", ingest_url="http://127.0.0.1:9")
+    assert metergraph._writer is not None  # a later explicit init still works
+    metergraph.shutdown()
 
 
 def test_wrap_sync_records_usage_context_and_preserves_response(tmp_path):

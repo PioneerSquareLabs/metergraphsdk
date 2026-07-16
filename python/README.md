@@ -1,12 +1,15 @@
 # metergraph (Python)
 
-Zero-runtime-dependency capture for OpenAI and Anthropic clients.
+Zero-runtime-dependency capture for OpenAI, Anthropic, and Gemini clients.
+`wrap()` initializes capture from the environment, so setup is one line per
+client; call `metergraph.init(...)` before the first `wrap()` only to pass
+options in code.
 
 ```python
 import metergraph
 from openai import OpenAI
 
-metergraph.init()
+# Anthropic() and google-genai's genai.Client() wrap the same way.
 client = metergraph.wrap(OpenAI())
 metergraph.set_session("ticket-123")
 

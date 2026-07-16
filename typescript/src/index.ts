@@ -9,7 +9,7 @@ import {
 } from "./context.js";
 import { track } from "./track.js";
 import { Transport, type TransportMode, type WaitUntil } from "./transport.js";
-import { setCaptureRuntime, wrap, wrapClient } from "./wrap.js";
+import { setCaptureRuntime, wrap as wrapProvider } from "./wrap.js";
 
 export interface MetergraphOptions {
   token?: string;
@@ -42,6 +42,7 @@ export interface OutcomeOptions {
 }
 
 let initialized = false;
+let warnedNoToken = false;
 let transport: Transport | undefined;
 let config: ConfigPoller | undefined;
 export const DEFAULT_INGEST_URL = "https://d2xus7mp8zdv6t.cloudfront.net";
@@ -59,14 +60,21 @@ function envBool(name: string, fallback: boolean): boolean {
 
 export function init(options: MetergraphOptions = {}): void {
   if (initialized) return;
-  initialized = true;
-  if (env("METERGRAPH_DISABLED") === "1" || options.disabled) return;
+  if (env("METERGRAPH_DISABLED") === "1" || options.disabled) {
+    initialized = true;
+    return;
+  }
   const token = options.token ?? env("METERGRAPH_APP_TOKEN");
   const ingestUrl = options.ingestUrl ?? env("METERGRAPH_INGEST_URL") ?? DEFAULT_INGEST_URL;
   if (!token || !ingestUrl) {
-    console.warn("Metergraph capture disabled: token and ingest URL are required");
+    // Stay uninitialized so a later init() that supplies a token succeeds.
+    if (!warnedNoToken) {
+      warnedNoToken = true;
+      console.warn("Metergraph capture disabled: token and ingest URL are required");
+    }
     return;
   }
+  initialized = true;
   try {
     transport = new Transport(token, ingestUrl, {
       queueSize: options.queueSize ?? Number(env("METERGRAPH_QUEUE_SIZE") ?? 2_000),
@@ -167,5 +175,21 @@ export function wrapHandler<TArgs extends unknown[], TResult>(
   };
 }
 
-export { route, setSession, setTags, track, wrap, wrapClient };
+/**
+ * Wrap an OpenAI, Anthropic, or Google client for capture.
+ *
+ * Calls init() automatically, so with env-var configuration this is the
+ * only setup line needed. Call init(...) first to pass options in code.
+ */
+export function wrap<T extends Record<PropertyKey, any>>(
+  client: T,
+  provider?: "openai" | "anthropic" | "google",
+): T {
+  init();
+  return wrapProvider(client, provider);
+}
+
+export const wrapClient = wrap;
+
+export { route, setSession, setTags, track };
 export type { RouteOptions, TransportMode };

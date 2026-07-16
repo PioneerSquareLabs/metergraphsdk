@@ -11,41 +11,69 @@ Zero-dependency capture SDKs for [Metergraph](https://github.com/PioneerSquareLa
 
 ```bash
 pip install metergraph
+export METERGRAPH_APP_TOKEN=<token>
 ```
+
+Setup is one line per client — `wrap()` reads `METERGRAPH_APP_TOKEN` from the environment and starts capture automatically:
 
 ```python
 import metergraph
+
+# OpenAI
 from openai import OpenAI
+openai_client = metergraph.wrap(OpenAI())
 
-metergraph.init()
-client = metergraph.wrap(OpenAI())
+# Anthropic
+from anthropic import Anthropic
+anthropic_client = metergraph.wrap(Anthropic())
 
-@metergraph.track
-def summarize_invoice(invoice):
-    return client.chat.completions.create(model="gpt-5.6-luna", messages=[...])
+# Gemini
+from google import genai
+gemini_client = metergraph.wrap(genai.Client())
 ```
 
-Attribution is automatic in Python (stack-walk to the nearest app function); `@metergraph.track` pins an explicit, stable name. Also works with `Anthropic()` and `google-genai`'s `genai.Client()`, sync and async, streaming included.
+Then use the wrapped client exactly as before:
+
+```python
+@metergraph.track
+def summarize_invoice(invoice):
+    return openai_client.chat.completions.create(model="gpt-5.6-luna", messages=[...])
+```
+
+Attribution is automatic in Python (stack-walk to the nearest app function); `@metergraph.track` pins an explicit, stable name. Sync and async clients both work, streaming included. To configure in code instead of env vars, call `metergraph.init(token=..., ...)` before the first `wrap()`.
 
 ## TypeScript / JavaScript
 
 ```bash
 npm install metergraph
+export METERGRAPH_APP_TOKEN=<token>
+```
+
+Same one-line setup — `wrap()` initializes from the environment:
+
+```ts
+import * as mg from "metergraph";
+
+// OpenAI
+import OpenAI from "openai";
+const openai = mg.wrap(new OpenAI());
+
+// Anthropic
+import Anthropic from "@anthropic-ai/sdk";
+const anthropic = mg.wrap(new Anthropic());
+
+// Gemini
+import { GoogleGenAI } from "@google/genai";
+const gemini = mg.wrap(new GoogleGenAI({}));
 ```
 
 ```ts
-import OpenAI from "openai";
-import * as mg from "metergraph";
-
-mg.init();
-const client = mg.wrap(new OpenAI());
-
 const summarizeInvoice = mg.track("billing.summarize_invoice", async (invoice) => {
-  return client.chat.completions.create({ model: "gpt-5.6-luna", messages: [...] });
+  return openai.chat.completions.create({ model: "gpt-5.6-luna", messages: [...] });
 });
 ```
 
-In TypeScript use `track()` for attribution — it is reliable across bundlers and minifiers, where stack parsing is not. Works with `openai`, `@anthropic-ai/sdk`, and `@google/genai` (all optional peer dependencies; the SDK itself has zero runtime dependencies).
+In TypeScript use `track()` for attribution — it is reliable across bundlers and minifiers, where stack parsing is not. All three provider SDKs are optional peer dependencies; the SDK itself has zero runtime dependencies. To configure in code, call `mg.init({ token, ... })` before the first `wrap()`.
 
 ## Where the data goes
 

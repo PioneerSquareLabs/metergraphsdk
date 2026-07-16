@@ -1,14 +1,18 @@
 # metergraph (TypeScript)
 
-Zero-runtime-dependency capture for OpenAI and Anthropic clients on Node 18+,
-including AWS Lambda. Worker-style `waitUntil` hooks are present but are not
-part of the v1 public-package qualification contract.
+Zero-runtime-dependency capture for OpenAI, Anthropic, and Gemini clients on
+Node 18+, including AWS Lambda. Worker-style `waitUntil` hooks are present but
+are not part of the v1 public-package qualification contract.
+
+`wrap()` initializes capture from the environment, so setup is one line per
+client; call `init(...)` before the first `wrap()` only to pass options in
+code.
 
 ```ts
-import { init, wrap, route, modelFor, recordOutcome, setSession } from "metergraph";
+import { wrap, route, modelFor, recordOutcome, setSession } from "metergraph";
 import OpenAI from "openai";
 
-init();
+// new Anthropic() and new GoogleGenAI({}) wrap the same way.
 const client = wrap(new OpenAI());
 setSession("ticket-123");
 

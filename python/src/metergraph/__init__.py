@@ -7,9 +7,10 @@ import logging
 import os
 import uuid
 from datetime import datetime, timezone
-from typing import Callable
+from typing import Any, Callable
 
-from ._capture import Options, Runtime, set_runtime, wrap
+from ._capture import Options, Runtime, set_runtime
+from ._capture import wrap as _wrap
 from ._config import ConfigPoller
 from ._context import route, set_session, set_tags, snapshot, wrap_executor
 from ._track import track
@@ -23,6 +24,7 @@ log = logging.getLogger("metergraph")
 _writer: Writer | None = None
 _config: ConfigPoller | None = None
 _initialized = False
+_warned_no_token = False
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -44,17 +46,23 @@ def init(
     disabled: bool | None = None,
 ) -> None:
     """Initialize capture. This function is idempotent and never raises."""
-    global _initialized, _writer, _config
+    global _initialized, _warned_no_token, _writer, _config
     if _initialized:
         return
-    _initialized = True
     if os.getenv("METERGRAPH_DISABLED") == "1" or disabled:
+        _initialized = True
         return
     token = token or os.getenv("METERGRAPH_APP_TOKEN")
     ingest_url = ingest_url or os.getenv("METERGRAPH_INGEST_URL") or DEFAULT_INGEST_URL
     if not token or not ingest_url:
-        log.warning("Metergraph capture disabled: token and ingest URL are required")
+        # Stay uninitialized so a later init() that supplies a token succeeds.
+        if not _warned_no_token:
+            _warned_no_token = True
+            log.warning(
+                "Metergraph capture disabled: token and ingest URL are required"
+            )
         return
+    _initialized = True
     try:
         _writer = Writer(
             token,
@@ -94,6 +102,16 @@ def init(
         log.warning(
             "Metergraph initialization failed; application is running uninstrumented"
         )
+
+
+def wrap(client: Any, *, provider: str | None = None) -> Any:
+    """Wrap an OpenAI, Anthropic, or Google client for capture.
+
+    Calls init() automatically, so with env-var configuration this is the
+    only setup line needed. Call init(...) first to pass options in code.
+    """
+    init()
+    return _wrap(client, provider=provider)
 
 
 def model_for(route_name: str, *, default: str, session_key: str | None = None) -> str:
