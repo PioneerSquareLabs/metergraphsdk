@@ -66,13 +66,13 @@ then wrap every OpenAI()/AsyncOpenAI(), Anthropic()/AsyncAnthropic(), and
 genai.Client() construction in place, e.g. client = metergraph.wrap(OpenAI()).
 wrap() returns the same client and initializes itself from the environment:
 METERGRAPH_APP_TOKEN is required (capture is silently off without it) and
-METERGRAPH_INGEST_URL is only for self-hosted servers — add both to
-.env.example, never commit a real token. Capture is metadata-only (tokens,
-latency, model — no prompt/completion content) and fail-open, so do not change
+METERGRAPH_INGEST_URL is only for self-hosted servers. Add both to
+.env.example, and never commit a real token. Capture is metadata-only (tokens,
+latency, model, no prompt/completion content) and fail-open, so do not change
 call sites, arguments, or error handling; sync, async, and streaming work
 unchanged. Attribution to the calling function is automatic; optionally pin
 stable names on key LLM-calling functions with @metergraph.track. On
 serverless, call metergraph.flush() before the handler returns. When done,
 list every client you wrapped and flag LLM calls made outside the official
-openai / anthropic / google-genai SDKs — those are not captured.
+openai / anthropic / google-genai SDKs, since those are not captured.
 ```
