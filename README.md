@@ -1,6 +1,6 @@
 # Metergraph SDKs
 
-Zero-dependency capture SDKs for [Metergraph](https://github.com/metergraph/metergraph) — LLM cost tracking by function. Wrap your OpenAI, Anthropic, or Gemini client and every call is attributed to the application function that made it, with token counts (in/out, cached, reasoning), latency, and model — **never prompt or completion content** unless you explicitly opt in against the hosted service.
+Zero-dependency capture SDKs for [Metergraph](https://github.com/PioneerSquareLabs/metergraph) — LLM cost tracking by function. Wrap your OpenAI, Anthropic, or Gemini client and every call is attributed to the application function that made it, with token counts (in/out, cached, reasoning), latency, and model — **never prompt or completion content** unless you explicitly opt in against the hosted service.
 
 | Package | Registry | Source |
 |---|---|---|
@@ -54,7 +54,7 @@ export METERGRAPH_INGEST_URL=http://localhost:8787   # your self-hosted server
 export METERGRAPH_APP_TOKEN=<token>
 ```
 
-Point `METERGRAPH_INGEST_URL` at a [self-hosted Metergraph server](https://github.com/metergraph/metergraph) or leave it unset for the hosted service. **Without a token, capture is disabled entirely** — the SDK never sends anything silently. The SDK is fail-open: transport problems never break or slow your LLM calls.
+Point `METERGRAPH_INGEST_URL` at a [self-hosted Metergraph server](https://github.com/PioneerSquareLabs/metergraph) or leave it unset for the hosted service. **Without a token, capture is disabled entirely** — the SDK never sends anything silently. The SDK is fail-open: transport problems never break or slow your LLM calls.
 
 See [`examples/`](examples) for runnable per-provider examples, including an offline fake-provider demo that needs no API keys.
 
