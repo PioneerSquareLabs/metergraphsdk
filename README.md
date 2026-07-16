@@ -75,6 +75,51 @@ const summarizeInvoice = mg.track("billing.summarize_invoice", async (invoice) =
 
 In TypeScript use `track()` for attribution — it is reliable across bundlers and minifiers, where stack parsing is not. All three provider SDKs are optional peer dependencies; the SDK itself has zero runtime dependencies. To configure in code, call `mg.init({ token, ... })` before the first `wrap()`.
 
+## Set up with an AI coding agent
+
+Paste this into Claude Code, Codex, Cursor, or any coding agent inside the codebase you want instrumented — it works for both the Python and TypeScript SDKs:
+
+```text
+Instrument this codebase's LLM API costs with Metergraph
+(https://github.com/PioneerSquareLabs/metergraphsdk). It captures per-call
+token usage (in/out, cached, reasoning), latency, and model, attributed to the
+application function that made the call — metadata only, never prompt or
+completion content.
+
+1. Install the SDK: `pip install metergraph` (Python) or `npm install
+   metergraph` (TypeScript/JavaScript). Zero runtime dependencies.
+2. Find every place an OpenAI, Anthropic, or Google Gemini client is
+   constructed — OpenAI()/AsyncOpenAI(), Anthropic()/AsyncAnthropic(),
+   genai.Client(), new OpenAI(), new Anthropic(), new GoogleGenAI() — and wrap
+   it in place:
+   - Python: `client = metergraph.wrap(OpenAI())` after `import metergraph`
+   - TypeScript: `const client = mg.wrap(new OpenAI())` after
+     `import * as mg from "metergraph"`
+   wrap() returns the same client and initializes itself from the environment.
+   Do not change any call sites, arguments, or error handling; streaming and
+   async work unchanged.
+3. Configuration is env-var based: METERGRAPH_APP_TOKEN (required — capture is
+   silently off without it) and METERGRAPH_INGEST_URL (only when self-hosting
+   the server from https://github.com/PioneerSquareLabs/metergraph). Add both
+   to .env.example or the deployment config; never commit a real token.
+4. Attribution:
+   - Python: automatic via stack walk. Optionally decorate key LLM-calling
+     functions with @metergraph.track to pin a stable name.
+   - TypeScript: wrap each LLM-calling function with
+     mg.track("stable.name", fn) — stack-based attribution is unreliable
+     under bundlers, so do this for every function that calls a wrapped client.
+5. Serverless only (Lambda / Cloudflare Workers / Vercel): ensure delivery
+   before the runtime freezes — wrap handlers with mg.wrapHandler(handler),
+   or call mg.bindWaitUntil(ctx) once per request, or await mg.flush() before
+   returning. Long-running servers and scripts need nothing extra.
+6. The SDK is fail-open: transport problems never break or slow LLM calls, so
+   do not add defensive try/except around wrapping or the wrapped calls.
+
+When done, list every client you wrapped and where, and flag any LLM calls
+made through libraries other than the official openai / anthropic /
+@google/genai (google-genai) SDKs — those are not captured.
+```
+
 ## Where the data goes
 
 ```bash

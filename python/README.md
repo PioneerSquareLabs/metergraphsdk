@@ -53,3 +53,26 @@ message batches are captured per inference while iterating a wrapped
 `route()` context so the asynchronous batch retains its product route. Batch
 rows carry real per-result usage and the batch pricing flag; job-management
 polls themselves are not miscounted as model calls.
+
+## Set up with an AI coding agent
+
+Paste this into Claude Code, Codex, Cursor, or any coding agent inside the
+codebase you want instrumented:
+
+```text
+Instrument this codebase's LLM API costs with the `metergraph` PyPI package
+(https://github.com/PioneerSquareLabs/metergraphsdk): pip install metergraph,
+then wrap every OpenAI()/AsyncOpenAI(), Anthropic()/AsyncAnthropic(), and
+genai.Client() construction in place, e.g. client = metergraph.wrap(OpenAI()).
+wrap() returns the same client and initializes itself from the environment:
+METERGRAPH_APP_TOKEN is required (capture is silently off without it) and
+METERGRAPH_INGEST_URL is only for self-hosted servers — add both to
+.env.example, never commit a real token. Capture is metadata-only (tokens,
+latency, model — no prompt/completion content) and fail-open, so do not change
+call sites, arguments, or error handling; sync, async, and streaming work
+unchanged. Attribution to the calling function is automatic; optionally pin
+stable names on key LLM-calling functions with @metergraph.track. On
+serverless, call metergraph.flush() before the handler returns. When done,
+list every client you wrapped and flag LLM calls made outside the official
+openai / anthropic / google-genai SDKs — those are not captured.
+```

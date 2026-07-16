@@ -51,3 +51,29 @@ from a wrapped `client.files.content()` is consumed with `text()`,
 inference while iterating a wrapped `client.messages.batches.results()` result.
 Consume results inside `route()` so the asynchronous batch retains its product
 route. Job-management polls are deliberately not counted as model calls.
+
+## Set up with an AI coding agent
+
+Paste this into Claude Code, Codex, Cursor, or any coding agent inside the
+codebase you want instrumented:
+
+```text
+Instrument this codebase's LLM API costs with the `metergraph` npm package
+(https://github.com/PioneerSquareLabs/metergraphsdk): npm install metergraph,
+then wrap every new OpenAI(), new Anthropic(), and new GoogleGenAI()
+construction in place, e.g. const client = mg.wrap(new OpenAI()) after
+import * as mg from "metergraph". wrap() returns the same client and
+initializes itself from the environment: METERGRAPH_APP_TOKEN is required
+(capture is silently off without it) and METERGRAPH_INGEST_URL is only for
+self-hosted servers — add both to .env.example, never commit a real token.
+Capture is metadata-only (tokens, latency, model — no prompt/completion
+content) and fail-open, so do not change call sites, arguments, or error
+handling; async and streaming work unchanged. Wrap each function that calls a
+wrapped client with mg.track("stable.name", fn) — stack-based attribution is
+unreliable under bundlers. On serverless (Lambda / Workers / Vercel), ensure
+delivery before the runtime freezes: mg.wrapHandler(handler), or
+mg.bindWaitUntil(ctx) once per request, or await mg.flush() before returning;
+long-running servers need nothing extra. When done, list every client you
+wrapped and flag LLM calls made outside the official openai /
+@anthropic-ai/sdk / @google/genai SDKs — those are not captured.
+```
