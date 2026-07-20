@@ -1,0 +1,19 @@
+{
+  "name": "metergraph-live-testbench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": ">=0.30",
+    "@google/genai": ">=1",
+    "metergraph": "file:../typescript",
+    "openai": ">=4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  }
+}
