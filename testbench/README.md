@@ -7,8 +7,10 @@ stored rows and verifies:
 
 - provider/model aggregates plus language, environment, and route attribution;
 - nonzero input and output usage;
-- a fully priced/reported cost; and
-- `cost_usd` equals an independent token/rate calculation to eight decimals.
+- catalog-derived `priced` status with canonical model and price lineage;
+- zero SDK-reported or unpriced calls; and
+- `cost_usd` equals an independent cache-aware token calculation to eight
+  decimals, with fixed two-call totals for every provider.
 
 The fixed low-cost models are `gpt-5.6-luna`,
 `claude-haiku-4-5-20251001`, and `gemini-2.5-flash`. Prompt and completion text
@@ -50,8 +52,8 @@ MG_TOKENS=dev-token docker compose up -d --build
 ```
 
 The command exits nonzero when a provider call fails, a captured row never
-arrives, usage is missing, the row is unpriced, or the stored cost differs from
-the independent calculation. JSON reports contain no API keys or Metergraph
-tokens. If `/v1/calls` is unhealthy, the bench records that warning and falls
-back to route/model aggregates from `/v1/usage` so a reporting bug cannot hide
-the underlying ingest and pricing result.
+arrives through `/v1/calls`, usage or catalog lineage is missing, the row is not
+fully priced, any reported/unpriced calls exist, or the stored cost differs
+from the independent calculation and fixed provider total. JSON reports contain
+no API keys or Metergraph tokens. A `/v1/calls` failure is fatal; the bench does
+not fall back to aggregate reporting.

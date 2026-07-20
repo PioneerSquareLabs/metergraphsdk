@@ -39,7 +39,7 @@ def response(text="done"):
     usage = SimpleNamespace(
         prompt_tokens=12,
         completion_tokens=4,
-        prompt_tokens_details=SimpleNamespace(cached_tokens=3),
+        prompt_tokens_details=SimpleNamespace(cached_tokens=3, cache_write_tokens=4),
     )
     message = SimpleNamespace(content=text)
     return SimpleNamespace(
@@ -99,6 +99,8 @@ def test_wrap_sync_records_usage_context_and_preserves_response(tmp_path):
     assert row["session_id"] == "conversation-7"
     assert row["input_tokens"] == 12
     assert row["cache_read_tokens"] == 3
+    assert row["cache_write_tokens"] == 4
+    assert "cost_usd" not in row
     assert row["unit_name"] == "answer"
     assert row["conversation_id"] == "conversation-7"
     assert row["tool_calls"] is None
@@ -483,7 +485,16 @@ def test_anthropic_batch_results_capture_usage_without_changing_iteration(tmp_pa
                 id="msg_batch_1",
                 model="claude-batch",
                 content=[SimpleNamespace(text="anthropic batch answer")],
-                usage=SimpleNamespace(input_tokens=13, output_tokens=5),
+                usage=SimpleNamespace(
+                    input_tokens=13,
+                    output_tokens=5,
+                    cache_read_input_tokens=3,
+                    cache_creation_input_tokens=7,
+                    cache_creation=SimpleNamespace(
+                        ephemeral_5m_input_tokens=2,
+                        ephemeral_1h_input_tokens=5,
+                    ),
+                ),
                 stop_reason="end_turn",
             ),
         ),
@@ -507,6 +518,11 @@ def test_anthropic_batch_results_capture_usage_without_changing_iteration(tmp_pa
     assert row["batch_custom_id"] == "ticket-2"
     assert row["input_tokens"] == 13
     assert row["output_tokens"] == 5
+    assert row["cache_read_tokens"] == 3
+    assert row["cache_write_tokens"] == 7
+    assert row["cache_write_5m_tokens"] == 2
+    assert row["cache_write_1h_tokens"] == 5
+    assert "cost_usd" not in row
     assert row["response_text"] == "anthropic batch answer"
     _capture.set_runtime(None)
 
@@ -603,7 +619,13 @@ def test_stream_records_ttft_and_final_usage(tmp_path):
                     ),
                     SimpleNamespace(
                         choices=[],
-                        usage=SimpleNamespace(prompt_tokens=2, completion_tokens=1),
+                        usage=SimpleNamespace(
+                            prompt_tokens=2,
+                            completion_tokens=1,
+                            prompt_tokens_details=SimpleNamespace(
+                                cached_tokens=1, cache_write_tokens=2
+                            ),
+                        ),
                     ),
                 ]
             )
@@ -619,6 +641,9 @@ def test_stream_records_ttft_and_final_usage(tmp_path):
     assert rows.rows[0]["stream"] is True
     assert rows.rows[0]["ttft_ms"] is not None
     assert rows.rows[0]["input_tokens"] == 2
+    assert rows.rows[0]["cache_read_tokens"] == 1
+    assert rows.rows[0]["cache_write_tokens"] == 2
+    assert "cost_usd" not in rows.rows[0]
     assert rows.rows[0]["response_text"] == "hi"
     assert rows.rows[0]["request_json"].find("include_usage") >= 0
     _capture.set_runtime(None)
@@ -641,7 +666,16 @@ def test_async_stream_awaits_anthropic_final_message(tmp_path):
 
         async def get_final_message(self):
             return SimpleNamespace(
-                usage=SimpleNamespace(input_tokens=6, output_tokens=2),
+                usage=SimpleNamespace(
+                    input_tokens=6,
+                    output_tokens=2,
+                    cache_read_input_tokens=3,
+                    cache_creation_input_tokens=5,
+                    cache_creation=SimpleNamespace(
+                        ephemeral_5m_input_tokens=2,
+                        ephemeral_1h_input_tokens=3,
+                    ),
+                ),
                 content=[SimpleNamespace(text="ok")],
                 stop_reason="end_turn",
             )
@@ -660,6 +694,11 @@ def test_async_stream_awaits_anthropic_final_message(tmp_path):
 
     assert len(asyncio.run(run())) == 1
     assert rows.rows[0]["input_tokens"] == 6
+    assert rows.rows[0]["cache_read_tokens"] == 3
+    assert rows.rows[0]["cache_write_tokens"] == 5
+    assert rows.rows[0]["cache_write_5m_tokens"] == 2
+    assert rows.rows[0]["cache_write_1h_tokens"] == 3
+    assert "cost_usd" not in rows.rows[0]
     assert rows.rows[0]["response_text"] == "ok"
     _capture.set_runtime(None)
 

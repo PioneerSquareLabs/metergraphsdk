@@ -1,6 +1,6 @@
 # Metergraph SDKs
 
-Capture SDKs for [Metergraph](https://github.com/PioneerSquareLabs/metergraph), which tracks LLM costs by application function. Wrap your OpenAI, Anthropic, or Gemini client and every call is attributed to the function that made it, with token counts (in/out, cached, reasoning), latency, and model. Prompt and completion content is never sent unless you explicitly opt in against the hosted service. The SDKs have no runtime dependencies.
+Capture SDKs for [Metergraph](https://github.com/PioneerSquareLabs/metergraph), which tracks LLM costs by application function. Wrap your OpenAI, Anthropic, or Gemini client and every call is attributed to the function that made it, with token counts (input/output, cache reads, aggregate and TTL-specific cache writes, reasoning), latency, and model. SDK rows contain usage counters, never embedded prices or client-computed cost. Prompt and completion content is never sent unless you explicitly opt in against the hosted service. The SDKs have no runtime dependencies.
 
 | Package | Registry | Source |
 |---|---|---|

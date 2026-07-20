@@ -44,26 +44,57 @@ def _int(value: Any) -> int | None:
 
 
 def _usage(response: Any) -> dict[str, int | None]:
-    usage = _get(response, "usage") or _get(response, "usage_metadata")
+    usage = (
+        _get(response, "usage")
+        or _get(response, "usage_metadata")
+        or _get(response, "usageMetadata")
+    )
     prompt_details = _get(usage, "prompt_tokens_details") or _get(
         usage, "input_tokens_details"
+    ) or _get(
+        usage, "promptTokensDetails"
+    ) or _get(
+        usage, "inputTokensDetails"
     )
     completion_details = _get(usage, "completion_tokens_details") or _get(
         usage, "output_tokens_details"
+    ) or _get(
+        usage, "completionTokensDetails"
+    ) or _get(
+        usage, "outputTokensDetails"
+    )
+    cache_creation = _get(usage, "cache_creation") or _get(
+        usage, "cacheCreation"
     )
     return {
         "input_tokens": _int(
             _get(
                 usage,
                 "prompt_tokens",
-                _get(usage, "input_tokens", _get(usage, "prompt_token_count")),
+                _get(
+                    usage,
+                    "input_tokens",
+                    _get(
+                        usage,
+                        "prompt_token_count",
+                        _get(usage, "promptTokenCount"),
+                    ),
+                ),
             )
         ),
         "output_tokens": _int(
             _get(
                 usage,
                 "completion_tokens",
-                _get(usage, "output_tokens", _get(usage, "candidates_token_count")),
+                _get(
+                    usage,
+                    "output_tokens",
+                    _get(
+                        usage,
+                        "candidates_token_count",
+                        _get(usage, "candidatesTokenCount"),
+                    ),
+                ),
             )
         ),
         "cache_read_tokens": _int(
@@ -73,16 +104,52 @@ def _usage(response: Any) -> dict[str, int | None]:
                 _get(
                     prompt_details,
                     "cached_tokens",
-                    _get(usage, "cached_content_token_count"),
+                    _get(
+                        usage,
+                        "cached_content_token_count",
+                        _get(usage, "cachedContentTokenCount"),
+                    ),
                 ),
             )
         ),
-        "cache_write_tokens": _int(_get(usage, "cache_creation_input_tokens")),
+        "cache_write_tokens": _int(
+            _get(
+                usage,
+                "cache_creation_input_tokens",
+                _get(
+                    prompt_details,
+                    "cache_write_tokens",
+                    _get(
+                        usage,
+                        "cacheCreationInputTokens",
+                        _get(prompt_details, "cacheWriteTokens"),
+                    ),
+                ),
+            )
+        ),
+        "cache_write_5m_tokens": _int(
+            _get(
+                cache_creation,
+                "ephemeral_5m_input_tokens",
+                _get(cache_creation, "ephemeral5mInputTokens"),
+            )
+        ),
+        "cache_write_1h_tokens": _int(
+            _get(
+                cache_creation,
+                "ephemeral_1h_input_tokens",
+                _get(cache_creation, "ephemeral1hInputTokens"),
+            )
+        ),
         "reasoning_tokens": _int(
             _get(
                 completion_details,
                 "reasoning_tokens",
-                _get(usage, "thoughts_token_count"),
+                _get(
+                    usage,
+                    "thoughts_token_count",
+                    _get(usage, "thoughtsTokenCount"),
+                ),
             )
         ),
     }

@@ -80,7 +80,11 @@ test("wrap captures usage/context and config assignment is sticky", async (t) =>
         async create() {
           return {
             id: "req_1",
-            usage: { prompt_tokens: 8, completion_tokens: 3 },
+            usage: {
+              prompt_tokens: 8,
+              completion_tokens: 3,
+              prompt_tokens_details: { cached_tokens: 2, cache_write_tokens: 4 },
+            },
             choices: [{ message: { content: "done" }, finish_reason: "stop" }],
           };
         },
@@ -120,6 +124,9 @@ test("wrap captures usage/context and config assignment is sticky", async (t) =>
   assert.equal(row.route, "classify");
   assert.equal(row.session_id, "session-1");
   assert.equal(row.input_tokens, 8);
+  assert.equal(row.cache_read_tokens, 2);
+  assert.equal(row.cache_write_tokens, 4);
+  assert.equal(row.cost_usd, undefined);
   assert.equal(row.unit_name, "answer");
   assert.equal(row.content_opted_in, true);
   assert.match(row.func, /sdk\.test\.mjs/);
@@ -133,7 +140,14 @@ test("wrap captures usage/context and config assignment is sticky", async (t) =>
           return {
             async *[Symbol.asyncIterator]() {
               yield { choices: [{ delta: { content: "hi" } }] };
-              yield { choices: [], usage: { prompt_tokens: 2, completion_tokens: 1 } };
+              yield {
+                choices: [],
+                usage: {
+                  prompt_tokens: 2,
+                  completion_tokens: 1,
+                  prompt_tokens_details: { cached_tokens: 1, cache_write_tokens: 2 },
+                },
+              };
             },
           };
         },
@@ -186,7 +200,16 @@ test("wrap captures usage/context and config assignment is sticky", async (t) =>
         id: "msg_batch_js_1",
         model: "claude-batch",
         content: [{ type: "text", text: "anthropic batch answer" }],
-        usage: { input_tokens: 13, output_tokens: 5 },
+        usage: {
+          input_tokens: 13,
+          output_tokens: 5,
+          cache_read_input_tokens: 3,
+          cache_creation_input_tokens: 7,
+          cache_creation: {
+            ephemeral_5m_input_tokens: 2,
+            ephemeral_1h_input_tokens: 5,
+          },
+        },
         stop_reason: "end_turn",
       },
     },
@@ -225,6 +248,9 @@ test("wrap captures usage/context and config assignment is sticky", async (t) =>
   assert.equal(metadataOnly.response_text, undefined);
   const streamed = allRows.find((candidate) => candidate.model === "stream-model");
   assert.equal(streamed.input_tokens, 2);
+  assert.equal(streamed.cache_read_tokens, 1);
+  assert.equal(streamed.cache_write_tokens, 2);
+  assert.equal(streamed.cost_usd, undefined);
   assert.equal(streamed.response_text, "hi");
   const openAIBatch = allRows.find((candidate) => candidate.request_id === "req_batch_js_1");
   assert.equal(openAIBatch.route, "nightly-batch");
@@ -237,7 +263,54 @@ test("wrap captures usage/context and config assignment is sticky", async (t) =>
   assert.equal(anthropicBatch.batch, true);
   assert.equal(anthropicBatch.batch_custom_id, "ticket-js-2");
   assert.equal(anthropicBatch.output_tokens, 5);
+  assert.equal(anthropicBatch.cache_read_tokens, 3);
+  assert.equal(anthropicBatch.cache_write_tokens, 7);
+  assert.equal(anthropicBatch.cache_write_5m_tokens, 2);
+  assert.equal(anthropicBatch.cache_write_1h_tokens, 5);
+  assert.equal(anthropicBatch.cost_usd, undefined);
   assert.equal(anthropicBatch.response_text, "anthropic batch answer");
+});
+
+test("anthropic streaming preserves aggregate and TTL-specific cache writes", async (t) => {
+  const rows = [];
+  setCaptureRuntime(stubRuntime(rows));
+  t.after(() => setCaptureRuntime());
+  const client = wrap({
+    messages: {
+      async stream() {
+        return {
+          async *[Symbol.asyncIterator]() {
+            yield { type: "content_block_delta", delta: { text: "ok" } };
+          },
+          async finalMessage() {
+            return {
+              content: [{ type: "text", text: "ok" }],
+              usage: {
+                input_tokens: 6,
+                output_tokens: 2,
+                cache_read_input_tokens: 3,
+                cache_creation_input_tokens: 5,
+                cache_creation: {
+                  ephemeral_5m_input_tokens: 2,
+                  ephemeral_1h_input_tokens: 3,
+                },
+              },
+            };
+          },
+        };
+      },
+    },
+  }, "anthropic");
+
+  const stream = await client.messages.stream({ model: "claude", messages: [] });
+  for await (const _chunk of stream) { /* consume */ }
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].cache_read_tokens, 3);
+  assert.equal(rows[0].cache_write_tokens, 5);
+  assert.equal(rows[0].cache_write_5m_tokens, 2);
+  assert.equal(rows[0].cache_write_1h_tokens, 3);
+  assert.equal(rows[0].cost_usd, undefined);
 });
 
 test("wrap captures gemini usage from non-stream and cumulative stream responses", async (t) => {

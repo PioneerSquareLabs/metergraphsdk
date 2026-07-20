@@ -55,10 +55,15 @@ RATES = {
         "output": Decimal("2.50"),
         "cache_read": Decimal("0.075"),
         "cache_write": None,
-        "input_includes_cache_read": False,
+        "input_includes_cache_read": True,
     },
 }
 COST_QUANTUM = Decimal("0.00000001")
+EXPECTED_TOTALS = {
+    "openai": Decimal("0.00007000"),
+    "anthropic": Decimal("0.00006400"),
+    "google": Decimal("0.00000860"),
+}
 
 
 def load_env(path: Path) -> dict[str, str]:
@@ -200,8 +205,26 @@ def verify_row(
         if actual_raw is not None
         else None
     )
-    if row.get("cost_status") not in {"priced", "reported"}:
+    if row.get("source") != "calls":
+        errors.append(f"row came from {row.get('source')!r}, not /v1/calls")
+    if row.get("cost_status") != "priced":
         errors.append(f"cost status is {row.get('cost_status')!r}")
+    if row.get("reported_cost_usd") is not None:
+        errors.append("reported_cost_usd must be null for native SDK usage")
+    catalog_raw = row.get("catalog_cost_usd")
+    catalog_cost = (
+        Decimal(str(catalog_raw)).quantize(COST_QUANTUM)
+        if catalog_raw is not None
+        else None
+    )
+    if catalog_cost != actual:
+        errors.append(
+            f"catalog cost mismatch: got {catalog_cost}, effective cost is {actual}"
+        )
+    if not row.get("catalog_price_id"):
+        errors.append("catalog price lineage is missing")
+    if not row.get("canonical_model"):
+        errors.append("canonical model lineage is missing")
     if actual is None:
         errors.append("cost_usd is null")
     elif actual != expected:
@@ -219,6 +242,11 @@ def verify_row(
         "reasoning_tokens": row.get("reasoning_tokens"),
         "cost_status": row.get("cost_status"),
         "cost_usd": actual_raw,
+        "reported_cost_usd": row.get("reported_cost_usd"),
+        "catalog_cost_usd": catalog_raw,
+        "catalog_price_id": row.get("catalog_price_id"),
+        "canonical_model": row.get("canonical_model"),
+        "catalog_reasons": row.get("catalog_reasons"),
         "expected_cost_usd": float(expected),
         "ok": not errors,
         "errors": errors,
@@ -239,65 +267,24 @@ def poll_rows(
     rows: list[dict[str, Any]] = []
     routes: set[str] = set()
     warnings: list[str] = []
-    calls_available = True
     expected_routes = {
         f"{prefix}{language}:{provider}"
         for language in ("python", "typescript")
         for provider in MODELS
     }
     while time.monotonic() < deadline:
-        if calls_available:
-            try:
-                _, payload = api_json(
-                    url,
-                    token,
-                    "/v1/calls",
-                    {"limit": "500", "environment": environment},
-                )
-                rows = [
-                    {**row, "source": "calls"}
-                    for row in payload.get("items", [])
-                    if str(row.get("route") or "").startswith(prefix)
-                ]
-                routes = {str(row.get("route")) for row in rows}
-                if expected_routes <= routes:
-                    return rows, [], warnings
-            except Exception as exc:
-                calls_available = False
-                warnings.append(
-                    f"/v1/calls unavailable; verified through /v1/usage instead: {exc}"
-                )
         try:
             _, payload = api_json(
                 url,
                 token,
-                "/v1/usage",
-                {"group_by": "route", "environment": environment},
+                "/v1/calls",
+                {"limit": "500", "environment": environment},
             )
-            rows = []
-            for item in payload.get("items", []):
-                route = str(item.get("key") or "")
-                if not route.startswith(prefix):
-                    continue
-                provider = route.rsplit(":", 1)[-1]
-                unpriced = int(item.get("unpriced_calls") or 0)
-                reported = int(item.get("reported_calls") or 0)
-                rows.append(
-                    {
-                        **item,
-                        "source": "usage",
-                        "route": route,
-                        "provider": provider,
-                        "model": MODELS.get(provider),
-                        "cost_status": (
-                            "unpriced"
-                            if unpriced
-                            else "reported"
-                            if reported
-                            else "priced"
-                        ),
-                    }
-                )
+            rows = [
+                {**row, "source": "calls"}
+                for row in payload.get("items", [])
+                if str(row.get("route") or "").startswith(prefix)
+            ]
             routes = {str(row.get("route")) for row in rows}
             if expected_routes <= routes:
                 return rows, [], warnings
@@ -346,6 +333,19 @@ def verify_model_groups(
         item_errors = []
         if int(item.get("calls") or 0) != 2:
             item_errors.append(f"expected two calls, got {item.get('calls')!r}")
+        if int(item.get("unpriced_calls") or 0) != 0:
+            item_errors.append(
+                f"expected zero unpriced calls, got {item.get('unpriced_calls')!r}"
+            )
+        if int(item.get("reported_calls") or 0) != 0:
+            item_errors.append(
+                f"expected zero reported calls, got {item.get('reported_calls')!r}"
+            )
+        actual_total = Decimal(str(item.get("cost_usd") or 0)).quantize(COST_QUANTUM)
+        if actual_total != EXPECTED_TOTALS[provider]:
+            item_errors.append(
+                f"cost total is {actual_total}, expected {EXPECTED_TOTALS[provider]}"
+            )
         results.append(
             {
                 "provider": provider,
@@ -403,11 +403,13 @@ def target_result(
                 verified.append(verify_row(row, route, language, provider))
     ok = (
         all(runner.get("exit_code") == 0 for runner in runners)
+        and all(runner.get("flushed") is True for runner in runners)
         and not polling_errors
         and not model_errors
         and not missing
         and len(verified) == 6
         and all(row["ok"] for row in verified)
+        and not reporting_warnings
     )
     return {
         "target": target,
