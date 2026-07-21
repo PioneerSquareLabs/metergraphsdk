@@ -1,6 +1,6 @@
 {
   "name": "metergraph",
-  "version": "0.2.0",
+  "version": "0.1.0",
   "description": "Fire-and-forget LLM spend capture for Metergraph",
   "type": "module",
   "main": "./dist/index.js",

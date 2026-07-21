@@ -368,7 +368,7 @@ test("wrap captures gemini usage from non-stream and cumulative stream responses
   assert.equal(row.cache_read_tokens, 10);
   assert.equal(row.reasoning_tokens, 5);
   assert.equal(row.response_text, "gemini done");
-  assert.equal(row.sdk_version, "0.2.0");
+  assert.equal(row.sdk_version, "0.1.0");
   assert.equal(streamed.provider, "google");
   assert.equal(streamed.endpoint, "models.generate_content.stream");
   assert.equal(streamed.stream, true);
