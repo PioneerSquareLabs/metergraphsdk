@@ -1111,6 +1111,10 @@ def wrap(client: Any, *, provider: str | None = None) -> Any:
     chat = getattr(getattr(client, "chat", None), "completions", None)
     if chat is not None:
         seams.append((chat, "create", "chat.completions"))
+        seams.append((chat, "parse", "chat.completions.parse"))
+    beta_chat = getattr(getattr(getattr(client, "beta", None), "chat", None), "completions", None)
+    if beta_chat is not None:
+        seams.append((beta_chat, "parse", "chat.completions.parse"))
     responses = getattr(client, "responses", None)
     if responses is not None:
         seams.extend(

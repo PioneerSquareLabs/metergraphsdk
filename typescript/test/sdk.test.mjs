@@ -412,6 +412,36 @@ test("track attributes rows to the wrapped function name", async (t) => {
   assert.match(rows[3].func, /sdk\.test\.mjs/);
 });
 
+test("wrap patches create and parse on both chat and beta chat", async (t) => {
+  const rows = [];
+  setCaptureRuntime(stubRuntime(rows));
+  t.after(() => setCaptureRuntime());
+
+  const parsedResult = {
+    id: "req_parsed",
+    usage: { prompt_tokens: 8, completion_tokens: 3 },
+    choices: [{ message: { content: "done" }, finish_reason: "stop" }],
+  };
+  const makeCompletions = () => ({
+    async create() { return parsedResult; },
+    async parse() { return parsedResult; },
+  });
+  const client = wrap({
+    chat: { completions: makeCompletions() },
+    beta: { chat: { completions: makeCompletions() } },
+  }, "openai");
+
+  await client.chat.completions.create({ model: "m", messages: [] });
+  await client.chat.completions.parse({ model: "m", messages: [] });
+  await client.beta.chat.completions.parse({ model: "m", messages: [] });
+
+  assert.deepEqual(rows.map((row) => row.endpoint), [
+    "chat.completions",
+    "chat.completions.parse",
+    "chat.completions.parse",
+  ]);
+});
+
 test("transport splits wire batches at 512 KiB", async (t) => {
   const wireLengths = [];
   let deliveredRows = 0;
