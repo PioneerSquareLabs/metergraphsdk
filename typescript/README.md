@@ -18,7 +18,7 @@ setSession("ticket-123");
 
 let model = "gpt-4.1-mini";
 await route("ticket-classifier", async () => {
-  model = modelFor("ticket-classifier", model);
+  model = modelFor("ticket-classifier", { default: model });
   await client.chat.completions.create({ model, messages: [] });
 }, { unit: "answer", captureText: true });
 

@@ -130,7 +130,7 @@ test("wrap captures usage/context and config assignment is sticky", async (t) =>
   assert.equal(row.unit_name, "answer");
   assert.equal(row.content_opted_in, true);
   assert.match(row.func, /sdk\.test\.mjs/);
-  assert.equal(modelFor("route-a", "fallback"), "model-a"); // shared Py/TS test vector
+  assert.equal(modelFor("route-a", { default: "fallback" }), "model-a"); // shared Py/TS test vector
 
   const streamClient = wrap({
     chat: {

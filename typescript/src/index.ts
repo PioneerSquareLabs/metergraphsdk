@@ -28,6 +28,11 @@ export interface MetergraphOptions {
   configHardTtlMs?: number;
 }
 
+export interface ModelForOptions {
+  default: string;
+  sessionKey?: string;
+}
+
 export interface OutcomeOptions {
   model: string;
   taskCompleted: boolean;
@@ -104,8 +109,12 @@ export function init(options: MetergraphOptions = {}): void {
   }
 }
 
-export function modelFor(routeName: string, fallback: string, sessionKey?: string): string {
-  return config?.modelFor(routeName, fallback, sessionKey ?? contextSnapshot().sessionId) ?? fallback;
+export function modelFor(routeName: string, options: ModelForOptions): string {
+  return config?.modelFor(
+    routeName,
+    options.default,
+    options.sessionKey ?? contextSnapshot().sessionId,
+  ) ?? options.default;
 }
 
 export function recordOutcome(routeName: string, options: OutcomeOptions): boolean {
