@@ -5,7 +5,19 @@ description = "Fire-and-forget LLM spend capture for Metergraph"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
+authors = [{ name = "Pioneer Square Labs" }]
+keywords = ["llm", "observability", "openai", "anthropic", "gemini", "cost-tracking"]
+classifiers = [
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://www.metergraph.dev/"
+Repository = "https://github.com/PioneerSquareLabs/metergraphsdk"
+Issues = "https://github.com/PioneerSquareLabs/metergraphsdk/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
