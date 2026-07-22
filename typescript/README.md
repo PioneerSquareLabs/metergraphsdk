@@ -31,6 +31,12 @@ recordOutcome("ticket-classifier", {
 });
 ```
 
+`modelFor(routeName, { default, sessionKey })` takes an options object.
+**Breaking change from `metergraph@0.1.0`**, which took positional
+`modelFor(routeName, fallback, sessionKey?)` arguments; `default` is
+required and throws if missing so a caller error surfaces immediately
+instead of an `undefined` model reaching a provider call.
+
 Set `METERGRAPH_APP_TOKEN`; `METERGRAPH_INGEST_URL` is only needed to override
 the hosted HTTPS endpoint. Content is metadata-only by default; set
 `METERGRAPH_CAPTURE_TEXT=1` globally or `captureText: true` on an individual

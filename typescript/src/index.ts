@@ -110,6 +110,9 @@ export function init(options: MetergraphOptions = {}): void {
 }
 
 export function modelFor(routeName: string, options: ModelForOptions): string {
+  if (typeof options?.default !== "string" || !options.default) {
+    throw new TypeError("modelFor requires options.default to be a non-empty string");
+  }
   return config?.modelFor(
     routeName,
     options.default,
