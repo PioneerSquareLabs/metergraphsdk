@@ -112,6 +112,38 @@ def test_wrap_sync_records_usage_context_and_preserves_response(tmp_path):
     _capture.set_runtime(None)
 
 
+def test_wrap_patches_create_and_parse_on_both_chat_and_beta_chat(tmp_path):
+    rows = Rows()
+    _capture.set_runtime(
+        Runtime(rows, Options(app_root=str(Path(__file__).parents[1])))
+    )
+
+    class Completions:
+        def create(self, **kwargs):
+            return response()
+
+        def parse(self, **kwargs):
+            return response()
+
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=Completions()),
+        beta=SimpleNamespace(chat=SimpleNamespace(completions=Completions())),
+        responses=None,
+    )
+    metergraph.wrap(client, provider="openai")
+
+    client.chat.completions.create(model="gpt-test", messages=[])
+    client.chat.completions.parse(model="gpt-test", messages=[])
+    client.beta.chat.completions.parse(model="gpt-test", messages=[])
+
+    assert [row["endpoint"] for row in rows.rows] == [
+        "chat.completions",
+        "chat.completions.parse",
+        "chat.completions.parse",
+    ]
+    _capture.set_runtime(None)
+
+
 def gemini_response(text="gemini done"):
     return SimpleNamespace(
         text=text,

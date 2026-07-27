@@ -355,6 +355,10 @@ export function wrap<T extends AnyRecord>(client: T, provider?: "openai" | "anth
     patched += Number(patch(client.models, "generateContentStream", name, "models.generate_content.stream"));
   }
   patched += Number(patch(client.chat?.completions, "create", name, "chat.completions"));
+  patched += Number(patch(client.chat?.completions, "parse", name, "chat.completions.parse"));
+  patched += Number(
+    patch(client.beta?.chat?.completions, "parse", name, "chat.completions.parse"),
+  );
   patched += Number(patch(client.responses, "create", name, "responses"));
   patched += Number(patch(client.responses, "stream", name, "responses.stream"));
   patched += Number(patch(client.messages, "create", name, "messages"));
