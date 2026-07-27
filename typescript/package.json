@@ -20,6 +20,17 @@
     "node": ">=18"
   },
   "license": "Apache-2.0",
+  "author": "Pioneer Square Labs",
+  "homepage": "https://www.metergraph.dev/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PioneerSquareLabs/metergraphsdk.git",
+    "directory": "typescript"
+  },
+  "bugs": {
+    "url": "https://github.com/PioneerSquareLabs/metergraphsdk/issues"
+  },
+  "keywords": ["llm", "observability", "openai", "anthropic", "gemini", "cost-tracking"],
   "dependencies": {},
   "devDependencies": {
     "@types/node": "^24.0.0",
