@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import logging
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -142,6 +143,90 @@ def test_wrap_patches_create_and_parse_on_both_chat_and_beta_chat(tmp_path):
         "chat.completions.parse",
     ]
     _capture.set_runtime(None)
+
+
+def test_wrap_patches_responses_parse_and_beta_responses_create(tmp_path):
+    rows = Rows()
+    _capture.set_runtime(
+        Runtime(rows, Options(app_root=str(Path(__file__).parents[1])))
+    )
+
+    class Responses:
+        def create(self, **kwargs):
+            return response()
+
+        def parse(self, **kwargs):
+            return response()
+
+    class BetaResponses:
+        # client.beta.responses has .create but, as of openai>=1.x, no .parse —
+        # verified directly against the installed SDK; do not add a .parse here.
+        def create(self, **kwargs):
+            return response()
+
+    client = SimpleNamespace(
+        responses=Responses(),
+        beta=SimpleNamespace(responses=BetaResponses()),
+    )
+    metergraph.wrap(client, provider="openai")
+
+    client.responses.create(model="gpt-test")
+    client.responses.parse(model="gpt-test")
+    client.beta.responses.create(model="gpt-test")
+
+    assert [row["endpoint"] for row in rows.rows] == [
+        "responses",
+        "responses.parse",
+        "responses",
+    ]
+    _capture.set_runtime(None)
+
+
+def test_wrap_skips_missing_nested_attribute_without_raising():
+    client = SimpleNamespace(beta=SimpleNamespace())  # beta.responses does not exist
+    result = metergraph.wrap(client, provider="openai")
+    assert result is client
+
+
+def test_wrap_skips_one_broken_seam_without_affecting_others(tmp_path):
+    rows = Rows()
+    _capture.set_runtime(
+        Runtime(rows, Options(app_root=str(Path(__file__).parents[1])))
+    )
+
+    class Completions:
+        def create(self, **kwargs):
+            return response()
+
+    class Chat:
+        completions = Completions()
+
+    class Client:
+        chat = Chat()
+
+        @property
+        def responses(self):
+            raise RuntimeError("boom: not ready yet")
+
+    client = Client()
+    metergraph.wrap(client, provider="openai")
+    client.chat.completions.create(model="gpt-test")
+
+    assert [row["endpoint"] for row in rows.rows] == ["chat.completions"]
+    _capture.set_runtime(None)
+
+
+def test_wrap_never_raises_even_if_client_attribute_access_raises(caplog):
+    class Explosive:
+        @property
+        def responses(self):
+            raise RuntimeError("boom: not ready yet")
+
+    client = Explosive()
+    with caplog.at_level(logging.WARNING, logger="metergraph"):
+        result = metergraph.wrap(client)  # no provider override: exercises auto-detection
+    assert result is client
+    assert any("wrap() failed" in r.getMessage() for r in caplog.records)
 
 
 def gemini_response(text="gemini done"):
