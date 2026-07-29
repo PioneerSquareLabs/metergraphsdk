@@ -1,3 +1,5 @@
+import { FailureLogger } from "./failure-log.js";
+
 export type TransportMode = "auto" | "background" | "buffered";
 export type WaitUntil = (promise: Promise<unknown>) => void;
 export const MAX_BATCH_BYTES = 512 * 1024;
@@ -37,6 +39,7 @@ export class Transport {
   private errors = 0;
   private retryAt = 0;
   private backoffMs = 1_000;
+  private readonly failureLog = new FailureLogger();
 
   constructor(
     private readonly token: string,
@@ -139,14 +142,36 @@ export class Transport {
         console.warn("Metergraph authentication failed; capture disabled for this process");
         return;
       }
-      if (response.status !== 202) throw new Error(`ingest returned ${response.status}`);
+      if ([400, 404, 413, 422].includes(response.status)) {
+        this.fatal = true;
+        this.failureLog.report(
+          "client_error",
+          `ingest rejected batch with HTTP ${response.status} against ${this.baseUrl}; capture disabled for this process`,
+        );
+        return;
+      }
+      if (response.status !== 202) {
+        this.errors += 1;
+        this.dropped += rows.length;
+        this.retryAt = Date.now() + this.backoffMs;
+        this.backoffMs = Math.min(this.backoffMs * 2, 60_000);
+        this.failureLog.report(
+          "server_error",
+          `ingest request failed with HTTP ${response.status} against ${this.baseUrl}`,
+        );
+        return;
+      }
       this.backoffMs = 1_000;
       this.retryAt = 0;
-    } catch {
+    } catch (error) {
       this.errors += 1;
       this.dropped += rows.length;
       this.retryAt = Date.now() + this.backoffMs;
       this.backoffMs = Math.min(this.backoffMs * 2, 60_000);
+      this.failureLog.report(
+        "transport_error",
+        `ingest request to ${this.baseUrl} failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 

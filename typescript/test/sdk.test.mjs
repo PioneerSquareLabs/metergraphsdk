@@ -25,6 +25,7 @@ import {
 } from "../dist/index.js";
 import { CaptureRuntime } from "../dist/capture.js";
 import { MAX_BATCH_BYTES, Transport } from "../dist/transport.js";
+import { FailureLogger } from "../dist/failure-log.js";
 import { setCaptureRuntime, SEAM_TABLES, OPENAI_SEAMS, ANTHROPIC_SEAMS, GOOGLE_SEAMS } from "../dist/wrap.js";
 
 function stubRuntime(rows, options = {}) {
@@ -562,6 +563,130 @@ test("transport splits wire batches at 512 KiB", async (t) => {
   assert.ok(wireLengths.length > 1);
   assert.ok(Math.max(...wireLengths) <= MAX_BATCH_BYTES);
   assert.equal(deliveredRows, 6);
+});
+
+test("FailureLogger logs first occurrence and suppresses repeats", () => {
+  const messages = [];
+  let now = 0;
+  const logger = new FailureLogger(60_000, () => now, (m) => messages.push(m));
+  logger.report("transport_error", "boom 1");
+  now = 10_000;
+  logger.report("transport_error", "boom 2");
+  now = 20_000;
+  logger.report("transport_error", "boom 3");
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], /boom 1/);
+});
+
+test("FailureLogger reports suppressed count after quiet window", () => {
+  const messages = [];
+  let now = 0;
+  const logger = new FailureLogger(60_000, () => now, (m) => messages.push(m));
+  logger.report("transport_error", "boom 1");
+  now = 10_000;
+  logger.report("transport_error", "boom 2");
+  now = 70_000;
+  logger.report("transport_error", "boom 3");
+  assert.equal(messages.length, 2);
+  assert.match(messages[1], /1 more suppressed/);
+  assert.match(messages[1], /boom 3/);
+});
+
+test("FailureLogger tracks kinds independently", () => {
+  const messages = [];
+  let now = 0;
+  const logger = new FailureLogger(60_000, () => now, (m) => messages.push(m));
+  logger.report("transport_error", "t1");
+  logger.report("client_error", "c1");
+  assert.equal(messages.length, 2);
+});
+
+test("FailureLogger bounds log volume under sustained failure", () => {
+  const messages = [];
+  let now = 0;
+  const logger = new FailureLogger(60_000, () => now, (m) => messages.push(m));
+  for (let i = 0; i < 1000; i += 1) logger.report("transport_error", "boom");
+  assert.equal(messages.length, 1);
+});
+
+test("transport auth failure is fatal and logged once", async (t) => {
+  const server = http.createServer((request, response) => {
+    request.resume();
+    response.writeHead(401);
+    response.end();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const address = server.address();
+
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(" "));
+  try {
+    const transport = new Transport("mg_test", `http://127.0.0.1:${address.port}`, { mode: "buffered" });
+    transport.enqueue({ payload: "one" });
+    await transport.flush(2000);
+    transport.enqueue({ payload: "two" });
+    await transport.flush(2000);
+  } finally {
+    console.warn = originalWarn;
+  }
+  const authWarnings = warnings.filter((w) => w.includes("authentication failed"));
+  assert.equal(authWarnings.length, 1);
+});
+
+test("transport permanent client error is fatal and does not retry", async (t) => {
+  let attempts = 0;
+  const server = http.createServer((request, response) => {
+    attempts += 1;
+    request.resume();
+    response.writeHead(400);
+    response.end();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const address = server.address();
+
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(" "));
+  try {
+    const transport = new Transport("mg_test", `http://127.0.0.1:${address.port}`, { mode: "buffered" });
+    transport.enqueue({ payload: "one" });
+    await transport.flush(2000);
+    transport.enqueue({ payload: "two" });
+    await transport.flush(2000);
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(attempts, 1);
+  assert.ok(warnings.some((w) => w.includes("HTTP 400")));
+});
+
+test("transport server error retries and is not fatal", async (t) => {
+  let attempts = 0;
+  const server = http.createServer((request, response) => {
+    request.resume();
+    attempts += 1;
+    response.writeHead(500);
+    response.end();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const address = server.address();
+
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(" "));
+  try {
+    const transport = new Transport("mg_test", `http://127.0.0.1:${address.port}`, { mode: "buffered" });
+    transport.enqueue({ payload: "one" });
+    await transport.flush(2000);
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(attempts, 1);
+  assert.ok(warnings.some((w) => w.includes("HTTP 500")));
 });
 
 function resolveSeam(client, path) {
