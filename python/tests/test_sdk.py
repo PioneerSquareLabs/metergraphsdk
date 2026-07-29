@@ -36,6 +36,18 @@ def test_hosted_default_is_https():
     assert metergraph.DEFAULT_INGEST_URL == "https://d2xus7mp8zdv6t.cloudfront.net"
 
 
+def test_python_seam_endpoints_match_shared_fixture():
+    fixture_path = Path(__file__).parent / "fixtures" / "seam_endpoints.json"
+    expected = json.loads(fixture_path.read_text())
+    actual = {
+        "openai": sorted({seam.endpoint for seam in _capture.OPENAI_SEAMS}),
+        "anthropic": sorted({seam.endpoint for seam in _capture.ANTHROPIC_SEAMS}),
+        "google": sorted({seam.endpoint for seam in _capture.GOOGLE_SEAMS}),
+    }
+    for provider, endpoints in expected.items():
+        assert actual[provider] == sorted(endpoints), provider
+
+
 def response(text="done"):
     usage = SimpleNamespace(
         prompt_tokens=12,

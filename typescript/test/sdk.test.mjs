@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 import http from "node:http";
 import test from "node:test";
 import { gunzipSync } from "node:zlib";
@@ -22,7 +25,7 @@ import {
 } from "../dist/index.js";
 import { CaptureRuntime } from "../dist/capture.js";
 import { MAX_BATCH_BYTES, Transport } from "../dist/transport.js";
-import { setCaptureRuntime, OPENAI_SEAMS, ANTHROPIC_SEAMS, GOOGLE_SEAMS } from "../dist/wrap.js";
+import { setCaptureRuntime, SEAM_TABLES, OPENAI_SEAMS, ANTHROPIC_SEAMS, GOOGLE_SEAMS } from "../dist/wrap.js";
 
 function stubRuntime(rows, options = {}) {
   return new CaptureRuntime(
@@ -594,4 +597,16 @@ test("anthropic seams exist on the real SDK", () => {
 test("google seams exist on the real SDK", () => {
   const client = new GoogleGenAI({ apiKey: "test" });
   assert.deepEqual(missingSeams(client, GOOGLE_SEAMS), []);
+});
+
+test("typescript seam endpoints match shared fixture", () => {
+  const fixturePath = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..", "..", "python", "tests", "fixtures", "seam_endpoints.json",
+  );
+  const expected = JSON.parse(readFileSync(fixturePath, "utf8"));
+  for (const [provider, endpoints] of Object.entries(expected)) {
+    const actual = [...new Set(SEAM_TABLES[provider].map((seam) => seam.endpoint))].sort();
+    assert.deepEqual(actual, [...endpoints].sort(), provider);
+  }
 });
