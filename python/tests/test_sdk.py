@@ -14,6 +14,7 @@ import metergraph
 from metergraph import _capture
 from metergraph._capture import Options, Runtime
 from metergraph._config import choose_model
+from metergraph._failure_log import FailureLogger
 from metergraph._template import template_hash
 from metergraph._transport import Writer
 
@@ -955,3 +956,134 @@ def test_writer_splits_wire_batches_at_512_kib():
     assert len(wire_lengths) > 1
     assert max(wire_lengths) <= 512 * 1024
     assert sorted(row["index"] for row in delivered_rows) == list(range(6))
+
+
+def test_failure_logger_logs_first_occurrence_and_suppresses_repeats(caplog):
+    now = [0.0]
+    logger = FailureLogger(quiet_seconds=60.0, clock=lambda: now[0])
+    with caplog.at_level(logging.WARNING, logger="metergraph"):
+        logger.report("transport_error", "boom 1")
+        now[0] = 10.0
+        logger.report("transport_error", "boom 2")
+        now[0] = 20.0
+        logger.report("transport_error", "boom 3")
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == 1
+    assert "boom 1" in messages[0]
+
+
+def test_failure_logger_reports_suppressed_count_after_quiet_window(caplog):
+    now = [0.0]
+    logger = FailureLogger(quiet_seconds=60.0, clock=lambda: now[0])
+    with caplog.at_level(logging.WARNING, logger="metergraph"):
+        logger.report("transport_error", "boom 1")
+        now[0] = 10.0
+        logger.report("transport_error", "boom 2")  # suppressed
+        now[0] = 70.0
+        logger.report("transport_error", "boom 3")
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == 2
+    assert "1 more suppressed" in messages[1]
+    assert "boom 3" in messages[1]
+
+
+def test_failure_logger_tracks_kinds_independently(caplog):
+    now = [0.0]
+    logger = FailureLogger(quiet_seconds=60.0, clock=lambda: now[0])
+    with caplog.at_level(logging.WARNING, logger="metergraph"):
+        logger.report("transport_error", "t1")
+        logger.report("client_error", "c1")
+    assert len(caplog.records) == 2
+
+
+def test_failure_logger_bounds_log_volume_under_sustained_failure(caplog):
+    now = [0.0]
+    logger = FailureLogger(quiet_seconds=60.0, clock=lambda: now[0])
+    with caplog.at_level(logging.WARNING, logger="metergraph"):
+        for _ in range(1000):
+            logger.report("transport_error", "boom")
+    assert len(caplog.records) == 1
+
+
+def test_writer_auth_failure_is_fatal_and_logged_once(caplog):
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(401)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    writer = Writer("mg_test", f"http://127.0.0.1:{server.server_port}", flush_seconds=5)
+    with caplog.at_level(logging.WARNING, logger="metergraph"):
+        writer.enqueue({"payload": "one"})
+        writer.flush(2)
+        writer.enqueue({"payload": "two"})
+        writer.flush(2)
+    writer.shutdown()
+    server.shutdown()
+
+    auth_warnings = [r for r in caplog.records if "authentication failed" in r.getMessage()]
+    assert len(auth_warnings) == 1
+    assert writer.dropped >= 1
+
+
+def test_writer_permanent_client_error_is_fatal_and_does_not_retry(caplog):
+    attempts = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            attempts.append(1)
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(400)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    writer = Writer("mg_test", f"http://127.0.0.1:{server.server_port}", flush_seconds=5)
+    with caplog.at_level(logging.WARNING, logger="metergraph"):
+        writer.enqueue({"payload": "one"})
+        writer.flush(2)
+        writer.enqueue({"payload": "two"})
+        writer.flush(2)
+    writer.shutdown()
+    server.shutdown()
+
+    assert len(attempts) == 1  # fatal after the first 400: second enqueue must not retry
+    assert any("HTTP 400" in r.getMessage() for r in caplog.records)
+
+
+def test_writer_server_error_retries_and_is_not_fatal(caplog):
+    attempts = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            attempts.append(1)
+            self.send_response(500)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    writer = Writer("mg_test", f"http://127.0.0.1:{server.server_port}", flush_seconds=5)
+    with caplog.at_level(logging.WARNING, logger="metergraph"):
+        writer.enqueue({"payload": "one"})
+        writer.flush(2)
+    writer.shutdown()
+    server.shutdown()
+
+    assert len(attempts) == 1
+    assert writer._fatal is False
+    assert any("HTTP 500" in r.getMessage() for r in caplog.records)

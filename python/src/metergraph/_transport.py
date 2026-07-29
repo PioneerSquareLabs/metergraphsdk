@@ -13,6 +13,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from ._failure_log import FailureLogger
 from ._version import SDK_VERSION
 
 
@@ -43,6 +44,7 @@ class Writer:
         self._errors = 0
         self._backoff = 1.0
         self._retry_at = 0.0
+        self._failure_log = FailureLogger()
         self._thread = self._new_thread()
         self._thread.start()
         if hasattr(os, "register_at_fork"):
@@ -144,11 +146,26 @@ class Writer:
                 log.warning(
                     "Metergraph authentication failed; capture disabled for this process"
                 )
+            elif exc.code in (400, 404, 413, 422):
+                self._fatal = True
+                self._failure_log.report(
+                    "client_error",
+                    f"ingest rejected batch with HTTP {exc.code} against {self._url}; "
+                    "capture disabled for this process (retrying will not help)",
+                )
             else:
                 self._failed(len(rows))
+                self._failure_log.report(
+                    "server_error",
+                    f"ingest request failed with HTTP {exc.code} against {self._url}",
+                )
             return False
-        except Exception:
+        except Exception as exc:
             self._failed(len(rows))
+            self._failure_log.report(
+                "transport_error",
+                f"ingest request to {self._url} failed: {type(exc).__name__}: {exc}",
+            )
             return False
 
     def _failed(self, count: int) -> None:
