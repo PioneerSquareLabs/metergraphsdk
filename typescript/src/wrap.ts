@@ -371,8 +371,10 @@ export const ANTHROPIC_SEAMS: Seam[] = [
 export const GOOGLE_SEAMS: Seam[] = [
   { path: "models", method: "generateContent", endpoint: "models.generate_content" },
   { path: "models", method: "generateContentStream", endpoint: "models.generate_content.stream" },
-  { path: "aio.models", method: "generateContent", endpoint: "models.generate_content" },
-  { path: "aio.models", method: "generateContentStream", endpoint: "models.generate_content.stream" },
+  // Note: unlike the Python google-genai client, the JS/TS @google/genai
+  // client has no .aio namespace at all (verified directly against the
+  // installed package — client.aio is undefined; JS methods are already
+  // Promise-based) — do not add aio.models entries here.
 ];
 
 export const SEAM_TABLES: Record<string, Seam[]> = {
