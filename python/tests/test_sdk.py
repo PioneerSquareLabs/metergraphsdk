@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import metergraph
 from metergraph import _capture
 from metergraph._capture import Options, Runtime
-from metergraph._config import choose_model
+from metergraph._config import ConfigPoller, choose_model
 from metergraph._failure_log import FailureLogger
 from metergraph._template import template_hash
 from metergraph._transport import Writer
@@ -853,6 +853,31 @@ def test_canary_assignment_is_sticky_and_fail_open():
     assert choices == ["model-a"] * 5  # shared Py/TS FNV-1a/64 test vector
     assert choose_model("route-a", "fallback", None, config) == "model-a"
     assert choose_model("route-a", "fallback", "session-1", None) == "fallback"
+
+
+def test_config_poller_logs_generic_failures_via_failure_logger(caplog):
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(500)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    poller = ConfigPoller(
+        "mg_test", f"http://127.0.0.1:{server.server_port}",
+        poll_seconds=60, hard_ttl_seconds=120,
+    )
+    with caplog.at_level(logging.WARNING, logger="metergraph"):
+        ok = poller.poll_once()
+    poller.stop()
+    server.shutdown()
+
+    assert ok is False
+    assert any("config poll to" in r.getMessage() for r in caplog.records)
 
 
 def test_record_outcome_uses_the_async_content_free_channel(monkeypatch):

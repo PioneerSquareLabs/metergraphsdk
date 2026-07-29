@@ -11,6 +11,8 @@ import urllib.request
 from collections.abc import Mapping
 from typing import Any
 
+from ._failure_log import FailureLogger
+
 
 log = logging.getLogger("metergraph")
 
@@ -75,6 +77,7 @@ class ConfigPoller:
         self._routes: dict[str, dict[str, Any]] = {}
         self._last_success = 0.0
         self._lock = threading.Lock()
+        self._failure_log = FailureLogger()
         self._stop = threading.Event()
         self._thread = threading.Thread(
             target=self._run, name="metergraph-config", daemon=True
@@ -124,8 +127,17 @@ class ConfigPoller:
                     "Metergraph config authentication failed; using default models"
                 )
                 self._stop.set()
+                return False
+            self._failure_log.report(
+                "config_poll_error",
+                f"config poll to {self._url} failed with HTTP {exc.code}",
+            )
             return False
-        except Exception:
+        except Exception as exc:
+            self._failure_log.report(
+                "config_poll_error",
+                f"config poll to {self._url} failed: {type(exc).__name__}: {exc}",
+            )
             return False
 
     def model_for(self, route: str, default: str, session_key: str | None) -> str:
