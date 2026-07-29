@@ -101,6 +101,13 @@ export class Transport {
     return this.queue.length === 0;
   }
 
+  private markTransientFailure(rowCount: number): void {
+    this.errors += 1;
+    this.dropped += rowCount;
+    this.retryAt = Date.now() + this.backoffMs;
+    this.backoffMs = Math.min(this.backoffMs * 2, 60_000);
+  }
+
   private async deliver(rows: Record<string, unknown>[]): Promise<void> {
     if (this.fatal || Date.now() < this.retryAt) {
       this.dropped += rows.length;
@@ -151,10 +158,7 @@ export class Transport {
         return;
       }
       if (response.status !== 202) {
-        this.errors += 1;
-        this.dropped += rows.length;
-        this.retryAt = Date.now() + this.backoffMs;
-        this.backoffMs = Math.min(this.backoffMs * 2, 60_000);
+        this.markTransientFailure(rows.length);
         this.failureLog.report(
           "server_error",
           `ingest request failed with HTTP ${response.status} against ${this.baseUrl}`,
@@ -164,10 +168,7 @@ export class Transport {
       this.backoffMs = 1_000;
       this.retryAt = 0;
     } catch (error) {
-      this.errors += 1;
-      this.dropped += rows.length;
-      this.retryAt = Date.now() + this.backoffMs;
-      this.backoffMs = Math.min(this.backoffMs * 2, 60_000);
+      this.markTransientFailure(rows.length);
       this.failureLog.report(
         "transport_error",
         `ingest request to ${this.baseUrl} failed: ${error instanceof Error ? error.message : String(error)}`,
