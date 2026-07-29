@@ -1,3 +1,5 @@
+import { FailureLogger } from "./failure-log.js";
+
 export interface RouteConfig {
   version?: number;
   enabled?: boolean;
@@ -42,6 +44,11 @@ export class ConfigPoller {
   private routes: Record<string, RouteConfig> = {};
   private lastSuccess = 0;
   private timer?: ReturnType<typeof setInterval>;
+  private stopped = false;
+  private readonly failureLog = new FailureLogger();
+
+  /** Resolves once the constructor's initial poll attempt has completed (success or failure). Exposed primarily so tests can synchronize deterministically instead of guessing a delay; not required for normal use. */
+  readonly ready: Promise<boolean>;
 
   constructor(
     private readonly token: string,
@@ -49,12 +56,15 @@ export class ConfigPoller {
     private readonly pollMs = 30_000,
     private readonly hardTtlMs = 120_000,
   ) {
-    void this.poll();
-    this.timer = setInterval(() => void this.poll(), Math.max(1_000, pollMs));
+    this.ready = this.poll();
+    this.timer = setInterval(() => {
+      if (!this.stopped) void this.poll();
+    }, Math.max(1_000, pollMs));
     this.timer.unref?.();
   }
 
   async poll(): Promise<boolean> {
+    if (this.stopped) return false;
     try {
       const headers: Record<string, string> = { Authorization: `Bearer ${this.token}` };
       if (this.etag) headers["If-None-Match"] = this.etag;
@@ -63,13 +73,28 @@ export class ConfigPoller {
         this.lastSuccess = Date.now();
         return true;
       }
-      if (!response.ok) return false;
+      if (response.status === 401 || response.status === 403) {
+        console.warn("Metergraph config authentication failed; using default models");
+        this.stop();
+        return false;
+      }
+      if (!response.ok) {
+        this.failureLog.report(
+          "config_poll_error",
+          `config poll to ${this.baseUrl} failed with HTTP ${response.status}`,
+        );
+        return false;
+      }
       const body = await response.json() as { routes?: Record<string, RouteConfig> };
       this.routes = body.routes ?? {};
       this.etag = response.headers.get("etag") ?? undefined;
       this.lastSuccess = Date.now();
       return true;
-    } catch {
+    } catch (error) {
+      this.failureLog.report(
+        "config_poll_error",
+        `config poll to ${this.baseUrl} failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
       return false;
     }
   }
@@ -80,6 +105,7 @@ export class ConfigPoller {
   }
 
   stop(): void {
+    this.stopped = true;
     if (this.timer) clearInterval(this.timer);
   }
 }

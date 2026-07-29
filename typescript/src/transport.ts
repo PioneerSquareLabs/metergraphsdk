@@ -1,3 +1,5 @@
+import { FailureLogger } from "./failure-log.js";
+
 export type TransportMode = "auto" | "background" | "buffered";
 export type WaitUntil = (promise: Promise<unknown>) => void;
 export const MAX_BATCH_BYTES = 512 * 1024;
@@ -37,6 +39,7 @@ export class Transport {
   private errors = 0;
   private retryAt = 0;
   private backoffMs = 1_000;
+  private readonly failureLog = new FailureLogger();
 
   constructor(
     private readonly token: string,
@@ -98,6 +101,13 @@ export class Transport {
     return this.queue.length === 0;
   }
 
+  private markTransientFailure(rowCount: number): void {
+    this.errors += 1;
+    this.dropped += rowCount;
+    this.retryAt = Date.now() + this.backoffMs;
+    this.backoffMs = Math.min(this.backoffMs * 2, 60_000);
+  }
+
   private async deliver(rows: Record<string, unknown>[]): Promise<void> {
     if (this.fatal || Date.now() < this.retryAt) {
       this.dropped += rows.length;
@@ -139,14 +149,36 @@ export class Transport {
         console.warn("Metergraph authentication failed; capture disabled for this process");
         return;
       }
-      if (response.status !== 202) throw new Error(`ingest returned ${response.status}`);
+      if (response.status === 413 && rows.length > 1) {
+        const midpoint = Math.floor(rows.length / 2);
+        await this.deliver(rows.slice(0, midpoint));
+        await this.deliver(rows.slice(midpoint));
+        return;
+      }
+      if ([400, 404, 413, 422].includes(response.status)) {
+        this.dropped += rows.length;
+        this.failureLog.report(
+          "client_error",
+          `ingest rejected batch with HTTP ${response.status} against ${this.baseUrl}; dropping this batch (payload-specific, not a process-wide failure)`,
+        );
+        return;
+      }
+      if (response.status !== 202) {
+        this.markTransientFailure(rows.length);
+        this.failureLog.report(
+          "server_error",
+          `ingest request failed with HTTP ${response.status} against ${this.baseUrl}`,
+        );
+        return;
+      }
       this.backoffMs = 1_000;
       this.retryAt = 0;
-    } catch {
-      this.errors += 1;
-      this.dropped += rows.length;
-      this.retryAt = Date.now() + this.backoffMs;
-      this.backoffMs = Math.min(this.backoffMs * 2, 60_000);
+    } catch (error) {
+      this.markTransientFailure(rows.length);
+      this.failureLog.report(
+        "transport_error",
+        `ingest request to ${this.baseUrl} failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 

@@ -34,7 +34,10 @@
   "dependencies": {},
   "devDependencies": {
     "@types/node": "^24.0.0",
-    "typescript": "^5.8.0"
+    "typescript": "^5.8.0",
+    "openai": "^7",
+    "@anthropic-ai/sdk": "^0.30",
+    "@google/genai": "^1"
   },
   "peerDependencies": {
     "@anthropic-ai/sdk": ">=0.30",

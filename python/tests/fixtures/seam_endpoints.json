@@ -1,0 +1,17 @@
+{
+  "openai": [
+    "chat.completions",
+    "chat.completions.parse",
+    "responses",
+    "responses.stream",
+    "responses.parse"
+  ],
+  "anthropic": [
+    "messages",
+    "messages.stream"
+  ],
+  "google": [
+    "models.generate_content",
+    "models.generate_content.stream"
+  ]
+}

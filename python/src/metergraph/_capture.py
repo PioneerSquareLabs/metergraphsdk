@@ -1082,61 +1082,85 @@ def _finish_or_stream(
     return result
 
 
-def wrap(client: Any, *, provider: str | None = None) -> Any:
-    """Patch supported resource methods on an OpenAI, Anthropic, or Google client."""
-    if provider is None:
-        if hasattr(getattr(client, "models", None), "generate_content"):
-            provider = "google"
-        elif hasattr(client, "chat") or hasattr(client, "responses"):
-            provider = "openai"
-        else:
-            provider = "anthropic"
-    seams: list[tuple[Any, str, str]] = []
-    if provider == "google":
-        for models in (
-            getattr(client, "models", None),
-            getattr(getattr(client, "aio", None), "models", None),
-        ):
-            if models is not None:
-                seams.extend(
-                    (
-                        (models, "generate_content", "models.generate_content"),
-                        (
-                            models,
-                            "generate_content_stream",
-                            "models.generate_content.stream",
-                        ),
-                    )
-                )
-    chat = getattr(getattr(client, "chat", None), "completions", None)
-    if chat is not None:
-        seams.append((chat, "create", "chat.completions"))
-        seams.append((chat, "parse", "chat.completions.parse"))
-    beta_chat = getattr(getattr(getattr(client, "beta", None), "chat", None), "completions", None)
-    if beta_chat is not None:
-        seams.append((beta_chat, "parse", "chat.completions.parse"))
-    responses = getattr(client, "responses", None)
-    if responses is not None:
-        seams.extend(
-            (
-                (responses, "create", "responses"),
-                (responses, "stream", "responses.stream"),
-            )
-        )
-    messages = getattr(client, "messages", None)
-    if messages is not None:
-        seams.extend(
-            ((messages, "create", "messages"), (messages, "stream", "messages.stream"))
-        )
-    patched = sum(
-        _patch(owner, method, provider, endpoint) for owner, method, endpoint in seams
-    )
+@dataclass(frozen=True)
+class Seam:
+    """A single instrumentable method, addressed by a dotted attribute path
+    from the client root (e.g. "beta.chat.completions")."""
+
+    path: str
+    method: str
+    endpoint: str
+
+
+OPENAI_SEAMS: tuple[Seam, ...] = (
+    Seam("chat.completions", "create", "chat.completions"),
+    Seam("chat.completions", "parse", "chat.completions.parse"),
+    Seam("beta.chat.completions", "parse", "chat.completions.parse"),
+    Seam("responses", "create", "responses"),
+    Seam("responses", "stream", "responses.stream"),
+    Seam("responses", "parse", "responses.parse"),
+    Seam("beta.responses", "create", "responses"),
+    # Note: client.beta.responses has no .parse method (verified against
+    # openai==2.50.0) — do not add one here without re-verifying first.
+)
+
+ANTHROPIC_SEAMS: tuple[Seam, ...] = (
+    Seam("messages", "create", "messages"),
+    Seam("messages", "stream", "messages.stream"),
+)
+
+GOOGLE_SEAMS: tuple[Seam, ...] = (
+    Seam("models", "generate_content", "models.generate_content"),
+    Seam("models", "generate_content_stream", "models.generate_content.stream"),
+    Seam("aio.models", "generate_content", "models.generate_content"),
+    Seam("aio.models", "generate_content_stream", "models.generate_content.stream"),
+)
+
+SEAM_TABLES: dict[str, tuple[Seam, ...]] = {
+    "openai": OPENAI_SEAMS,
+    "anthropic": ANTHROPIC_SEAMS,
+    "google": GOOGLE_SEAMS,
+}
+
+
+def _detect_provider(client: Any) -> str:
+    if hasattr(getattr(client, "models", None), "generate_content"):
+        return "google"
+    if hasattr(client, "chat") or hasattr(client, "responses"):
+        return "openai"
+    return "anthropic"
+
+
+def _resolve(client: Any, path: str) -> Any:
+    obj = client
+    for part in path.split("."):
+        obj = getattr(obj, part, None)
+        if obj is None:
+            return None
+    return obj
+
+
+def _apply_seams(client: Any, provider: str) -> list[str]:
+    patched: list[str] = []
+    for seam in SEAM_TABLES.get(provider, ()):
+        try:
+            owner = _resolve(client, seam.path)
+        except Exception:
+            continue  # a pathological client property must never break wrap()
+        if owner is not None and _patch(owner, seam.method, provider, seam.endpoint):
+            patched.append(f"{seam.path}.{seam.method}")
+    return patched
+
+
+def _apply_batch_extras(client: Any, provider: str) -> int:
+    patched = 0
     if provider == "openai":
         files = getattr(client, "files", None)
         if files is not None:
             patched += int(_patch_openai_batch_content(files, "content"))
             patched += int(_patch_openai_batch_content(files, "retrieve_content"))
     elif provider == "anthropic":
+        messages = getattr(client, "messages", None)
         batch_owners = [getattr(messages, "batches", None)]
         beta_messages = getattr(getattr(client, "beta", None), "messages", None)
         batch_owners.append(getattr(beta_messages, "batches", None))
@@ -1145,6 +1169,33 @@ def wrap(client: Any, *, provider: str | None = None) -> Any:
             for owner in batch_owners
             if owner is not None
         )
-    if not patched:
-        log.warning("Metergraph found no supported methods on %s client", provider)
+    return patched
+
+
+def wrap(client: Any, *, provider: str | None = None) -> Any:
+    """Patch supported resource methods on an OpenAI, Anthropic, or Google client.
+
+    Never raises: an unrecognized client shape, or an exception while probing
+    it, results in an unmodified, uninstrumented client — not a crash.
+    """
+    try:
+        resolved_provider = provider or _detect_provider(client)
+        patched = _apply_seams(client, resolved_provider)
+        patched_count = len(patched) + _apply_batch_extras(client, resolved_provider)
+        if not patched_count:
+            log.warning(
+                "Metergraph found no supported methods on %s client", resolved_provider
+            )
+        else:
+            log.info(
+                "Metergraph patched %d seam(s) on %s client: %s",
+                patched_count,
+                resolved_provider,
+                ", ".join(patched) or "(batch-only)",
+            )
+    except Exception:
+        log.warning(
+            "Metergraph wrap() failed; client is unmodified and uninstrumented",
+            exc_info=True,
+        )
     return client

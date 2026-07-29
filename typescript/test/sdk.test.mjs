@@ -1,8 +1,15 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 import http from "node:http";
 import test from "node:test";
 import { gunzipSync } from "node:zlib";
+
+import OpenAI from "openai";
+import Anthropic from "@anthropic-ai/sdk";
+import { GoogleGenAI } from "@google/genai";
 
 import {
   DEFAULT_INGEST_URL,
@@ -18,7 +25,9 @@ import {
 } from "../dist/index.js";
 import { CaptureRuntime } from "../dist/capture.js";
 import { MAX_BATCH_BYTES, Transport } from "../dist/transport.js";
-import { setCaptureRuntime } from "../dist/wrap.js";
+import { FailureLogger } from "../dist/failure-log.js";
+import { ConfigPoller } from "../dist/config.js";
+import { setCaptureRuntime, SEAM_TABLES, OPENAI_SEAMS, ANTHROPIC_SEAMS, GOOGLE_SEAMS } from "../dist/wrap.js";
 
 function stubRuntime(rows, options = {}) {
   return new CaptureRuntime(
@@ -414,7 +423,42 @@ test("track attributes rows to the wrapped function name", async (t) => {
   assert.match(rows[3].func, /sdk\.test\.mjs/);
 });
 
-test("wrap patches create and parse on both chat and beta chat", async (t) => {
+test("wrap patches responses.parse and beta.responses.create", async (t) => {
+  const rows = [];
+  setCaptureRuntime(stubRuntime(rows));
+  t.after(() => setCaptureRuntime());
+
+  const parsedResult = {
+    id: "req_responses",
+    usage: { prompt_tokens: 8, completion_tokens: 3 },
+    choices: [{ message: { content: "done" }, finish_reason: "stop" }],
+  };
+  const client = wrap({
+    responses: {
+      async create() { return parsedResult; },
+      async parse() { return parsedResult; },
+    },
+    // client.beta.responses has .create but, as of openai>=4, no .parse —
+    // verified directly against the installed SDK; do not add one here.
+    beta: {
+      responses: {
+        async create() { return parsedResult; },
+      },
+    },
+  }, "openai");
+
+  await client.responses.create({ model: "m" });
+  await client.responses.parse({ model: "m" });
+  await client.beta.responses.create({ model: "m" });
+
+  assert.deepEqual(rows.map((row) => row.endpoint), [
+    "responses",
+    "responses.parse",
+    "responses",
+  ]);
+});
+
+test("wrap patches create and parse on chat.completions", async (t) => {
   const rows = [];
   setCaptureRuntime(stubRuntime(rows));
   t.after(() => setCaptureRuntime());
@@ -424,24 +468,136 @@ test("wrap patches create and parse on both chat and beta chat", async (t) => {
     usage: { prompt_tokens: 8, completion_tokens: 3 },
     choices: [{ message: { content: "done" }, finish_reason: "stop" }],
   };
-  const makeCompletions = () => ({
-    async create() { return parsedResult; },
-    async parse() { return parsedResult; },
-  });
   const client = wrap({
-    chat: { completions: makeCompletions() },
-    beta: { chat: { completions: makeCompletions() } },
+    chat: {
+      completions: {
+        async create() { return parsedResult; },
+        async parse() { return parsedResult; },
+      },
+    },
   }, "openai");
 
   await client.chat.completions.create({ model: "m", messages: [] });
   await client.chat.completions.parse({ model: "m", messages: [] });
-  await client.beta.chat.completions.parse({ model: "m", messages: [] });
 
   assert.deepEqual(rows.map((row) => row.endpoint), [
     "chat.completions",
     "chat.completions.parse",
-    "chat.completions.parse",
   ]);
+});
+
+test("wrap patches beta.chat.completions.parse for openai v4.x-shaped clients", async (t) => {
+  const rows = [];
+  setCaptureRuntime(stubRuntime(rows));
+  t.after(() => setCaptureRuntime());
+
+  const parsedResult = {
+    id: "req_beta_parsed",
+    usage: { prompt_tokens: 8, completion_tokens: 3 },
+    choices: [{ message: { content: "done" }, finish_reason: "stop" }],
+  };
+  const client = wrap({
+    beta: {
+      chat: {
+        completions: {
+          async parse() { return parsedResult; },
+        },
+      },
+    },
+  }, "openai");
+
+  await client.beta.chat.completions.parse({ model: "m", messages: [] });
+
+  assert.deepEqual(rows.map((row) => row.endpoint), ["chat.completions.parse"]);
+});
+
+test("wrap skips one broken seam without affecting others", async (t) => {
+  const rows = [];
+  setCaptureRuntime(stubRuntime(rows));
+  t.after(() => setCaptureRuntime());
+
+  const client = {
+    chat: {
+      completions: {
+        async create() {
+          return {
+            id: "req_ok",
+            usage: { prompt_tokens: 1, completion_tokens: 1 },
+            choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+          };
+        },
+      },
+    },
+  };
+  Object.defineProperty(client, "responses", {
+    get() { throw new Error("boom"); },
+  });
+
+  wrap(client, "openai");
+  await client.chat.completions.create({ model: "m" });
+
+  assert.deepEqual(rows.map((row) => row.endpoint), ["chat.completions"]);
+});
+
+test("wrap captures an unrelated wrapped client invoked synchronously nested inside another", async (t) => {
+  const rows = [];
+  setCaptureRuntime(stubRuntime(rows));
+  t.after(() => setCaptureRuntime());
+
+  const resultA = {
+    id: "req_a",
+    usage: { prompt_tokens: 1, completion_tokens: 1 },
+    choices: [{ message: { content: "a" }, finish_reason: "stop" }],
+  };
+  const resultB = {
+    id: "req_b",
+    usage: { prompt_tokens: 1, completion_tokens: 1 },
+    choices: [{ message: { content: "b" }, finish_reason: "stop" }],
+  };
+
+  // Two independent, unrelated wrapped clients — not one delegating into
+  // the other as an implementation detail (that's the parse -> create
+  // case the reentrancy guard exists for). Client A's own "real"
+  // implementation happens to call client B synchronously as part of its
+  // own work; both are genuinely separate billable requests and must both
+  // be captured. The reentrancy guard must be scoped to the specific
+  // owner object being re-entered, not global, or this second, unrelated
+  // call gets silently swallowed.
+  const clientB = wrap({
+    chat: { completions: { async create() { return resultB; } } },
+  }, "openai");
+  const clientA = wrap({
+    chat: {
+      completions: {
+        async create() {
+          await clientB.chat.completions.create({ model: "m", messages: [] });
+          return resultA;
+        },
+      },
+    },
+  }, "openai");
+
+  await clientA.chat.completions.create({ model: "m", messages: [] });
+
+  assert.deepEqual(rows.map((row) => row.endpoint), ["chat.completions", "chat.completions"]);
+});
+
+test("wrap never throws even if client attribute access throws", async (t) => {
+  const client = {};
+  Object.defineProperty(client, "responses", {
+    get() { throw new Error("boom: not ready yet"); },
+  });
+
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(" "));
+  try {
+    const result = wrap(client); // no provider override: exercises auto-detection
+    assert.equal(result, client);
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.ok(warnings.some((w) => w.includes("wrap() failed")));
 });
 
 test("transport splits wire batches at 512 KiB", async (t) => {
@@ -476,4 +632,267 @@ test("transport splits wire batches at 512 KiB", async (t) => {
   assert.ok(wireLengths.length > 1);
   assert.ok(Math.max(...wireLengths) <= MAX_BATCH_BYTES);
   assert.equal(deliveredRows, 6);
+});
+
+test("FailureLogger logs first occurrence and suppresses repeats", () => {
+  const messages = [];
+  let now = 0;
+  const logger = new FailureLogger(60_000, () => now, (m) => messages.push(m));
+  logger.report("transport_error", "boom 1");
+  now = 10_000;
+  logger.report("transport_error", "boom 2");
+  now = 20_000;
+  logger.report("transport_error", "boom 3");
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], /boom 1/);
+});
+
+test("FailureLogger reports suppressed count after quiet window", () => {
+  const messages = [];
+  let now = 0;
+  const logger = new FailureLogger(60_000, () => now, (m) => messages.push(m));
+  logger.report("transport_error", "boom 1");
+  now = 10_000;
+  logger.report("transport_error", "boom 2");
+  now = 70_000;
+  logger.report("transport_error", "boom 3");
+  assert.equal(messages.length, 2);
+  assert.match(messages[1], /1 more suppressed/);
+  assert.match(messages[1], /boom 3/);
+});
+
+test("FailureLogger tracks kinds independently", () => {
+  const messages = [];
+  let now = 0;
+  const logger = new FailureLogger(60_000, () => now, (m) => messages.push(m));
+  logger.report("transport_error", "t1");
+  logger.report("client_error", "c1");
+  assert.equal(messages.length, 2);
+});
+
+test("FailureLogger bounds log volume under sustained failure", () => {
+  const messages = [];
+  let now = 0;
+  const logger = new FailureLogger(60_000, () => now, (m) => messages.push(m));
+  for (let i = 0; i < 1000; i += 1) logger.report("transport_error", "boom");
+  assert.equal(messages.length, 1);
+});
+
+test("transport auth failure is fatal and logged once", async (t) => {
+  const server = http.createServer((request, response) => {
+    request.resume();
+    response.writeHead(401);
+    response.end();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const address = server.address();
+
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(" "));
+  try {
+    const transport = new Transport("mg_test", `http://127.0.0.1:${address.port}`, { mode: "buffered" });
+    transport.enqueue({ payload: "one" });
+    await transport.flush(2000);
+    transport.enqueue({ payload: "two" });
+    await transport.flush(2000);
+  } finally {
+    console.warn = originalWarn;
+  }
+  const authWarnings = warnings.filter((w) => w.includes("authentication failed"));
+  assert.equal(authWarnings.length, 1);
+});
+
+test("transport permanent client error drops the batch but transport stays alive", async (t) => {
+  let attempts = 0;
+  const server = http.createServer((request, response) => {
+    attempts += 1;
+    request.resume();
+    response.writeHead(400);
+    response.end();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const address = server.address();
+
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(" "));
+  try {
+    const transport = new Transport("mg_test", `http://127.0.0.1:${address.port}`, { mode: "buffered" });
+    transport.enqueue({ payload: "one" });
+    await transport.flush(2000);
+    transport.enqueue({ payload: "two" });
+    await transport.flush(2000);
+  } finally {
+    console.warn = originalWarn;
+  }
+  // A 400 is specific to the rejected batch, not the whole connection: the
+  // transport must still attempt the second, unrelated batch.
+  assert.equal(attempts, 2);
+  assert.ok(warnings.some((w) => w.includes("HTTP 400")));
+});
+
+test("transport 413 splits an oversized batch and delivers the pieces", async (t) => {
+  const receivedBatches = [];
+  const server = http.createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    let body = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
+    if (request.headers["content-encoding"] === "gzip") body = gunzipSync(body);
+    const rows = JSON.parse(body.toString()).rows;
+    receivedBatches.push(rows.length);
+    if (rows.length > 1) {
+      response.writeHead(413);
+    } else {
+      response.writeHead(202);
+    }
+    response.end();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const address = server.address();
+
+  const transport = new Transport("mg_test", `http://127.0.0.1:${address.port}`, { mode: "buffered" });
+  for (let i = 0; i < 4; i += 1) transport.enqueue({ index: i });
+  assert.equal(await transport.flush(10_000), true);
+
+  assert.ok(receivedBatches.some((size) => size > 1)); // a multi-row batch hit 413 at least once
+  assert.equal(receivedBatches.filter((size) => size === 1).length, 4); // every row eventually delivered on its own
+});
+
+test("transport server error retries and is not fatal", async (t) => {
+  let attempts = 0;
+  const server = http.createServer((request, response) => {
+    request.resume();
+    attempts += 1;
+    response.writeHead(500);
+    response.end();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const address = server.address();
+
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(" "));
+  try {
+    const transport = new Transport("mg_test", `http://127.0.0.1:${address.port}`, { mode: "buffered" });
+    transport.enqueue({ payload: "one" });
+    await transport.flush(2000);
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(attempts, 1);
+  assert.ok(warnings.some((w) => w.includes("HTTP 500")));
+});
+
+test("config poller stops polling and logs once on auth failure", async (t) => {
+  let attempts = 0;
+  const server = http.createServer((request, response) => {
+    attempts += 1;
+    request.resume();
+    response.writeHead(401);
+    response.end();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const address = server.address();
+
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(" "));
+  let poller;
+  try {
+    poller = new ConfigPoller("mg_test", `http://127.0.0.1:${address.port}`, 60_000, 120_000);
+    await poller.ready;
+    await poller.poll();
+    await poller.poll();
+  } finally {
+    console.warn = originalWarn;
+    poller?.stop();
+  }
+  assert.equal(attempts, 1); // must stop after the first 401, not keep polling
+  const authWarnings = warnings.filter((w) => w.includes("authentication failed"));
+  assert.equal(authWarnings.length, 1);
+});
+
+test("config poller logs generic failures via FailureLogger", async (t) => {
+  const server = http.createServer((request, response) => {
+    request.resume();
+    response.writeHead(500);
+    response.end();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const address = server.address();
+
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(" "));
+  let poller;
+  try {
+    poller = new ConfigPoller("mg_test", `http://127.0.0.1:${address.port}`, 60_000, 120_000);
+    const ok = await poller.poll();
+    assert.equal(ok, false);
+  } finally {
+    console.warn = originalWarn;
+    poller?.stop();
+  }
+  assert.ok(warnings.some((w) => w.includes("config poll to")));
+});
+
+function resolveSeam(client, path) {
+  let obj = client;
+  for (const part of path.split(".")) {
+    obj = obj?.[part];
+    if (obj == null) return undefined;
+  }
+  return obj;
+}
+
+function missingSeams(client, seams) {
+  const missing = [];
+  for (const seam of seams) {
+    const owner = resolveSeam(client, seam.path);
+    if (owner == null || typeof owner[seam.method] !== "function") {
+      missing.push(`${seam.path}.${seam.method}`);
+    }
+  }
+  return missing;
+}
+
+test("openai seams exist on the real SDK", () => {
+  const client = new OpenAI({ apiKey: "test" });
+  // beta.chat.completions.parse is intentionally v4.x-only (see the comment
+  // on OPENAI_SEAMS and metergraph-internal#9) and is expected to be absent
+  // on the latest openai package this test is pinned to — exempt it from
+  // the "everything must exist" check rather than asserting it's missing.
+  const seams = OPENAI_SEAMS.filter(
+    (seam) => !(seam.path === "beta.chat.completions" && seam.method === "parse"),
+  );
+  assert.deepEqual(missingSeams(client, seams), []);
+});
+
+test("anthropic seams exist on the real SDK", () => {
+  const client = new Anthropic({ apiKey: "test" });
+  assert.deepEqual(missingSeams(client, ANTHROPIC_SEAMS), []);
+});
+
+test("google seams exist on the real SDK", () => {
+  const client = new GoogleGenAI({ apiKey: "test" });
+  assert.deepEqual(missingSeams(client, GOOGLE_SEAMS), []);
+});
+
+test("typescript seam endpoints match shared fixture", () => {
+  const fixturePath = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..", "..", "python", "tests", "fixtures", "seam_endpoints.json",
+  );
+  const expected = JSON.parse(readFileSync(fixturePath, "utf8"));
+  for (const [provider, endpoints] of Object.entries(expected)) {
+    const actual = [...new Set(SEAM_TABLES[provider].map((seam) => seam.endpoint))].sort();
+    assert.deepEqual(actual, [...endpoints].sort(), provider);
+  }
 });

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import logging
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -12,7 +13,8 @@ from types import SimpleNamespace
 import metergraph
 from metergraph import _capture
 from metergraph._capture import Options, Runtime
-from metergraph._config import choose_model
+from metergraph._config import ConfigPoller, choose_model
+from metergraph._failure_log import FailureLogger
 from metergraph._template import template_hash
 from metergraph._transport import Writer
 
@@ -33,6 +35,18 @@ class Rows:
 
 def test_hosted_default_is_https():
     assert metergraph.DEFAULT_INGEST_URL == "https://d2xus7mp8zdv6t.cloudfront.net"
+
+
+def test_python_seam_endpoints_match_shared_fixture():
+    fixture_path = Path(__file__).parent / "fixtures" / "seam_endpoints.json"
+    expected = json.loads(fixture_path.read_text())
+    actual = {
+        "openai": sorted({seam.endpoint for seam in _capture.OPENAI_SEAMS}),
+        "anthropic": sorted({seam.endpoint for seam in _capture.ANTHROPIC_SEAMS}),
+        "google": sorted({seam.endpoint for seam in _capture.GOOGLE_SEAMS}),
+    }
+    for provider, endpoints in expected.items():
+        assert actual[provider] == sorted(endpoints), provider
 
 
 def response(text="done"):
@@ -142,6 +156,90 @@ def test_wrap_patches_create_and_parse_on_both_chat_and_beta_chat(tmp_path):
         "chat.completions.parse",
     ]
     _capture.set_runtime(None)
+
+
+def test_wrap_patches_responses_parse_and_beta_responses_create(tmp_path):
+    rows = Rows()
+    _capture.set_runtime(
+        Runtime(rows, Options(app_root=str(Path(__file__).parents[1])))
+    )
+
+    class Responses:
+        def create(self, **kwargs):
+            return response()
+
+        def parse(self, **kwargs):
+            return response()
+
+    class BetaResponses:
+        # client.beta.responses has .create but, as of openai>=1.x, no .parse —
+        # verified directly against the installed SDK; do not add a .parse here.
+        def create(self, **kwargs):
+            return response()
+
+    client = SimpleNamespace(
+        responses=Responses(),
+        beta=SimpleNamespace(responses=BetaResponses()),
+    )
+    metergraph.wrap(client, provider="openai")
+
+    client.responses.create(model="gpt-test")
+    client.responses.parse(model="gpt-test")
+    client.beta.responses.create(model="gpt-test")
+
+    assert [row["endpoint"] for row in rows.rows] == [
+        "responses",
+        "responses.parse",
+        "responses",
+    ]
+    _capture.set_runtime(None)
+
+
+def test_wrap_skips_missing_nested_attribute_without_raising():
+    client = SimpleNamespace(beta=SimpleNamespace())  # beta.responses does not exist
+    result = metergraph.wrap(client, provider="openai")
+    assert result is client
+
+
+def test_wrap_skips_one_broken_seam_without_affecting_others(tmp_path):
+    rows = Rows()
+    _capture.set_runtime(
+        Runtime(rows, Options(app_root=str(Path(__file__).parents[1])))
+    )
+
+    class Completions:
+        def create(self, **kwargs):
+            return response()
+
+    class Chat:
+        completions = Completions()
+
+    class Client:
+        chat = Chat()
+
+        @property
+        def responses(self):
+            raise RuntimeError("boom: not ready yet")
+
+    client = Client()
+    metergraph.wrap(client, provider="openai")
+    client.chat.completions.create(model="gpt-test")
+
+    assert [row["endpoint"] for row in rows.rows] == ["chat.completions"]
+    _capture.set_runtime(None)
+
+
+def test_wrap_never_raises_even_if_client_attribute_access_raises(caplog):
+    class Explosive:
+        @property
+        def responses(self):
+            raise RuntimeError("boom: not ready yet")
+
+    client = Explosive()
+    with caplog.at_level(logging.WARNING, logger="metergraph"):
+        result = metergraph.wrap(client)  # no provider override: exercises auto-detection
+    assert result is client
+    assert any("wrap() failed" in r.getMessage() for r in caplog.records)
 
 
 def gemini_response(text="gemini done"):
@@ -757,6 +855,31 @@ def test_canary_assignment_is_sticky_and_fail_open():
     assert choose_model("route-a", "fallback", "session-1", None) == "fallback"
 
 
+def test_config_poller_logs_generic_failures_via_failure_logger(caplog):
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(500)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    poller = ConfigPoller(
+        "mg_test", f"http://127.0.0.1:{server.server_port}",
+        poll_seconds=60, hard_ttl_seconds=120,
+    )
+    with caplog.at_level(logging.WARNING, logger="metergraph"):
+        ok = poller.poll_once()
+    poller.stop()
+    server.shutdown()
+
+    assert ok is False
+    assert any("config poll to" in r.getMessage() for r in caplog.records)
+
+
 def test_record_outcome_uses_the_async_content_free_channel(monkeypatch):
     rows = Rows()
     monkeypatch.setattr(metergraph, "_writer", rows)
@@ -858,3 +981,173 @@ def test_writer_splits_wire_batches_at_512_kib():
     assert len(wire_lengths) > 1
     assert max(wire_lengths) <= 512 * 1024
     assert sorted(row["index"] for row in delivered_rows) == list(range(6))
+
+
+def test_failure_logger_logs_first_occurrence_and_suppresses_repeats(caplog):
+    now = [0.0]
+    logger = FailureLogger(quiet_seconds=60.0, clock=lambda: now[0])
+    with caplog.at_level(logging.WARNING, logger="metergraph"):
+        logger.report("transport_error", "boom 1")
+        now[0] = 10.0
+        logger.report("transport_error", "boom 2")
+        now[0] = 20.0
+        logger.report("transport_error", "boom 3")
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == 1
+    assert "boom 1" in messages[0]
+
+
+def test_failure_logger_reports_suppressed_count_after_quiet_window(caplog):
+    now = [0.0]
+    logger = FailureLogger(quiet_seconds=60.0, clock=lambda: now[0])
+    with caplog.at_level(logging.WARNING, logger="metergraph"):
+        logger.report("transport_error", "boom 1")
+        now[0] = 10.0
+        logger.report("transport_error", "boom 2")  # suppressed
+        now[0] = 70.0
+        logger.report("transport_error", "boom 3")
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == 2
+    assert "1 more suppressed" in messages[1]
+    assert "boom 3" in messages[1]
+
+
+def test_failure_logger_tracks_kinds_independently(caplog):
+    now = [0.0]
+    logger = FailureLogger(quiet_seconds=60.0, clock=lambda: now[0])
+    with caplog.at_level(logging.WARNING, logger="metergraph"):
+        logger.report("transport_error", "t1")
+        logger.report("client_error", "c1")
+    assert len(caplog.records) == 2
+
+
+def test_failure_logger_bounds_log_volume_under_sustained_failure(caplog):
+    now = [0.0]
+    logger = FailureLogger(quiet_seconds=60.0, clock=lambda: now[0])
+    with caplog.at_level(logging.WARNING, logger="metergraph"):
+        for _ in range(1000):
+            logger.report("transport_error", "boom")
+    assert len(caplog.records) == 1
+
+
+def test_writer_auth_failure_is_fatal_and_logged_once(caplog):
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(401)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    writer = Writer("mg_test", f"http://127.0.0.1:{server.server_port}", flush_seconds=5)
+    with caplog.at_level(logging.WARNING, logger="metergraph"):
+        writer.enqueue({"payload": "one"})
+        writer.flush(2)
+        writer.enqueue({"payload": "two"})
+        writer.flush(2)
+    writer.shutdown()
+    server.shutdown()
+
+    auth_warnings = [r for r in caplog.records if "authentication failed" in r.getMessage()]
+    assert len(auth_warnings) == 1
+    assert writer.dropped >= 1
+
+
+def test_writer_permanent_client_error_drops_batch_but_writer_stays_alive(caplog):
+    attempts = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            attempts.append(1)
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(400)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    writer = Writer("mg_test", f"http://127.0.0.1:{server.server_port}", flush_seconds=5)
+    with caplog.at_level(logging.WARNING, logger="metergraph"):
+        writer.enqueue({"payload": "one"})
+        writer.flush(2)
+        writer.enqueue({"payload": "two"})
+        writer.flush(2)
+    writer.shutdown()
+    server.shutdown()
+
+    # A 400 is specific to the rejected batch, not the whole connection: the
+    # writer must still attempt the second, unrelated batch.
+    assert len(attempts) == 2
+    assert writer._fatal is False
+    assert writer.dropped >= 2
+    assert any("HTTP 400" in r.getMessage() for r in caplog.records)
+
+
+def test_writer_413_splits_oversized_batch_and_delivers_the_pieces():
+    received_batches = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            if self.headers.get("Content-Encoding") == "gzip":
+                body = gzip.decompress(body)
+            rows = json.loads(body)["rows"]
+            received_batches.append(len(rows))
+            if len(rows) > 1:
+                self.send_response(413)
+            else:
+                self.send_response(202)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    writer = Writer("mg_test", f"http://127.0.0.1:{server.server_port}", flush_seconds=5)
+    for i in range(4):
+        writer.enqueue({"index": i})
+    assert writer.flush(10)
+    writer.shutdown()
+    server.shutdown()
+
+    assert any(size > 1 for size in received_batches)  # a multi-row batch hit 413 at least once
+    assert received_batches.count(1) == 4  # every row was eventually delivered as its own batch
+    assert writer.dropped == 0
+    assert writer._fatal is False
+
+
+def test_writer_server_error_retries_and_is_not_fatal(caplog):
+    attempts = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            attempts.append(1)
+            self.send_response(500)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    writer = Writer("mg_test", f"http://127.0.0.1:{server.server_port}", flush_seconds=5)
+    with caplog.at_level(logging.WARNING, logger="metergraph"):
+        writer.enqueue({"payload": "one"})
+        writer.flush(2)
+    writer.shutdown()
+    server.shutdown()
+
+    assert len(attempts) == 1
+    assert writer._fatal is False
+    assert any("HTTP 500" in r.getMessage() for r in caplog.records)

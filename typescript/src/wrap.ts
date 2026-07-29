@@ -5,6 +5,15 @@ type AnyRecord = Record<PropertyKey, any>;
 
 let runtime: CaptureRuntime | undefined;
 const seenBatchItems = new Set<string>();
+// Tracks which resource *owners* (e.g. a specific chat.completions instance)
+// currently have a wrapped call in flight synchronously, so a delegating
+// method (like openai's .parse() calling .create() on the same owner
+// before any await) can be told apart from an unrelated wrapped call that
+// merely happens to be nested inside another's synchronous execution.
+// Scoped per-owner, not global, so two independent clients invoked in the
+// same synchronous window are never mistaken for one delegating into the
+// other.
+const reentrantOwners = new WeakSet<object>();
 
 export function setCaptureRuntime(value?: CaptureRuntime): void {
   runtime = value;
@@ -303,6 +312,23 @@ function patch(owner: AnyRecord | undefined, method: string, provider: string, e
   const wrapped = function (this: unknown, ...args: unknown[]) {
     const capture = runtime;
     if (!capture) return original.apply(owner, args);
+    if (reentrantOwners.has(owner)) {
+      // Some SDK methods delegate to another already-wrapped method on the
+      // *same owner* synchronously as part of building their return value
+      // (e.g. openai's chat.completions.parse calls .create(...) — on the
+      // same chat.completions instance — internally, then immediately
+      // chains its proprietary ._thenUnwrap() onto the result). Capturing
+      // this nested call too would both double-count a single underlying
+      // request and, worse, replace .create()'s return value with a plain
+      // Promise that lacks ._thenUnwrap, breaking the outer method
+      // entirely. Pass straight through untouched.
+      //
+      // Scoped to this specific owner (not a global flag): an unrelated
+      // wrapped call — a different resource, or a different client's
+      // instance entirely — invoked synchronously inside this one's
+      // execution must still be captured independently.
+      return original.apply(owner, args);
+    }
     const incoming = requestFrom(args);
     const patchUsage = typeof process === "undefined"
       || process.env.METERGRAPH_PATCH_STREAM_USAGE !== "0";
@@ -317,11 +343,14 @@ function patch(owner: AnyRecord | undefined, method: string, provider: string, e
     }
     const state = capture.start(provider, endpoint, requestFrom(args), new Error().stack);
     let result: unknown;
+    reentrantOwners.add(owner);
     try {
       result = original.apply(owner, args);
     } catch (error) {
       capture.finish(state, undefined, { error });
       throw error;
+    } finally {
+      reentrantOwners.delete(owner);
     }
     const complete = (response: any) => {
       const request = requestFrom(args);
@@ -345,32 +374,109 @@ function patch(owner: AnyRecord | undefined, method: string, provider: string, e
   return true;
 }
 
-export function wrap<T extends AnyRecord>(client: T, provider?: "openai" | "anthropic" | "google"): T {
-  const name = provider ?? (client.models?.generateContent
-    ? "google"
-    : client.chat || client.responses ? "openai" : "anthropic");
-  let patched = 0;
-  if (name === "google") {
-    patched += Number(patch(client.models, "generateContent", name, "models.generate_content"));
-    patched += Number(patch(client.models, "generateContentStream", name, "models.generate_content.stream"));
+export interface Seam {
+  path: string;
+  method: string;
+  endpoint: string;
+}
+
+export const OPENAI_SEAMS: Seam[] = [
+  { path: "chat.completions", method: "create", endpoint: "chat.completions" },
+  { path: "chat.completions", method: "parse", endpoint: "chat.completions.parse" },
+  // beta.chat.completions.parse is v4.x-only — removed at the v4->v5
+  // boundary when .parse() moved to the stable chat.completions/responses
+  // namespaces (see metergraph-internal#9). Kept here anyway: a seam that
+  // doesn't exist on the installed client resolves to undefined and is
+  // silently skipped (see resolveSeam/applySeams below), so keeping this
+  // entry costs nothing on openai>=5 and restores real instrumentation for
+  // any consumer still on openai v4.
+  { path: "beta.chat.completions", method: "parse", endpoint: "chat.completions.parse" },
+  { path: "responses", method: "create", endpoint: "responses" },
+  { path: "responses", method: "stream", endpoint: "responses.stream" },
+  { path: "responses", method: "parse", endpoint: "responses.parse" },
+  { path: "beta.responses", method: "create", endpoint: "responses" },
+  // Note: as of openai (npm) v7.x, client.beta.responses has no .parse
+  // method. This table's reality-check test is pinned to latest openai, so
+  // beta.chat.completions.parse above is exempted from that check since it
+  // will correctly show as absent there — see the test for details.
+];
+
+export const ANTHROPIC_SEAMS: Seam[] = [
+  { path: "messages", method: "create", endpoint: "messages" },
+  { path: "messages", method: "stream", endpoint: "messages.stream" },
+];
+
+export const GOOGLE_SEAMS: Seam[] = [
+  { path: "models", method: "generateContent", endpoint: "models.generate_content" },
+  { path: "models", method: "generateContentStream", endpoint: "models.generate_content.stream" },
+  // Note: unlike the Python google-genai client, the JS/TS @google/genai
+  // client has no .aio namespace at all (verified directly against the
+  // installed package — client.aio is undefined; JS methods are already
+  // Promise-based) — do not add aio.models entries here.
+];
+
+export const SEAM_TABLES: Record<string, Seam[]> = {
+  openai: OPENAI_SEAMS,
+  anthropic: ANTHROPIC_SEAMS,
+  google: GOOGLE_SEAMS,
+};
+
+function detectProvider(client: AnyRecord): "openai" | "anthropic" | "google" {
+  if (client.models?.generateContent) return "google";
+  if (client.chat || client.responses) return "openai";
+  return "anthropic";
+}
+
+function resolveSeam(client: AnyRecord, path: string): AnyRecord | undefined {
+  let obj: any = client;
+  for (const part of path.split(".")) {
+    obj = obj?.[part];
+    if (obj === undefined || obj === null) return undefined;
   }
-  patched += Number(patch(client.chat?.completions, "create", name, "chat.completions"));
-  patched += Number(patch(client.chat?.completions, "parse", name, "chat.completions.parse"));
-  patched += Number(
-    patch(client.beta?.chat?.completions, "parse", name, "chat.completions.parse"),
-  );
-  patched += Number(patch(client.responses, "create", name, "responses"));
-  patched += Number(patch(client.responses, "stream", name, "responses.stream"));
-  patched += Number(patch(client.messages, "create", name, "messages"));
-  patched += Number(patch(client.messages, "stream", name, "messages.stream"));
-  if (name === "openai") {
+  return obj;
+}
+
+function applySeams(client: AnyRecord, provider: string): string[] {
+  const patched: string[] = [];
+  for (const seam of SEAM_TABLES[provider] ?? []) {
+    let owner: AnyRecord | undefined;
+    try {
+      owner = resolveSeam(client, seam.path);
+    } catch {
+      continue; // a pathological client property must never break wrap()
+    }
+    if (owner !== undefined && patch(owner, seam.method, provider, seam.endpoint)) {
+      patched.push(`${seam.path}.${seam.method}`);
+    }
+  }
+  return patched;
+}
+
+function applyBatchExtras(client: AnyRecord, provider: string): number {
+  let patched = 0;
+  if (provider === "openai") {
     patched += Number(patchOpenAIBatchContent(client.files, "content"));
     patched += Number(patchOpenAIBatchContent(client.files, "retrieveContent"));
-  } else if (name === "anthropic") {
+  } else if (provider === "anthropic") {
     patched += Number(patchAnthropicBatchResults(client.messages?.batches));
     patched += Number(patchAnthropicBatchResults(client.beta?.messages?.batches));
   }
-  if (!patched) console.warn(`Metergraph found no supported methods on ${name} client`);
+  return patched;
+}
+
+export function wrap<T extends AnyRecord>(client: T, provider?: "openai" | "anthropic" | "google"): T {
+  try {
+    const name = provider ?? detectProvider(client);
+    const patched = applySeams(client, name);
+    const patchedCount = patched.length + applyBatchExtras(client, name);
+    if (!patchedCount) {
+      console.warn(`Metergraph found no supported methods on ${name} client`);
+    } else {
+      console.info(`Metergraph patched ${patchedCount} seam(s) on ${name} client: ${patched.join(", ") || "(batch-only)"}`);
+    }
+  } catch (error) {
+    console.warn("Metergraph wrap() failed; client is unmodified and uninstrumented", error);
+  }
   return client;
 }
 
