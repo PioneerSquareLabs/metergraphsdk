@@ -354,16 +354,22 @@ export interface Seam {
 export const OPENAI_SEAMS: Seam[] = [
   { path: "chat.completions", method: "create", endpoint: "chat.completions" },
   { path: "chat.completions", method: "parse", endpoint: "chat.completions.parse" },
+  // beta.chat.completions.parse is v4.x-only — removed at the v4->v5
+  // boundary when .parse() moved to the stable chat.completions/responses
+  // namespaces (see metergraph-internal#9). Kept here anyway: a seam that
+  // doesn't exist on the installed client resolves to undefined and is
+  // silently skipped (see resolveSeam/applySeams below), so keeping this
+  // entry costs nothing on openai>=5 and restores real instrumentation for
+  // any consumer still on openai v4.
+  { path: "beta.chat.completions", method: "parse", endpoint: "chat.completions.parse" },
   { path: "responses", method: "create", endpoint: "responses" },
   { path: "responses", method: "stream", endpoint: "responses.stream" },
   { path: "responses", method: "parse", endpoint: "responses.parse" },
   { path: "beta.responses", method: "create", endpoint: "responses" },
   // Note: as of openai (npm) v7.x, client.beta.responses has no .parse
-  // method, and client.beta.chat.completions no longer exists at all —
-  // that was v4.x-only and was removed at the v4->v5 boundary when
-  // .parse() moved to the stable chat.completions/responses namespaces.
-  // This table currently targets latest openai only; see
-  // metergraph-internal#9 for proper multi-version support.
+  // method. This table's reality-check test is pinned to latest openai, so
+  // beta.chat.completions.parse above is exempted from that check since it
+  // will correctly show as absent there — see the test for details.
 ];
 
 export const ANTHROPIC_SEAMS: Seam[] = [
