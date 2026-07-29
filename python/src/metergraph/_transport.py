@@ -146,12 +146,17 @@ class Writer:
                 log.warning(
                     "Metergraph authentication failed; capture disabled for this process"
                 )
+            elif exc.code == 413 and len(rows) > 1:
+                midpoint = len(rows) // 2
+                left = self._deliver(rows[:midpoint])
+                right = self._deliver(rows[midpoint:])
+                return left and right
             elif exc.code in (400, 404, 413, 422):
-                self._fatal = True
+                self._dropped += len(rows)
                 self._failure_log.report(
                     "client_error",
                     f"ingest rejected batch with HTTP {exc.code} against {self._url}; "
-                    "capture disabled for this process (retrying will not help)",
+                    "dropping this batch (payload-specific, not a process-wide failure)",
                 )
             else:
                 self._failed(len(rows))

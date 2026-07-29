@@ -1057,7 +1057,7 @@ def test_writer_auth_failure_is_fatal_and_logged_once(caplog):
     assert writer.dropped >= 1
 
 
-def test_writer_permanent_client_error_is_fatal_and_does_not_retry(caplog):
+def test_writer_permanent_client_error_drops_batch_but_writer_stays_alive(caplog):
     attempts = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -1082,8 +1082,47 @@ def test_writer_permanent_client_error_is_fatal_and_does_not_retry(caplog):
     writer.shutdown()
     server.shutdown()
 
-    assert len(attempts) == 1  # fatal after the first 400: second enqueue must not retry
+    # A 400 is specific to the rejected batch, not the whole connection: the
+    # writer must still attempt the second, unrelated batch.
+    assert len(attempts) == 2
+    assert writer._fatal is False
+    assert writer.dropped >= 2
     assert any("HTTP 400" in r.getMessage() for r in caplog.records)
+
+
+def test_writer_413_splits_oversized_batch_and_delivers_the_pieces():
+    received_batches = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            if self.headers.get("Content-Encoding") == "gzip":
+                body = gzip.decompress(body)
+            rows = json.loads(body)["rows"]
+            received_batches.append(len(rows))
+            if len(rows) > 1:
+                self.send_response(413)
+            else:
+                self.send_response(202)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    writer = Writer("mg_test", f"http://127.0.0.1:{server.server_port}", flush_seconds=5)
+    for i in range(4):
+        writer.enqueue({"index": i})
+    assert writer.flush(10)
+    writer.shutdown()
+    server.shutdown()
+
+    assert any(size > 1 for size in received_batches)  # a multi-row batch hit 413 at least once
+    assert received_batches.count(1) == 4  # every row was eventually delivered as its own batch
+    assert writer.dropped == 0
+    assert writer._fatal is False
 
 
 def test_writer_server_error_retries_and_is_not_fatal(caplog):
