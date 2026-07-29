@@ -453,6 +453,34 @@ test("wrap patches responses.parse and beta.responses.create", async (t) => {
   ]);
 });
 
+test("wrap patches create and parse on chat.completions", async (t) => {
+  const rows = [];
+  setCaptureRuntime(stubRuntime(rows));
+  t.after(() => setCaptureRuntime());
+
+  const parsedResult = {
+    id: "req_parsed",
+    usage: { prompt_tokens: 8, completion_tokens: 3 },
+    choices: [{ message: { content: "done" }, finish_reason: "stop" }],
+  };
+  const client = wrap({
+    chat: {
+      completions: {
+        async create() { return parsedResult; },
+        async parse() { return parsedResult; },
+      },
+    },
+  }, "openai");
+
+  await client.chat.completions.create({ model: "m", messages: [] });
+  await client.chat.completions.parse({ model: "m", messages: [] });
+
+  assert.deepEqual(rows.map((row) => row.endpoint), [
+    "chat.completions",
+    "chat.completions.parse",
+  ]);
+});
+
 test("wrap skips one broken seam without affecting others", async (t) => {
   const rows = [];
   setCaptureRuntime(stubRuntime(rows));
