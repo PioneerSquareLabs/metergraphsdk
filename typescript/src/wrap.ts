@@ -353,14 +353,13 @@ export interface Seam {
 
 export const OPENAI_SEAMS: Seam[] = [
   { path: "chat.completions", method: "create", endpoint: "chat.completions" },
-  { path: "chat.completions", method: "parse", endpoint: "chat.completions.parse" },
   { path: "beta.chat.completions", method: "parse", endpoint: "chat.completions.parse" },
   { path: "responses", method: "create", endpoint: "responses" },
   { path: "responses", method: "stream", endpoint: "responses.stream" },
   { path: "responses", method: "parse", endpoint: "responses.parse" },
-  { path: "beta.responses", method: "create", endpoint: "responses" },
-  // Note: client.beta.responses has no .parse method (verified against
-  // openai==2.47.0) — do not add one here without re-verifying first.
+  // Note: client.chat.completions has no .parse method (verified against
+  // openai>=4); that method lives on client.responses.parse. Similarly,
+  // client.beta.responses does not exist (verified against openai>=4).
 ];
 
 export const ANTHROPIC_SEAMS: Seam[] = [

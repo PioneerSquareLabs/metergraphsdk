@@ -4,6 +4,10 @@ import http from "node:http";
 import test from "node:test";
 import { gunzipSync } from "node:zlib";
 
+import OpenAI from "openai";
+import Anthropic from "@anthropic-ai/sdk";
+import { GoogleGenAI } from "@google/genai";
+
 import {
   DEFAULT_INGEST_URL,
   flush,
@@ -18,7 +22,7 @@ import {
 } from "../dist/index.js";
 import { CaptureRuntime } from "../dist/capture.js";
 import { MAX_BATCH_BYTES, Transport } from "../dist/transport.js";
-import { setCaptureRuntime } from "../dist/wrap.js";
+import { setCaptureRuntime, OPENAI_SEAMS, ANTHROPIC_SEAMS, GOOGLE_SEAMS } from "../dist/wrap.js";
 
 function stubRuntime(rows, options = {}) {
   return new CaptureRuntime(
@@ -414,7 +418,7 @@ test("track attributes rows to the wrapped function name", async (t) => {
   assert.match(rows[3].func, /sdk\.test\.mjs/);
 });
 
-test("wrap patches responses.parse and beta.responses.create", async (t) => {
+test("wrap patches responses.parse", async (t) => {
   const rows = [];
   setCaptureRuntime(stubRuntime(rows));
   t.after(() => setCaptureRuntime());
@@ -429,23 +433,17 @@ test("wrap patches responses.parse and beta.responses.create", async (t) => {
       async create() { return parsedResult; },
       async parse() { return parsedResult; },
     },
-    // client.beta.responses has .create but, as of openai>=4, no .parse —
-    // verified directly against the installed SDK; do not add one here.
-    beta: {
-      responses: {
-        async create() { return parsedResult; },
-      },
-    },
+    // Note: client.beta.responses does not exist (verified directly
+    // against the installed SDK as of openai>=4).
+    beta: {},
   }, "openai");
 
   await client.responses.create({ model: "m" });
   await client.responses.parse({ model: "m" });
-  await client.beta.responses.create({ model: "m" });
 
   assert.deepEqual(rows.map((row) => row.endpoint), [
     "responses",
     "responses.parse",
-    "responses",
   ]);
 });
 
@@ -495,7 +493,7 @@ test("wrap never throws even if client attribute access throws", async (t) => {
   assert.ok(warnings.some((w) => w.includes("wrap() failed")));
 });
 
-test("wrap patches create and parse on both chat and beta chat", async (t) => {
+test("wrap patches create on chat and parse on beta chat", async (t) => {
   const rows = [];
   setCaptureRuntime(stubRuntime(rows));
   t.after(() => setCaptureRuntime());
@@ -505,22 +503,26 @@ test("wrap patches create and parse on both chat and beta chat", async (t) => {
     usage: { prompt_tokens: 8, completion_tokens: 3 },
     choices: [{ message: { content: "done" }, finish_reason: "stop" }],
   };
-  const makeCompletions = () => ({
-    async create() { return parsedResult; },
-    async parse() { return parsedResult; },
-  });
   const client = wrap({
-    chat: { completions: makeCompletions() },
-    beta: { chat: { completions: makeCompletions() } },
+    chat: {
+      completions: {
+        async create() { return parsedResult; },
+      },
+    },
+    beta: {
+      chat: {
+        completions: {
+          async parse() { return parsedResult; },
+        },
+      },
+    },
   }, "openai");
 
   await client.chat.completions.create({ model: "m", messages: [] });
-  await client.chat.completions.parse({ model: "m", messages: [] });
   await client.beta.chat.completions.parse({ model: "m", messages: [] });
 
   assert.deepEqual(rows.map((row) => row.endpoint), [
     "chat.completions",
-    "chat.completions.parse",
     "chat.completions.parse",
   ]);
 });
@@ -557,4 +559,39 @@ test("transport splits wire batches at 512 KiB", async (t) => {
   assert.ok(wireLengths.length > 1);
   assert.ok(Math.max(...wireLengths) <= MAX_BATCH_BYTES);
   assert.equal(deliveredRows, 6);
+});
+
+function resolveSeam(client, path) {
+  let obj = client;
+  for (const part of path.split(".")) {
+    obj = obj?.[part];
+    if (obj == null) return undefined;
+  }
+  return obj;
+}
+
+function missingSeams(client, seams) {
+  const missing = [];
+  for (const seam of seams) {
+    const owner = resolveSeam(client, seam.path);
+    if (owner == null || typeof owner[seam.method] !== "function") {
+      missing.push(`${seam.path}.${seam.method}`);
+    }
+  }
+  return missing;
+}
+
+test("openai seams exist on the real SDK", () => {
+  const client = new OpenAI({ apiKey: "test" });
+  assert.deepEqual(missingSeams(client, OPENAI_SEAMS), []);
+});
+
+test("anthropic seams exist on the real SDK", () => {
+  const client = new Anthropic({ apiKey: "test" });
+  assert.deepEqual(missingSeams(client, ANTHROPIC_SEAMS), []);
+});
+
+test("google seams exist on the real SDK", () => {
+  const client = new GoogleGenAI({ apiKey: "test" });
+  assert.deepEqual(missingSeams(client, GOOGLE_SEAMS), []);
 });

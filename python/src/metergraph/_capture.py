@@ -1094,14 +1094,13 @@ class Seam:
 
 OPENAI_SEAMS: tuple[Seam, ...] = (
     Seam("chat.completions", "create", "chat.completions"),
-    Seam("chat.completions", "parse", "chat.completions.parse"),
     Seam("beta.chat.completions", "parse", "chat.completions.parse"),
     Seam("responses", "create", "responses"),
     Seam("responses", "stream", "responses.stream"),
     Seam("responses", "parse", "responses.parse"),
-    Seam("beta.responses", "create", "responses"),
-    # Note: client.beta.responses has no .parse method (verified against
-    # openai==2.47.0) — do not add one here without re-verifying first.
+    # Note: client.chat.completions has no .parse method (verified against
+    # openai>=1); that method lives on client.responses.parse. Similarly,
+    # client.beta.responses does not exist (verified against openai>=1).
 )
 
 ANTHROPIC_SEAMS: tuple[Seam, ...] = (
