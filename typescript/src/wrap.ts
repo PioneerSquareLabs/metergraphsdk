@@ -5,6 +5,7 @@ type AnyRecord = Record<PropertyKey, any>;
 
 let runtime: CaptureRuntime | undefined;
 const seenBatchItems = new Set<string>();
+let reentrancyDepth = 0;
 
 export function setCaptureRuntime(value?: CaptureRuntime): void {
   runtime = value;
@@ -303,6 +304,17 @@ function patch(owner: AnyRecord | undefined, method: string, provider: string, e
   const wrapped = function (this: unknown, ...args: unknown[]) {
     const capture = runtime;
     if (!capture) return original.apply(owner, args);
+    if (reentrancyDepth > 0) {
+      // Some SDK methods delegate to another already-wrapped method on the
+      // same object synchronously as part of building their return value
+      // (e.g. openai's chat.completions.parse calls .create(...) internally
+      // and immediately chains its proprietary ._thenUnwrap() onto the
+      // result). Capturing this nested call too would both double-count a
+      // single underlying request and, worse, replace .create()'s return
+      // value with a plain Promise that lacks ._thenUnwrap, breaking the
+      // outer method entirely. Pass straight through untouched.
+      return original.apply(owner, args);
+    }
     const incoming = requestFrom(args);
     const patchUsage = typeof process === "undefined"
       || process.env.METERGRAPH_PATCH_STREAM_USAGE !== "0";
@@ -317,11 +329,14 @@ function patch(owner: AnyRecord | undefined, method: string, provider: string, e
     }
     const state = capture.start(provider, endpoint, requestFrom(args), new Error().stack);
     let result: unknown;
+    reentrancyDepth += 1;
     try {
       result = original.apply(owner, args);
     } catch (error) {
       capture.finish(state, undefined, { error });
       throw error;
+    } finally {
+      reentrancyDepth -= 1;
     }
     const complete = (response: any) => {
       const request = requestFrom(args);
