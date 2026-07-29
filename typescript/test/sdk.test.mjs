@@ -418,7 +418,7 @@ test("track attributes rows to the wrapped function name", async (t) => {
   assert.match(rows[3].func, /sdk\.test\.mjs/);
 });
 
-test("wrap patches responses.parse", async (t) => {
+test("wrap patches responses.parse and beta.responses.create", async (t) => {
   const rows = [];
   setCaptureRuntime(stubRuntime(rows));
   t.after(() => setCaptureRuntime());
@@ -433,17 +433,23 @@ test("wrap patches responses.parse", async (t) => {
       async create() { return parsedResult; },
       async parse() { return parsedResult; },
     },
-    // Note: client.beta.responses does not exist (verified directly
-    // against the installed SDK as of openai>=4).
-    beta: {},
+    // client.beta.responses has .create but, as of openai>=4, no .parse —
+    // verified directly against the installed SDK; do not add one here.
+    beta: {
+      responses: {
+        async create() { return parsedResult; },
+      },
+    },
   }, "openai");
 
   await client.responses.create({ model: "m" });
   await client.responses.parse({ model: "m" });
+  await client.beta.responses.create({ model: "m" });
 
   assert.deepEqual(rows.map((row) => row.endpoint), [
     "responses",
     "responses.parse",
+    "responses",
   ]);
 });
 
@@ -491,40 +497,6 @@ test("wrap never throws even if client attribute access throws", async (t) => {
     console.warn = originalWarn;
   }
   assert.ok(warnings.some((w) => w.includes("wrap() failed")));
-});
-
-test("wrap patches create on chat and parse on beta chat", async (t) => {
-  const rows = [];
-  setCaptureRuntime(stubRuntime(rows));
-  t.after(() => setCaptureRuntime());
-
-  const parsedResult = {
-    id: "req_parsed",
-    usage: { prompt_tokens: 8, completion_tokens: 3 },
-    choices: [{ message: { content: "done" }, finish_reason: "stop" }],
-  };
-  const client = wrap({
-    chat: {
-      completions: {
-        async create() { return parsedResult; },
-      },
-    },
-    beta: {
-      chat: {
-        completions: {
-          async parse() { return parsedResult; },
-        },
-      },
-    },
-  }, "openai");
-
-  await client.chat.completions.create({ model: "m", messages: [] });
-  await client.beta.chat.completions.parse({ model: "m", messages: [] });
-
-  assert.deepEqual(rows.map((row) => row.endpoint), [
-    "chat.completions",
-    "chat.completions.parse",
-  ]);
 });
 
 test("transport splits wire batches at 512 KiB", async (t) => {

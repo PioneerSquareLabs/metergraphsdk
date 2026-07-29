@@ -144,7 +144,7 @@ def test_wrap_patches_create_on_chat_and_parse_on_beta_chat(tmp_path):
     _capture.set_runtime(None)
 
 
-def test_wrap_patches_responses_parse(tmp_path):
+def test_wrap_patches_responses_parse_and_beta_responses_create(tmp_path):
     rows = Rows()
     _capture.set_runtime(
         Runtime(rows, Options(app_root=str(Path(__file__).parents[1])))
@@ -157,20 +157,26 @@ def test_wrap_patches_responses_parse(tmp_path):
         def parse(self, **kwargs):
             return response()
 
-    # Note: client.beta.responses does not exist (verified directly
-    # against the installed SDK as of openai>=1.x).
+    class BetaResponses:
+        # client.beta.responses has .create but, as of openai>=1.x, no .parse —
+        # verified directly against the installed SDK; do not add a .parse here.
+        def create(self, **kwargs):
+            return response()
+
     client = SimpleNamespace(
         responses=Responses(),
-        beta=SimpleNamespace(),
+        beta=SimpleNamespace(responses=BetaResponses()),
     )
     metergraph.wrap(client, provider="openai")
 
     client.responses.create(model="gpt-test")
     client.responses.parse(model="gpt-test")
+    client.beta.responses.create(model="gpt-test")
 
     assert [row["endpoint"] for row in rows.rows] == [
         "responses",
         "responses.parse",
+        "responses",
     ]
     _capture.set_runtime(None)
 
