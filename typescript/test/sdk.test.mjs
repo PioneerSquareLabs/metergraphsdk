@@ -539,6 +539,49 @@ test("wrap skips one broken seam without affecting others", async (t) => {
   assert.deepEqual(rows.map((row) => row.endpoint), ["chat.completions"]);
 });
 
+test("wrap captures an unrelated wrapped client invoked synchronously nested inside another", async (t) => {
+  const rows = [];
+  setCaptureRuntime(stubRuntime(rows));
+  t.after(() => setCaptureRuntime());
+
+  const resultA = {
+    id: "req_a",
+    usage: { prompt_tokens: 1, completion_tokens: 1 },
+    choices: [{ message: { content: "a" }, finish_reason: "stop" }],
+  };
+  const resultB = {
+    id: "req_b",
+    usage: { prompt_tokens: 1, completion_tokens: 1 },
+    choices: [{ message: { content: "b" }, finish_reason: "stop" }],
+  };
+
+  // Two independent, unrelated wrapped clients — not one delegating into
+  // the other as an implementation detail (that's the parse -> create
+  // case the reentrancy guard exists for). Client A's own "real"
+  // implementation happens to call client B synchronously as part of its
+  // own work; both are genuinely separate billable requests and must both
+  // be captured. The reentrancy guard must be scoped to the specific
+  // owner object being re-entered, not global, or this second, unrelated
+  // call gets silently swallowed.
+  const clientB = wrap({
+    chat: { completions: { async create() { return resultB; } } },
+  }, "openai");
+  const clientA = wrap({
+    chat: {
+      completions: {
+        async create() {
+          await clientB.chat.completions.create({ model: "m", messages: [] });
+          return resultA;
+        },
+      },
+    },
+  }, "openai");
+
+  await clientA.chat.completions.create({ model: "m", messages: [] });
+
+  assert.deepEqual(rows.map((row) => row.endpoint), ["chat.completions", "chat.completions"]);
+});
+
 test("wrap never throws even if client attribute access throws", async (t) => {
   const client = {};
   Object.defineProperty(client, "responses", {
