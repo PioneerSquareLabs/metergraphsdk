@@ -486,6 +486,31 @@ test("wrap patches create and parse on chat.completions", async (t) => {
   ]);
 });
 
+test("wrap patches beta.chat.completions.parse for openai v4.x-shaped clients", async (t) => {
+  const rows = [];
+  setCaptureRuntime(stubRuntime(rows));
+  t.after(() => setCaptureRuntime());
+
+  const parsedResult = {
+    id: "req_beta_parsed",
+    usage: { prompt_tokens: 8, completion_tokens: 3 },
+    choices: [{ message: { content: "done" }, finish_reason: "stop" }],
+  };
+  const client = wrap({
+    beta: {
+      chat: {
+        completions: {
+          async parse() { return parsedResult; },
+        },
+      },
+    },
+  }, "openai");
+
+  await client.beta.chat.completions.parse({ model: "m", messages: [] });
+
+  assert.deepEqual(rows.map((row) => row.endpoint), ["chat.completions.parse"]);
+});
+
 test("wrap skips one broken seam without affecting others", async (t) => {
   const rows = [];
   setCaptureRuntime(stubRuntime(rows));
@@ -636,7 +661,7 @@ test("transport auth failure is fatal and logged once", async (t) => {
   assert.equal(authWarnings.length, 1);
 });
 
-test("transport permanent client error is fatal and does not retry", async (t) => {
+test("transport permanent client error drops the batch but transport stays alive", async (t) => {
   let attempts = 0;
   const server = http.createServer((request, response) => {
     attempts += 1;
@@ -660,8 +685,38 @@ test("transport permanent client error is fatal and does not retry", async (t) =
   } finally {
     console.warn = originalWarn;
   }
-  assert.equal(attempts, 1);
+  // A 400 is specific to the rejected batch, not the whole connection: the
+  // transport must still attempt the second, unrelated batch.
+  assert.equal(attempts, 2);
   assert.ok(warnings.some((w) => w.includes("HTTP 400")));
+});
+
+test("transport 413 splits an oversized batch and delivers the pieces", async (t) => {
+  const receivedBatches = [];
+  const server = http.createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    let body = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
+    if (request.headers["content-encoding"] === "gzip") body = gunzipSync(body);
+    const rows = JSON.parse(body.toString()).rows;
+    receivedBatches.push(rows.length);
+    if (rows.length > 1) {
+      response.writeHead(413);
+    } else {
+      response.writeHead(202);
+    }
+    response.end();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const address = server.address();
+
+  const transport = new Transport("mg_test", `http://127.0.0.1:${address.port}`, { mode: "buffered" });
+  for (let i = 0; i < 4; i += 1) transport.enqueue({ index: i });
+  assert.equal(await transport.flush(10_000), true);
+
+  assert.ok(receivedBatches.some((size) => size > 1)); // a multi-row batch hit 413 at least once
+  assert.equal(receivedBatches.filter((size) => size === 1).length, 4); // every row eventually delivered on its own
 });
 
 test("transport server error retries and is not fatal", async (t) => {
@@ -767,7 +822,14 @@ function missingSeams(client, seams) {
 
 test("openai seams exist on the real SDK", () => {
   const client = new OpenAI({ apiKey: "test" });
-  assert.deepEqual(missingSeams(client, OPENAI_SEAMS), []);
+  // beta.chat.completions.parse is intentionally v4.x-only (see the comment
+  // on OPENAI_SEAMS and metergraph-internal#9) and is expected to be absent
+  // on the latest openai package this test is pinned to — exempt it from
+  // the "everything must exist" check rather than asserting it's missing.
+  const seams = OPENAI_SEAMS.filter(
+    (seam) => !(seam.path === "beta.chat.completions" && seam.method === "parse"),
+  );
+  assert.deepEqual(missingSeams(client, seams), []);
 });
 
 test("anthropic seams exist on the real SDK", () => {

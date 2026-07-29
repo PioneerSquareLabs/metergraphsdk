@@ -149,11 +149,17 @@ export class Transport {
         console.warn("Metergraph authentication failed; capture disabled for this process");
         return;
       }
+      if (response.status === 413 && rows.length > 1) {
+        const midpoint = Math.floor(rows.length / 2);
+        await this.deliver(rows.slice(0, midpoint));
+        await this.deliver(rows.slice(midpoint));
+        return;
+      }
       if ([400, 404, 413, 422].includes(response.status)) {
-        this.fatal = true;
+        this.dropped += rows.length;
         this.failureLog.report(
           "client_error",
-          `ingest rejected batch with HTTP ${response.status} against ${this.baseUrl}; capture disabled for this process`,
+          `ingest rejected batch with HTTP ${response.status} against ${this.baseUrl}; dropping this batch (payload-specific, not a process-wide failure)`,
         );
         return;
       }
