@@ -414,6 +414,87 @@ test("track attributes rows to the wrapped function name", async (t) => {
   assert.match(rows[3].func, /sdk\.test\.mjs/);
 });
 
+test("wrap patches responses.parse and beta.responses.create", async (t) => {
+  const rows = [];
+  setCaptureRuntime(stubRuntime(rows));
+  t.after(() => setCaptureRuntime());
+
+  const parsedResult = {
+    id: "req_responses",
+    usage: { prompt_tokens: 8, completion_tokens: 3 },
+    choices: [{ message: { content: "done" }, finish_reason: "stop" }],
+  };
+  const client = wrap({
+    responses: {
+      async create() { return parsedResult; },
+      async parse() { return parsedResult; },
+    },
+    // client.beta.responses has .create but, as of openai>=4, no .parse —
+    // verified directly against the installed SDK; do not add one here.
+    beta: {
+      responses: {
+        async create() { return parsedResult; },
+      },
+    },
+  }, "openai");
+
+  await client.responses.create({ model: "m" });
+  await client.responses.parse({ model: "m" });
+  await client.beta.responses.create({ model: "m" });
+
+  assert.deepEqual(rows.map((row) => row.endpoint), [
+    "responses",
+    "responses.parse",
+    "responses",
+  ]);
+});
+
+test("wrap skips one broken seam without affecting others", async (t) => {
+  const rows = [];
+  setCaptureRuntime(stubRuntime(rows));
+  t.after(() => setCaptureRuntime());
+
+  const client = {
+    chat: {
+      completions: {
+        async create() {
+          return {
+            id: "req_ok",
+            usage: { prompt_tokens: 1, completion_tokens: 1 },
+            choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+          };
+        },
+      },
+    },
+  };
+  Object.defineProperty(client, "responses", {
+    get() { throw new Error("boom"); },
+  });
+
+  wrap(client, "openai");
+  await client.chat.completions.create({ model: "m" });
+
+  assert.deepEqual(rows.map((row) => row.endpoint), ["chat.completions"]);
+});
+
+test("wrap never throws even if client attribute access throws", async (t) => {
+  const client = {};
+  Object.defineProperty(client, "responses", {
+    get() { throw new Error("boom: not ready yet"); },
+  });
+
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(" "));
+  try {
+    const result = wrap(client); // no provider override: exercises auto-detection
+    assert.equal(result, client);
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.ok(warnings.some((w) => w.includes("wrap() failed")));
+});
+
 test("wrap patches create and parse on both chat and beta chat", async (t) => {
   const rows = [];
   setCaptureRuntime(stubRuntime(rows));

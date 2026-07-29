@@ -345,32 +345,98 @@ function patch(owner: AnyRecord | undefined, method: string, provider: string, e
   return true;
 }
 
-export function wrap<T extends AnyRecord>(client: T, provider?: "openai" | "anthropic" | "google"): T {
-  const name = provider ?? (client.models?.generateContent
-    ? "google"
-    : client.chat || client.responses ? "openai" : "anthropic");
-  let patched = 0;
-  if (name === "google") {
-    patched += Number(patch(client.models, "generateContent", name, "models.generate_content"));
-    patched += Number(patch(client.models, "generateContentStream", name, "models.generate_content.stream"));
+export interface Seam {
+  path: string;
+  method: string;
+  endpoint: string;
+}
+
+export const OPENAI_SEAMS: Seam[] = [
+  { path: "chat.completions", method: "create", endpoint: "chat.completions" },
+  { path: "chat.completions", method: "parse", endpoint: "chat.completions.parse" },
+  { path: "beta.chat.completions", method: "parse", endpoint: "chat.completions.parse" },
+  { path: "responses", method: "create", endpoint: "responses" },
+  { path: "responses", method: "stream", endpoint: "responses.stream" },
+  { path: "responses", method: "parse", endpoint: "responses.parse" },
+  { path: "beta.responses", method: "create", endpoint: "responses" },
+  // Note: client.beta.responses has no .parse method (verified against
+  // openai==2.47.0) — do not add one here without re-verifying first.
+];
+
+export const ANTHROPIC_SEAMS: Seam[] = [
+  { path: "messages", method: "create", endpoint: "messages" },
+  { path: "messages", method: "stream", endpoint: "messages.stream" },
+];
+
+export const GOOGLE_SEAMS: Seam[] = [
+  { path: "models", method: "generateContent", endpoint: "models.generate_content" },
+  { path: "models", method: "generateContentStream", endpoint: "models.generate_content.stream" },
+  { path: "aio.models", method: "generateContent", endpoint: "models.generate_content" },
+  { path: "aio.models", method: "generateContentStream", endpoint: "models.generate_content.stream" },
+];
+
+export const SEAM_TABLES: Record<string, Seam[]> = {
+  openai: OPENAI_SEAMS,
+  anthropic: ANTHROPIC_SEAMS,
+  google: GOOGLE_SEAMS,
+};
+
+function detectProvider(client: AnyRecord): "openai" | "anthropic" | "google" {
+  if (client.models?.generateContent) return "google";
+  if (client.chat || client.responses) return "openai";
+  return "anthropic";
+}
+
+function resolveSeam(client: AnyRecord, path: string): AnyRecord | undefined {
+  let obj: any = client;
+  for (const part of path.split(".")) {
+    obj = obj?.[part];
+    if (obj === undefined || obj === null) return undefined;
   }
-  patched += Number(patch(client.chat?.completions, "create", name, "chat.completions"));
-  patched += Number(patch(client.chat?.completions, "parse", name, "chat.completions.parse"));
-  patched += Number(
-    patch(client.beta?.chat?.completions, "parse", name, "chat.completions.parse"),
-  );
-  patched += Number(patch(client.responses, "create", name, "responses"));
-  patched += Number(patch(client.responses, "stream", name, "responses.stream"));
-  patched += Number(patch(client.messages, "create", name, "messages"));
-  patched += Number(patch(client.messages, "stream", name, "messages.stream"));
-  if (name === "openai") {
+  return obj;
+}
+
+function applySeams(client: AnyRecord, provider: string): string[] {
+  const patched: string[] = [];
+  for (const seam of SEAM_TABLES[provider] ?? []) {
+    let owner: AnyRecord | undefined;
+    try {
+      owner = resolveSeam(client, seam.path);
+    } catch {
+      continue; // a pathological client property must never break wrap()
+    }
+    if (owner !== undefined && patch(owner, seam.method, provider, seam.endpoint)) {
+      patched.push(`${seam.path}.${seam.method}`);
+    }
+  }
+  return patched;
+}
+
+function applyBatchExtras(client: AnyRecord, provider: string): number {
+  let patched = 0;
+  if (provider === "openai") {
     patched += Number(patchOpenAIBatchContent(client.files, "content"));
     patched += Number(patchOpenAIBatchContent(client.files, "retrieveContent"));
-  } else if (name === "anthropic") {
+  } else if (provider === "anthropic") {
     patched += Number(patchAnthropicBatchResults(client.messages?.batches));
     patched += Number(patchAnthropicBatchResults(client.beta?.messages?.batches));
   }
-  if (!patched) console.warn(`Metergraph found no supported methods on ${name} client`);
+  return patched;
+}
+
+export function wrap<T extends AnyRecord>(client: T, provider?: "openai" | "anthropic" | "google"): T {
+  try {
+    const name = provider ?? detectProvider(client);
+    const patched = applySeams(client, name);
+    const patchedCount = patched.length + applyBatchExtras(client, name);
+    if (!patchedCount) {
+      console.warn(`Metergraph found no supported methods on ${name} client`);
+    } else {
+      console.info(`Metergraph patched ${patchedCount} seam(s) on ${name} client: ${patched.join(", ") || "(batch-only)"}`);
+    }
+  } catch (error) {
+    console.warn("Metergraph wrap() failed; client is unmodified and uninstrumented", error);
+  }
   return client;
 }
 
