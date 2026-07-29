@@ -26,6 +26,7 @@ import {
 import { CaptureRuntime } from "../dist/capture.js";
 import { MAX_BATCH_BYTES, Transport } from "../dist/transport.js";
 import { FailureLogger } from "../dist/failure-log.js";
+import { ConfigPoller } from "../dist/config.js";
 import { setCaptureRuntime, SEAM_TABLES, OPENAI_SEAMS, ANTHROPIC_SEAMS, GOOGLE_SEAMS } from "../dist/wrap.js";
 
 function stubRuntime(rows, options = {}) {
@@ -687,6 +688,61 @@ test("transport server error retries and is not fatal", async (t) => {
   }
   assert.equal(attempts, 1);
   assert.ok(warnings.some((w) => w.includes("HTTP 500")));
+});
+
+test("config poller stops polling and logs once on auth failure", async (t) => {
+  let attempts = 0;
+  const server = http.createServer((request, response) => {
+    attempts += 1;
+    request.resume();
+    response.writeHead(401);
+    response.end();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const address = server.address();
+
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(" "));
+  let poller;
+  try {
+    poller = new ConfigPoller("mg_test", `http://127.0.0.1:${address.port}`, 60_000, 120_000);
+    await new Promise((r) => setTimeout(r, 10)); // await a short tick for constructor's poll to resolve
+    await poller.poll();
+    await poller.poll();
+  } finally {
+    console.warn = originalWarn;
+    poller?.stop();
+  }
+  assert.equal(attempts, 1); // must stop after the first 401, not keep polling
+  const authWarnings = warnings.filter((w) => w.includes("authentication failed"));
+  assert.equal(authWarnings.length, 1);
+});
+
+test("config poller logs generic failures via FailureLogger", async (t) => {
+  const server = http.createServer((request, response) => {
+    request.resume();
+    response.writeHead(500);
+    response.end();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const address = server.address();
+
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(" "));
+  let poller;
+  try {
+    poller = new ConfigPoller("mg_test", `http://127.0.0.1:${address.port}`, 60_000, 120_000);
+    const ok = await poller.poll();
+    assert.equal(ok, false);
+  } finally {
+    console.warn = originalWarn;
+    poller?.stop();
+  }
+  assert.ok(warnings.some((w) => w.includes("config poll to")));
 });
 
 function resolveSeam(client, path) {
