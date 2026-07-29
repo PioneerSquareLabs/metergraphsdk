@@ -47,13 +47,16 @@ export class ConfigPoller {
   private stopped = false;
   private readonly failureLog = new FailureLogger();
 
+  /** Resolves once the constructor's initial poll attempt has completed (success or failure). Exposed primarily so tests can synchronize deterministically instead of guessing a delay; not required for normal use. */
+  readonly ready: Promise<boolean>;
+
   constructor(
     private readonly token: string,
     private readonly baseUrl: string,
     private readonly pollMs = 30_000,
     private readonly hardTtlMs = 120_000,
   ) {
-    void this.poll();
+    this.ready = this.poll();
     this.timer = setInterval(() => {
       if (!this.stopped) void this.poll();
     }, Math.max(1_000, pollMs));

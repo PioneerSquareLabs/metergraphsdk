@@ -708,7 +708,7 @@ test("config poller stops polling and logs once on auth failure", async (t) => {
   let poller;
   try {
     poller = new ConfigPoller("mg_test", `http://127.0.0.1:${address.port}`, 60_000, 120_000);
-    await new Promise((r) => setTimeout(r, 10)); // await a short tick for constructor's poll to resolve
+    await poller.ready;
     await poller.poll();
     await poller.poll();
   } finally {
