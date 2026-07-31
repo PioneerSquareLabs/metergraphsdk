@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextvars
 import functools
 import inspect
+import secrets
 from concurrent.futures import Executor
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Mapping
@@ -20,6 +21,9 @@ class CaptureContext:
     capture_text: bool | None = None
     func_name: str | None = None
     func_module: str | None = None
+    trace_id: str | None = None
+    trace_name: str | None = None
+    parent_span_id: str | None = None
 
 
 _current: contextvars.ContextVar[CaptureContext] = contextvars.ContextVar(
@@ -101,6 +105,91 @@ class route:
                 unit=self.unit,
                 unit_count=self.unit_count,
                 tags=self.tags,
+                capture_text=self.capture_text,
+            ):
+                return fn(*args, **kwargs)
+
+        return wrapped
+
+
+class trace:
+    """Logical trace context manager and sync/async decorator."""
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        trace_id: str | None = None,
+        parent_span_id: str | None = None,
+        capture_text: bool | None = None,
+    ) -> None:
+        self.name = str(name)
+        self.trace_id = str(trace_id).strip() if trace_id is not None else None
+        self.parent_span_id = (
+            str(parent_span_id).strip() if parent_span_id is not None else None
+        )
+        self.capture_text = (
+            bool(capture_text) if capture_text is not None else None
+        )
+        self._token: contextvars.Token[CaptureContext] | None = None
+
+    def __enter__(self) -> "trace":
+        current = snapshot()
+        requested = self.trace_id
+        reuse = current.trace_id is not None and (
+            requested is None or requested == current.trace_id
+        )
+        self._token = _current.set(
+            replace(
+                current,
+                trace_id=(
+                    current.trace_id
+                    if reuse
+                    else requested or secrets.token_hex(16)
+                ),
+                trace_name=current.trace_name if reuse else self.name,
+                parent_span_id=(
+                    self.parent_span_id
+                    if self.parent_span_id is not None
+                    else current.parent_span_id
+                    if reuse
+                    else None
+                ),
+                capture_text=(
+                    self.capture_text
+                    if self.capture_text is not None
+                    else current.capture_text
+                ),
+            )
+        )
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._token is not None:
+            _current.reset(self._token)
+            self._token = None
+
+    def __call__(self, fn: Callable):
+        if inspect.iscoroutinefunction(fn):
+
+            @functools.wraps(fn)
+            async def async_wrapped(*args, **kwargs):
+                with type(self)(
+                    self.name,
+                    trace_id=self.trace_id,
+                    parent_span_id=self.parent_span_id,
+                    capture_text=self.capture_text,
+                ):
+                    return await fn(*args, **kwargs)
+
+            return async_wrapped
+
+        @functools.wraps(fn)
+        def wrapped(*args, **kwargs):
+            with type(self)(
+                self.name,
+                trace_id=self.trace_id,
+                parent_span_id=self.parent_span_id,
                 capture_text=self.capture_text,
             ):
                 return fn(*args, **kwargs)

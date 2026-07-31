@@ -231,8 +231,10 @@ function streamProxy(stream: AnyRecord, state: ReturnType<CaptureRuntime["start"
   let last: unknown;
   let ttftMs: number | undefined;
   const parts: string[] = [];
+  const chunks: unknown[] = [];
   const observe = (chunk: unknown) => {
     last = chunk;
+    chunks.push(chunk);
     const text = chunkText(chunk);
     if (text) {
       ttftMs ??= Math.round(performance.now() - state.started);
@@ -247,6 +249,7 @@ function streamProxy(stream: AnyRecord, state: ReturnType<CaptureRuntime["start"
       stream: true,
       ttftMs,
       responseText: parts.join("") || undefined,
+      responseChunks: chunks,
     });
   };
 

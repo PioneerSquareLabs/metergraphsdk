@@ -21,6 +21,7 @@ import {
   setSession,
   shutdown,
   track,
+  trace,
   wrap,
 } from "../dist/index.js";
 import { CaptureRuntime } from "../dist/capture.js";
@@ -32,8 +33,12 @@ import { setCaptureRuntime, SEAM_TABLES, OPENAI_SEAMS, ANTHROPIC_SEAMS, GOOGLE_S
 function stubRuntime(rows, options = {}) {
   return new CaptureRuntime(
     { enqueue(row) { rows.push(row); return true; } },
-    { captureText: true, appRoot: "", skipFrames: [], textMaxBytes: 100_000, ...options },
+    { captureText: true, appRoot: "", skipFrames: [], textMaxBytes: 100 * 1024, ...options },
   );
+}
+
+function capturedResponse(row) {
+  return JSON.parse(row.response_text);
 }
 
 test("wrap captures usage/context and config assignment is sticky", async (t) => {
@@ -152,6 +157,27 @@ test("wrap captures usage/context and config assignment is sticky", async (t) =>
             async *[Symbol.asyncIterator]() {
               yield { choices: [{ delta: { content: "hi" } }] };
               yield {
+                choices: [{
+                  delta: {
+                    tool_calls: [{
+                      index: 0,
+                      id: "call_1",
+                      function: { name: "lookup", arguments: "{\"id\":" },
+                    }],
+                  },
+                }],
+              };
+              yield {
+                choices: [{
+                  delta: {
+                    tool_calls: [{
+                      index: 0,
+                      function: { arguments: "\"ord_1\"}" },
+                    }],
+                  },
+                }],
+              };
+              yield {
                 choices: [],
                 usage: {
                   prompt_tokens: 2,
@@ -172,7 +198,7 @@ test("wrap captures usage/context and config assignment is sticky", async (t) =>
     stream: true,
   }), { captureText: true });
   for await (const chunk of stream) chunks.push(chunk);
-  assert.equal(chunks.length, 1); // injected usage-only chunk stays invisible
+  assert.equal(chunks.length, 3); // injected usage-only chunk stays invisible
 
   const openAIBatchClient = wrap({
     files: {
@@ -254,21 +280,28 @@ test("wrap captures usage/context and config assignment is sticky", async (t) =>
   assert.equal(outcome.task_completed, true);
   assert.equal(outcome.request_json, undefined);
   const metadataOnly = allRows.find((candidate) => candidate.model === "metadata-model");
-  assert.equal(metadataOnly.content_opted_in, false);
-  assert.equal(metadataOnly.request_json, undefined);
-  assert.equal(metadataOnly.response_text, undefined);
+  assert.equal(metadataOnly.content_opted_in, true);
+  assert.match(metadataOnly.request_json, /private by default/);
+  assert.equal(capturedResponse(metadataOnly).content, "done");
   const streamed = allRows.find((candidate) => candidate.model === "stream-model");
   assert.equal(streamed.input_tokens, 2);
   assert.equal(streamed.cache_read_tokens, 1);
   assert.equal(streamed.cache_write_tokens, 2);
   assert.equal(streamed.cost_usd, undefined);
-  assert.equal(streamed.response_text, "hi");
+  assert.equal(capturedResponse(streamed).content, "hi");
+  assert.deepEqual(capturedResponse(streamed).tool_calls[0], {
+    call_id: "call_1",
+    name: "lookup",
+    arguments: { id: "ord_1" },
+    status: "requested",
+    idempotency: "non_idempotent",
+  });
   const openAIBatch = allRows.find((candidate) => candidate.request_id === "req_batch_js_1");
   assert.equal(openAIBatch.route, "nightly-batch");
   assert.equal(openAIBatch.batch, true);
   assert.equal(openAIBatch.batch_custom_id, "ticket-js-1");
   assert.equal(openAIBatch.input_tokens, 11);
-  assert.equal(openAIBatch.response_text, "batch answer");
+  assert.equal(capturedResponse(openAIBatch).content, "batch answer");
   const anthropicBatch = allRows.find((candidate) => candidate.model === "claude-batch");
   assert.equal(anthropicBatch.route, "nightly-batch");
   assert.equal(anthropicBatch.batch, true);
@@ -279,7 +312,7 @@ test("wrap captures usage/context and config assignment is sticky", async (t) =>
   assert.equal(anthropicBatch.cache_write_5m_tokens, 2);
   assert.equal(anthropicBatch.cache_write_1h_tokens, 5);
   assert.equal(anthropicBatch.cost_usd, undefined);
-  assert.equal(anthropicBatch.response_text, "anthropic batch answer");
+  assert.equal(capturedResponse(anthropicBatch).content, "anthropic batch answer");
 });
 
 test("anthropic streaming preserves aggregate and TTL-specific cache writes", async (t) => {
@@ -334,6 +367,17 @@ test("wrap captures gemini usage from non-stream and cumulative stream responses
         return {
           text: "gemini done",
           responseId: "resp_g_1",
+          candidates: [{
+            content: {
+              parts: [{
+                functionCall: {
+                  id: "call_g_1",
+                  name: "lookup_order",
+                  args: { order_id: "ord_g_1" },
+                },
+              }],
+            },
+          }],
           usageMetadata: {
             promptTokenCount: 100,
             candidatesTokenCount: 20,
@@ -378,8 +422,15 @@ test("wrap captures gemini usage from non-stream and cumulative stream responses
   assert.equal(row.output_tokens, 20);
   assert.equal(row.cache_read_tokens, 10);
   assert.equal(row.reasoning_tokens, 5);
-  assert.equal(row.response_text, "gemini done");
-  assert.equal(row.sdk_version, "0.2.1");
+  assert.equal(capturedResponse(row).content, "gemini done");
+  assert.deepEqual(capturedResponse(row).tool_calls[0], {
+    call_id: "call_g_1",
+    name: "lookup_order",
+    arguments: { order_id: "ord_g_1" },
+    status: "requested",
+    idempotency: "non_idempotent",
+  });
+  assert.equal(row.sdk_version, "0.3.0");
   assert.equal(streamed.provider, "google");
   assert.equal(streamed.endpoint, "models.generate_content.stream");
   assert.equal(streamed.stream, true);
@@ -387,7 +438,79 @@ test("wrap captures gemini usage from non-stream and cumulative stream responses
   assert.equal(streamed.input_tokens, 100);
   assert.equal(streamed.output_tokens, 20);
   assert.equal(streamed.cache_read_tokens, 10);
-  assert.equal(streamed.response_text, "partial");
+  assert.equal(capturedResponse(streamed).content, "partial");
+});
+
+test("trace groups spans, propagates manual ids, and permits scoped opt-out", async (t) => {
+  const rows = [];
+  setCaptureRuntime(stubRuntime(rows));
+  t.after(() => setCaptureRuntime());
+  const client = wrap({
+    responses: {
+      async create(request) {
+        return {
+          id: `response-${request.input}`,
+          output_text: request.input,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        };
+      },
+    },
+  }, "openai");
+  const traceId = "a".repeat(32);
+  const parentSpanId = "b".repeat(16);
+  assert.equal(trace("sync-return", () => 42), 42);
+
+  await trace("checkout", async () => {
+    await client.responses.create({ model: "test", input: "first" });
+    await trace("nested-reuses-active", () => (
+      client.responses.create({ model: "test", input: "second" })
+    ));
+    await trace("explicit-fork", () => (
+      client.responses.create({ model: "test", input: "forked" })
+    ), { traceId: "c".repeat(32) });
+  }, { traceId, parentSpanId });
+  await trace("metadata-only", () => (
+    client.responses.create({ model: "test", input: "private" })
+  ), { captureText: false });
+
+  assert.deepEqual(new Set(rows.slice(0, 2).map((row) => row.trace_id)), new Set([traceId]));
+  assert.deepEqual(new Set(rows.slice(0, 2).map((row) => row.trace_name)), new Set(["checkout"]));
+  assert.deepEqual(new Set(rows.slice(0, 2).map((row) => row.parent_span_id)), new Set([parentSpanId]));
+  assert.equal(new Set(rows.slice(0, 2).map((row) => row.span_id)).size, 2);
+  assert.equal(rows[2].trace_id, "c".repeat(32));
+  assert.equal(rows[2].trace_name, "explicit-fork");
+  assert.equal(rows[3].content_opted_in, false);
+  assert.equal(rows[3].request_json, undefined);
+  assert.equal(rows[3].response_text, undefined);
+});
+
+test("capture scrubs credentials, applies redaction, and independently bounds UTF-8 fields", () => {
+  const rows = [];
+  const runtime = stubRuntime(rows, {
+    redact(value, kind) {
+      return value.replaceAll("customer-secret", `<redacted-${kind}>`);
+    },
+  });
+  const state = runtime.start("openai", "responses", {
+    model: "test",
+    authorization: "Bearer provider-secret",
+    headers: { "x-api-key": "provider-secret" },
+    input: `customer-secret${"ü".repeat(80_000)}`,
+  });
+  runtime.finish(state, {
+    id: "response-1",
+    output_text: `customer-secret${"é".repeat(80_000)}`,
+    status: "completed",
+  });
+
+  const row = rows[0];
+  assert.doesNotMatch(row.request_json, /provider-secret|customer-secret/);
+  assert.doesNotMatch(row.response_text, /customer-secret/);
+  assert.ok(Buffer.byteLength(row.request_json) <= 100 * 1024);
+  assert.ok(Buffer.byteLength(row.response_text) <= 100 * 1024);
+  assert.equal(row.text_truncated, true);
+  assert.match(row.request_json, /<metergraph:truncated>$/);
+  assert.match(row.response_text, /<metergraph:truncated>$/);
 });
 
 test("track attributes rows to the wrapped function name", async (t) => {

@@ -63,6 +63,10 @@ def response(text="done"):
     )
 
 
+def captured_response(row):
+    return json.loads(row["response_text"])
+
+
 def test_wrap_auto_init_does_not_latch_before_a_token_is_available():
     class Completions:
         def create(self, **kwargs):
@@ -283,7 +287,7 @@ def test_wrap_google_records_usage_and_endpoint(tmp_path):
     assert row["output_tokens"] == 20
     assert row["cache_read_tokens"] == 10
     assert row["reasoning_tokens"] == 5
-    assert row["response_text"] == "gemini done"
+    assert captured_response(row)["content"] == "gemini done"
     assert row["request_id"] == "resp_g_1"
     assert row["sdk_version"] == metergraph.__version__
     _capture.set_runtime(None)
@@ -331,7 +335,7 @@ def test_wrap_google_stream_takes_usage_from_cumulative_last_chunk(tmp_path):
     assert row["input_tokens"] == 100
     assert row["output_tokens"] == 20
     assert row["cache_read_tokens"] == 10
-    assert row["response_text"] == "partial"
+    assert captured_response(row)["content"] == "partial"
     _capture.set_runtime(None)
 
 
@@ -376,11 +380,11 @@ def test_wrap_google_patches_async_models(tmp_path):
     assert len(asyncio.run(run())) == 1
     assert rows.rows[0]["provider"] == "google"
     assert rows.rows[0]["endpoint"] == "models.generate_content"
-    assert rows.rows[0]["response_text"] == "gemini async done"
+    assert captured_response(rows.rows[0])["content"] == "gemini async done"
     assert rows.rows[1]["endpoint"] == "models.generate_content.stream"
     assert rows.rows[1]["stream"] is True
     assert rows.rows[1]["input_tokens"] == 100
-    assert rows.rows[1]["response_text"] == "gemini async stream"
+    assert captured_response(rows.rows[1])["content"] == "gemini async stream"
     _capture.set_runtime(None)
 
 
@@ -550,6 +554,55 @@ def test_anthropic_response_tool_use_is_requested_not_replayable(tmp_path):
             "idempotency": "non_idempotent",
         }
     ]
+    assert captured_response(rows.rows[0])["tool_calls"] == rows.rows[0]["tool_calls"]
+
+
+def test_gemini_response_normalizes_function_calls(tmp_path):
+    rows = Rows()
+    runtime = Runtime(rows, Options(app_root=str(tmp_path)))
+    call = runtime.call_state(
+        "google",
+        "models.generate_content",
+        {
+            "model": "gemini-test",
+            "contents": [{"role": "user", "parts": [{"text": "Find order"}]}],
+            "tools": [{"name": "lookup_order"}],
+        },
+    )
+    result = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                content=SimpleNamespace(
+                    parts=[
+                        SimpleNamespace(
+                            functionCall=SimpleNamespace(
+                                id="call_g_1",
+                                name="lookup_order",
+                                args={"order_id": "ord_g_1"},
+                            )
+                        )
+                    ]
+                )
+            )
+        ],
+        usage_metadata=SimpleNamespace(
+            prompt_token_count=10, candidates_token_count=2
+        ),
+    )
+
+    call.finish(result)
+
+    assert rows.rows[0]["tool_calls"] == [
+        {
+            "call_id": "call_g_1",
+            "name": "lookup_order",
+            "arguments": {"order_id": "ord_g_1"},
+            "result": None,
+            "status": "requested",
+            "idempotency": "non_idempotent",
+        }
+    ]
+    assert captured_response(rows.rows[0])["tool_calls"] == rows.rows[0]["tool_calls"]
 
 
 def test_openai_batch_output_file_captures_each_inference(tmp_path):
@@ -595,7 +648,7 @@ def test_openai_batch_output_file_captures_each_inference(tmp_path):
     assert row["batch_custom_id"] == "ticket-1"
     assert row["input_tokens"] == 11
     assert row["output_tokens"] == 3
-    assert row["response_text"] == "batch answer"
+    assert captured_response(row)["content"] == "batch answer"
     assert row["request_id"] == "req_batch_1"
 
     # Re-reading the same output file in one process cannot double count it.
@@ -653,11 +706,11 @@ def test_anthropic_batch_results_capture_usage_without_changing_iteration(tmp_pa
     assert row["cache_write_5m_tokens"] == 2
     assert row["cache_write_1h_tokens"] == 5
     assert "cost_usd" not in row
-    assert row["response_text"] == "anthropic batch answer"
+    assert captured_response(row)["content"] == "anthropic batch answer"
     _capture.set_runtime(None)
 
 
-def test_content_defaults_off_and_route_can_override_global_consent(tmp_path):
+def test_content_defaults_on_and_route_can_override_capture(tmp_path):
     rows = Rows()
     runtime = Runtime(rows, Options(app_root=str(tmp_path)))
     call = runtime.call_state(
@@ -665,9 +718,9 @@ def test_content_defaults_off_and_route_can_override_global_consent(tmp_path):
     )
     call.finish(response("private output"))
 
-    assert rows.rows[0]["content_opted_in"] is False
-    assert rows.rows[0]["request_json"] is None
-    assert rows.rows[0]["response_text"] is None
+    assert rows.rows[0]["content_opted_in"] is True
+    assert "private" in rows.rows[0]["request_json"]
+    assert captured_response(rows.rows[0])["content"] == "private output"
 
     _capture.set_runtime(runtime)
 
@@ -682,7 +735,7 @@ def test_content_defaults_off_and_route_can_override_global_consent(tmp_path):
 
     assert rows.rows[1]["content_opted_in"] is True
     assert "consented input" in rows.rows[1]["request_json"]
-    assert rows.rows[1]["response_text"] == "consented output"
+    assert captured_response(rows.rows[1])["content"] == "consented output"
     _capture.set_runtime(None)
 
 
@@ -704,6 +757,99 @@ def test_route_opt_out_overrides_global_content_capture(tmp_path):
     assert rows.rows[0]["request_json"] is None
     assert rows.rows[0]["response_text"] is None
     _capture.set_runtime(None)
+
+
+def test_trace_groups_spans_propagates_ids_and_supports_decorators(tmp_path):
+    rows = Rows()
+    runtime = Runtime(rows, Options(app_root=str(tmp_path)))
+    _capture.set_runtime(runtime)
+
+    class Responses:
+        def create(self, **kwargs):
+            return response(kwargs["input"])
+
+    client = SimpleNamespace(responses=Responses())
+    metergraph.wrap(client, provider="openai")
+    manual_trace_id = "a" * 32
+    parent_span_id = "b" * 16
+
+    with metergraph.trace(
+        "checkout", trace_id=manual_trace_id, parent_span_id=parent_span_id
+    ):
+        client.responses.create(model="test", input="first")
+        with metergraph.trace("nested-reuses-active"):
+            client.responses.create(model="test", input="second")
+        with metergraph.trace("explicit-fork", trace_id="c" * 32):
+            client.responses.create(model="test", input="forked")
+
+    @metergraph.trace("async-checkout")
+    async def traced_async():
+        await asyncio.sleep(0)
+        client.responses.create(model="test", input="third")
+        client.responses.create(model="test", input="fourth")
+
+    asyncio.run(traced_async())
+
+    assert {row["trace_id"] for row in rows.rows[:2]} == {manual_trace_id}
+    assert {row["trace_name"] for row in rows.rows[:2]} == {"checkout"}
+    assert {row["parent_span_id"] for row in rows.rows[:2]} == {parent_span_id}
+    assert len({row["span_id"] for row in rows.rows[:2]}) == 2
+    assert rows.rows[2]["trace_id"] == "c" * 32
+    assert rows.rows[2]["trace_name"] == "explicit-fork"
+    assert rows.rows[3]["trace_id"] == rows.rows[4]["trace_id"]
+    assert rows.rows[3]["trace_name"] == "async-checkout"
+    assert rows.rows[3]["trace_id"] != manual_trace_id
+    _capture.set_runtime(None)
+
+
+def test_trace_capture_override_scrubbing_redaction_and_utf8_limits(tmp_path):
+    rows = Rows()
+
+    def redact(value, kind):
+        return value.replace("customer-secret", f"<redacted-{kind}>")
+
+    runtime = Runtime(
+        rows,
+        Options(
+            app_root=str(tmp_path),
+            capture_text=True,
+            redact=redact,
+            text_max_bytes=100 * 1024,
+        ),
+    )
+    hidden = runtime.call_state(
+        "openai", "responses", {"model": "test", "input": "hidden"}
+    )
+    with metergraph.trace("sensitive", capture_text=False):
+        # CaptureContext is read when the call starts.
+        hidden = runtime.call_state(
+            "openai", "responses", {"model": "test", "input": "hidden"}
+        )
+        hidden.finish(response("hidden output"))
+    assert rows.rows[0]["content_opted_in"] is False
+    assert rows.rows[0]["request_json"] is None
+    assert rows.rows[0]["response_text"] is None
+
+    call = runtime.call_state(
+        "openai",
+        "responses",
+        {
+            "model": "test",
+            "authorization": "Bearer provider-secret",
+            "headers": {"x-api-key": "provider-secret"},
+            "input": "customer-secret" + ("ü" * 80_000),
+        },
+    )
+    call.finish(response("customer-secret" + ("é" * 80_000)))
+    row = rows.rows[1]
+    assert "provider-secret" not in row["request_json"]
+    assert "customer-secret" not in row["request_json"]
+    assert "customer-secret" not in row["response_text"]
+    assert len(row["request_json"].encode()) <= 100 * 1024
+    assert len(row["response_text"].encode()) <= 100 * 1024
+    assert row["text_truncated"] is True
+    assert row["request_json"].endswith("<metergraph:truncated>")
+    assert row["response_text"].endswith("<metergraph:truncated>")
 
 
 def test_wrap_async_errors_are_recorded_and_original_error_is_raised(tmp_path):
@@ -730,6 +876,10 @@ def test_wrap_async_errors_are_recorded_and_original_error_is_raised(tmp_path):
     asyncio.run(run())
     assert rows.rows[0]["error"] is True
     assert rows.rows[0]["error_type"] == "ValueError"
+    assert captured_response(rows.rows[0])["error"] == {
+        "type": "ValueError",
+        "message": "provider down",
+    }
     _capture.set_runtime(None)
 
 
@@ -745,6 +895,44 @@ def test_stream_records_ttft_and_final_usage(tmp_path):
                 [
                     SimpleNamespace(
                         choices=[SimpleNamespace(delta=SimpleNamespace(content="hi"))],
+                        usage=None,
+                    ),
+                    SimpleNamespace(
+                        choices=[
+                            SimpleNamespace(
+                                delta=SimpleNamespace(
+                                    content=None,
+                                    tool_calls=[
+                                        SimpleNamespace(
+                                            index=0,
+                                            id="call_1",
+                                            function=SimpleNamespace(
+                                                name="lookup", arguments='{"id":'
+                                            ),
+                                        )
+                                    ],
+                                )
+                            )
+                        ],
+                        usage=None,
+                    ),
+                    SimpleNamespace(
+                        choices=[
+                            SimpleNamespace(
+                                delta=SimpleNamespace(
+                                    content=None,
+                                    tool_calls=[
+                                        SimpleNamespace(
+                                            index=0,
+                                            id=None,
+                                            function=SimpleNamespace(
+                                                name=None, arguments='"ord_1"}'
+                                            ),
+                                        )
+                                    ],
+                                )
+                            )
+                        ],
                         usage=None,
                     ),
                     SimpleNamespace(
@@ -767,14 +955,22 @@ def test_stream_records_ttft_and_final_usage(tmp_path):
     )
     # The SDK-added OpenAI usage-only chunk is consumed for metering but is
     # not exposed to an application that did not ask for it.
-    assert len(chunks) == 1
+    assert len(chunks) == 3
     assert rows.rows[0]["stream"] is True
     assert rows.rows[0]["ttft_ms"] is not None
     assert rows.rows[0]["input_tokens"] == 2
     assert rows.rows[0]["cache_read_tokens"] == 1
     assert rows.rows[0]["cache_write_tokens"] == 2
     assert "cost_usd" not in rows.rows[0]
-    assert rows.rows[0]["response_text"] == "hi"
+    assert captured_response(rows.rows[0])["content"] == "hi"
+    assert captured_response(rows.rows[0])["tool_calls"][0] == {
+        "call_id": "call_1",
+        "name": "lookup",
+        "arguments": {"id": "ord_1"},
+        "result": None,
+        "status": "requested",
+        "idempotency": "non_idempotent",
+    }
     assert rows.rows[0]["request_json"].find("include_usage") >= 0
     _capture.set_runtime(None)
 
@@ -829,7 +1025,7 @@ def test_async_stream_awaits_anthropic_final_message(tmp_path):
     assert rows.rows[0]["cache_write_5m_tokens"] == 2
     assert rows.rows[0]["cache_write_1h_tokens"] == 3
     assert "cost_usd" not in rows.rows[0]
-    assert rows.rows[0]["response_text"] == "ok"
+    assert captured_response(rows.rows[0])["content"] == "ok"
     _capture.set_runtime(None)
 
 

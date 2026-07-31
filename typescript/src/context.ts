@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { randomBytes } from "node:crypto";
 
 export interface CaptureContext {
   route?: string;
@@ -8,11 +9,19 @@ export interface CaptureContext {
   unitCount?: number;
   captureText?: boolean;
   funcName?: string;
+  traceId?: string;
+  traceName?: string;
+  parentSpanId?: string;
 }
 export interface RouteOptions {
   unit?: string;
   unitCount?: number;
   tags?: Record<string, unknown>;
+  captureText?: boolean;
+}
+export interface TraceOptions {
+  traceId?: string;
+  parentSpanId?: string;
   captureText?: boolean;
 }
 
@@ -45,6 +54,25 @@ export async function route<T>(
     },
     unitName: options.unit ?? parent.unitName,
     unitCount: options.unit ? (options.unitCount ?? 1) : parent.unitCount,
+    captureText: options.captureText ?? parent.captureText,
+  };
+  return storage.run(child, fn);
+}
+
+export function trace<T>(
+  name: string,
+  fn: () => T | Promise<T>,
+  options: TraceOptions = {},
+): T | Promise<T> {
+  const parent = contextSnapshot();
+  const requested = options.traceId?.trim();
+  const reuse = parent.traceId !== undefined
+    && (requested === undefined || requested === parent.traceId);
+  const child: CaptureContext = {
+    ...parent,
+    traceId: reuse ? parent.traceId : requested || randomBytes(16).toString("hex"),
+    traceName: reuse ? parent.traceName : String(name),
+    parentSpanId: options.parentSpanId ?? (reuse ? parent.parentSpanId : undefined),
     captureText: options.captureText ?? parent.captureText,
   };
   return storage.run(child, fn);

@@ -12,7 +12,7 @@ from typing import Any, Callable
 from ._capture import Options, Runtime, set_runtime
 from ._capture import wrap as _wrap
 from ._config import ConfigPoller
-from ._context import route, set_session, set_tags, snapshot, wrap_executor
+from ._context import route, set_session, set_tags, snapshot, trace, wrap_executor
 from ._track import track
 from ._transport import Writer
 from ._version import SDK_VERSION
@@ -73,7 +73,7 @@ def init(
         )
         options = Options(
             capture_text=(
-                _env_bool("METERGRAPH_CAPTURE_TEXT", False)
+                _env_bool("METERGRAPH_CAPTURE_TEXT", True)
                 if capture_text is None
                 else capture_text
             ),
@@ -81,7 +81,17 @@ def init(
             app_root=os.path.realpath(app_root or os.getcwd()),
             skip_frames=tuple(skip_frames or ()),
             environment=environment or os.getenv("METERGRAPH_ENV"),
-            text_max_bytes=int(os.getenv("METERGRAPH_TEXT_MAX_BYTES", "100000")),
+            text_max_bytes=min(
+                100 * 1024,
+                max(
+                    1,
+                    int(
+                        os.getenv(
+                            "METERGRAPH_TEXT_MAX_BYTES", str(100 * 1024)
+                        )
+                    ),
+                ),
+            ),
         )
         set_runtime(Runtime(_writer, options))
         _config = ConfigPoller(
@@ -214,6 +224,7 @@ __all__ = [
     "set_tags",
     "shutdown",
     "track",
+    "trace",
     "wrap",
     "wrap_executor",
 ]

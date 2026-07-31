@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+
 import { contextSnapshot, type CaptureContext } from "./context.js";
 import { scrub, templateHash } from "./template.js";
 import type { Transport } from "./transport.js";
@@ -26,6 +28,10 @@ interface CallState {
   started: number;
   ts: string;
   frames: Frame[];
+  traceId: string;
+  spanId: string;
+  parentSpanId?: string;
+  traceName: string;
   done: boolean;
 }
 
@@ -107,6 +113,278 @@ function toolNames(request: Record<string, unknown>): { name: string }[] | undef
   return names.length ? names : undefined;
 }
 
+interface ToolEvent {
+  call_id: string;
+  name: string;
+  arguments?: unknown;
+  result?: unknown;
+  status: "requested" | "completed" | "error";
+  idempotency: "idempotent" | "non_idempotent";
+}
+
+function toolArgument(value: unknown): unknown {
+  if (typeof value === "string") {
+    try { return JSON.parse(value); } catch { return value; }
+  }
+  return scrub(value);
+}
+
+function toolEvents(
+  request: Record<string, unknown>,
+  response: unknown,
+  streamChunks: unknown[] = [],
+): ToolEvent[] | undefined {
+  const calls = new Map<string, ToolEvent>();
+  const pending = new Map<string, { result: unknown; error: boolean }>();
+  const policies = new Map<string, "idempotent" | "non_idempotent">();
+  if (Array.isArray(request.tools)) {
+    for (const tool of request.tools) {
+      const fn = get(tool, "function");
+      const name = get(fn, "name") ?? get(tool, "name");
+      const policy = get(fn, "x-metergraph-idempotency")
+        ?? get(tool, "x-metergraph-idempotency")
+        ?? get(fn, "metergraph_idempotency")
+        ?? get(tool, "metergraph_idempotency");
+      if (name) policies.set(
+        String(name),
+        policy === "idempotent" ? "idempotent" : "non_idempotent",
+      );
+    }
+  }
+  const complete = (id: unknown, result: unknown, error = false) => {
+    const key = String(id ?? "");
+    const item = calls.get(key);
+    if (!item) {
+      pending.set(key, { result, error });
+      return;
+    }
+    item.result = toolArgument(result);
+    item.status = error ? "error" : "completed";
+  };
+  const add = (id: unknown, name: unknown, args: unknown) => {
+    if (!name) return;
+    const key = String(id ?? `${String(name)}:${calls.size}`);
+    const item: ToolEvent = {
+      call_id: key,
+      name: String(name),
+      arguments: toolArgument(args),
+      status: "requested",
+      idempotency: policies.get(String(name)) ?? "non_idempotent",
+    };
+    calls.set(key, item);
+    const waiting = pending.get(key);
+    if (waiting) {
+      pending.delete(key);
+      complete(key, waiting.result, waiting.error);
+    }
+  };
+  const blocks = (value: unknown) => {
+    if (!Array.isArray(value)) return;
+    for (const block of value) {
+      const kind = get(block, "type");
+      if (kind === "tool_use") {
+        add(get(block, "id"), get(block, "name"), get(block, "input"));
+      } else if (kind === "tool_result") {
+        complete(
+          get(block, "tool_use_id"),
+          get(block, "content"),
+          Boolean(get(block, "is_error")),
+        );
+      }
+    }
+  };
+  const geminiParts = (value: unknown) => {
+    const parts = get(value, "parts");
+    if (!Array.isArray(parts)) return;
+    for (const part of parts) {
+      const call = get(part, "function_call") ?? get(part, "functionCall");
+      if (call) add(
+        get(call, "id"),
+        get(call, "name"),
+        get(call, "args") ?? get(call, "arguments"),
+      );
+      const result = get(part, "function_response") ?? get(part, "functionResponse");
+      if (result) complete(
+        get(result, "id") ?? get(result, "name"),
+        get(result, "response"),
+      );
+    }
+  };
+  const history = Array.isArray(request.messages)
+    ? request.messages
+    : Array.isArray(request.input)
+      ? request.input
+      : Array.isArray(request.contents)
+        ? request.contents
+        : [];
+  for (const message of history) {
+    const messageCalls = get(message, "tool_calls");
+    if (Array.isArray(messageCalls)) {
+      for (const tool of messageCalls) {
+        const fn = get(tool, "function");
+        add(
+          get(tool, "id") ?? get(tool, "call_id"),
+          get(fn, "name") ?? get(tool, "name"),
+          get(fn, "arguments") ?? get(tool, "arguments"),
+        );
+      }
+    }
+    if (get(message, "role") === "tool") {
+      complete(
+        get(message, "tool_call_id") ?? get(message, "call_id"),
+        get(message, "content"),
+        Boolean(get(message, "is_error")),
+      );
+    }
+    const kind = get(message, "type");
+    if (kind === "function_call" || kind === "tool_call") {
+      add(
+        get(message, "call_id") ?? get(message, "id"),
+        get(message, "name"),
+        get(message, "arguments"),
+      );
+    } else if (kind === "function_call_output" || kind === "tool_result") {
+      complete(
+        get(message, "call_id") ?? get(message, "tool_use_id"),
+        get(message, "output") ?? get(message, "content"),
+        Boolean(get(message, "is_error")),
+      );
+    }
+    blocks(get(message, "content"));
+    geminiParts(message);
+  }
+  const message = get(first(get(response, "choices")), "message");
+  const responseCalls = get(message, "tool_calls");
+  if (Array.isArray(responseCalls)) {
+    for (const tool of responseCalls) {
+      const fn = get(tool, "function");
+      add(
+        get(tool, "id") ?? get(tool, "call_id"),
+        get(fn, "name") ?? get(tool, "name"),
+        get(fn, "arguments") ?? get(tool, "arguments"),
+      );
+    }
+  }
+  blocks(get(response, "content"));
+  const outputs = get(response, "output");
+  if (Array.isArray(outputs)) {
+    for (const output of outputs) {
+      const kind = get(output, "type");
+      if (kind === "function_call" || kind === "tool_call") {
+        add(
+          get(output, "call_id") ?? get(output, "id"),
+          get(output, "name"),
+          get(output, "arguments"),
+        );
+      }
+    }
+  }
+  const candidates = get(response, "candidates");
+  if (Array.isArray(candidates)) {
+    for (const candidate of candidates) geminiParts(get(candidate, "content"));
+  }
+  const openAIDeltas = new Map<string, { id: string; name: string; arguments: string }>();
+  const anthropicDeltas = new Map<string, { id: string; name: string; arguments: string }>();
+  for (const chunk of streamChunks) {
+    const choices = get(chunk, "choices");
+    if (Array.isArray(choices)) {
+      for (const choice of choices) {
+        const tools = get(get(choice, "delta"), "tool_calls");
+        if (!Array.isArray(tools)) continue;
+        tools.forEach((tool, position) => {
+          const key = String(get(tool, "index") ?? position);
+          const item = openAIDeltas.get(key) ?? { id: key, name: "", arguments: "" };
+          item.id = String(get(tool, "id") ?? item.id);
+          const fn = get(tool, "function");
+          if (get(fn, "name")) item.name += String(get(fn, "name"));
+          if (get(fn, "arguments")) item.arguments += String(get(fn, "arguments"));
+          openAIDeltas.set(key, item);
+        });
+      }
+    }
+    const kind = get(chunk, "type");
+    if (kind === "content_block_start") {
+      const block = get(chunk, "content_block");
+      if (get(block, "type") === "tool_use") {
+        const key = String(get(chunk, "index") ?? anthropicDeltas.size);
+        const input = get(block, "input");
+        anthropicDeltas.set(key, {
+          id: String(get(block, "id") ?? key),
+          name: String(get(block, "name") ?? ""),
+          arguments: input && typeof input === "object"
+            && Object.keys(input as Record<string, unknown>).length === 0
+            ? ""
+            : JSON.stringify(scrub(input ?? {})),
+        });
+      }
+    } else if (kind === "content_block_delta") {
+      const delta = get(chunk, "delta");
+      if (get(delta, "type") === "input_json_delta") {
+        const key = String(get(chunk, "index") ?? "0");
+        const item = anthropicDeltas.get(key) ?? { id: key, name: "", arguments: "" };
+        item.arguments += String(get(delta, "partial_json") ?? "");
+        anthropicDeltas.set(key, item);
+      }
+    }
+    const chunkCandidates = get(chunk, "candidates");
+    if (Array.isArray(chunkCandidates)) {
+      for (const candidate of chunkCandidates) geminiParts(get(candidate, "content"));
+    }
+  }
+  for (const item of [...openAIDeltas.values(), ...anthropicDeltas.values()]) {
+    if (item.name) add(item.id, item.name, item.arguments);
+  }
+  return calls.size ? [...calls.values()] : undefined;
+}
+
+function responseContent(response: unknown, aggregate?: string): unknown {
+  if (aggregate !== undefined) return aggregate;
+  const direct = get(response, "output_text") ?? get(response, "text");
+  if (direct !== undefined) return scrub(direct);
+  const message = get(first(get(response, "choices")), "message");
+  const content = get(message, "content");
+  if (content !== undefined) return scrub(content);
+  const parsed = get(message, "parsed");
+  if (parsed !== undefined) return scrub(parsed);
+  const normalizedText = responseText(response);
+  if (normalizedText !== undefined) return normalizedText;
+  const blocks = get(response, "content");
+  if (blocks !== undefined) return scrub(blocks);
+  const output = get(response, "output");
+  if (output !== undefined) return scrub(output);
+  const candidates = get(response, "candidates");
+  return candidates === undefined ? undefined : scrub(candidates);
+}
+
+function responseEnvelope(
+  response: unknown,
+  aggregate: string | undefined,
+  tools: ToolEvent[] | undefined,
+  error: unknown,
+  status: string,
+): Record<string, unknown> {
+  const envelope: Record<string, unknown> = {
+    role: "assistant",
+    content: responseContent(response, aggregate),
+    tool_calls: tools ?? [],
+    finish_reason: stopReason(response),
+    request_id: get(response, "_request_id") ?? get(response, "response_id")
+      ?? get(response, "responseId") ?? get(response, "id"),
+    model: get(response, "model") ?? get(response, "model_version")
+      ?? get(response, "modelVersion"),
+    status,
+  };
+  if (error !== undefined) {
+    envelope.error = {
+      type: error instanceof Error ? error.name : "Error",
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+  return Object.fromEntries(
+    Object.entries(envelope).filter(([, value]) => value !== undefined),
+  );
+}
+
 const SDK_DIR = (() => {
   try {
     return new URL(".", import.meta.url).pathname;
@@ -155,6 +433,11 @@ export class CaptureRuntime {
       started: performance.now(),
       ts: new Date().toISOString(),
       frames: frames(stack, this.options.appRoot, this.options.skipFrames),
+      traceId: context.traceId ?? randomBytes(16).toString("hex"),
+      spanId: randomBytes(8).toString("hex"),
+      parentSpanId: context.parentSpanId,
+      traceName: context.traceName ?? context.route ?? context.funcName
+        ?? endpoint,
       done: false,
     };
   }
@@ -162,7 +445,14 @@ export class CaptureRuntime {
   finish(
     state: CallState,
     response?: unknown,
-    extra: { error?: unknown; status?: string; stream?: boolean; ttftMs?: number; responseText?: string } = {},
+    extra: {
+      error?: unknown;
+      status?: string;
+      stream?: boolean;
+      ttftMs?: number;
+      responseText?: string;
+      responseChunks?: unknown[];
+    } = {},
   ): void {
     if (state.done) return;
     state.done = true;
@@ -176,11 +466,49 @@ export class CaptureRuntime {
       }
       const bytes = new TextEncoder().encode(value);
       if (bytes.byteLength <= this.options.textMaxBytes) return { value, truncated: false };
-      const clipped = new TextDecoder().decode(bytes.slice(0, this.options.textMaxBytes - 24));
-      return { value: `${clipped}\n<metergraph:truncated>`, truncated: true };
+      const marker = "\n<metergraph:truncated>";
+      const markerBytes = new TextEncoder().encode(marker).byteLength;
+      let clipped = new TextDecoder().decode(
+        bytes.slice(0, Math.max(0, this.options.textMaxBytes - markerBytes)),
+      );
+      while (
+        clipped
+        && new TextEncoder().encode(`${clipped}${marker}`).byteLength
+          > this.options.textMaxBytes
+      ) {
+        clipped = clipped.slice(0, -1);
+      }
+      return { value: `${clipped}${marker}`, truncated: true };
     };
     const request = text(JSON.stringify(scrub(state.request)), "request");
-    const output = text(extra.responseText ?? responseText(response), "response");
+    const fullTools = toolEvents(
+      scrub(state.request) as Record<string, unknown>,
+      response,
+      extra.responseChunks,
+    );
+    const status = extra.status ?? (
+      extra.error ? "error" : stopReason(response) ?? "success"
+    );
+    const output = text(
+      JSON.stringify(
+        responseEnvelope(
+          response,
+          extra.responseText,
+          fullTools,
+          extra.error,
+          status,
+        ),
+      ),
+      "response",
+    );
+    const persistedTools = captureText
+      ? fullTools
+      : fullTools?.map((item) => ({
+        call_id: item.call_id,
+        name: item.name,
+        status: item.status,
+        idempotency: item.idempotency,
+      }));
     const firstFrame = state.frames[0];
     this.transport.enqueue({
       ts: state.ts,
@@ -189,18 +517,24 @@ export class CaptureRuntime {
       model: state.request.model,
       ...usage(response),
       latency_ms: Math.round(performance.now() - state.started),
-      status: extra.status ?? (extra.error ? "error" : stopReason(response) ?? "success"),
+      status,
       session_id: state.context.sessionId,
+      conversation_id: state.context.sessionId,
+      trace_id: state.traceId,
+      span_id: state.spanId,
+      parent_span_id: state.parentSpanId,
+      trace_name: state.traceName,
       template_hash: templateHash(state.request),
       unit_name: state.context.unitName,
       unit_count: state.context.unitCount,
-      tool_calls: toolNames(state.request),
+      tool_calls: persistedTools ?? toolNames(state.request),
       endpoint: state.endpoint,
-      request_id: get(response, "_request_id") ?? get(response, "response_id") ?? get(response, "id"),
+      request_id: get(response, "_request_id") ?? get(response, "response_id")
+        ?? get(response, "responseId") ?? get(response, "id"),
       batch: state.request.batch === true,
       batch_custom_id: state.request.batch_custom_id,
-      // Explicit positive consent stamp; the worker never infers opt-in from
-      // content fields that happen to be present.
+      // Explicit false is the sensitive-operation opt-out; hosted ingestion
+      // otherwise preserves content that is present.
       content_opted_in: captureText,
       request_json: request.value,
       response_text: output.value,

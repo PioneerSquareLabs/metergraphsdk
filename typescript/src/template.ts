@@ -1,11 +1,27 @@
-const sensitive = new Set(["api_key", "apikey", "authorization", "headers", "token", "secret"]);
+const sensitive = new Set([
+  "api-key",
+  "api_key",
+  "apikey",
+  "authorization",
+  "client_secret",
+  "cookie",
+  "headers",
+  "id_token",
+  "password",
+  "proxy-authorization",
+  "refresh_token",
+  "secret",
+  "set-cookie",
+  "token",
+  "x-api-key",
+]);
 
 export function scrub(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(scrub);
   if (value && typeof value === "object") {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>)
-        .filter(([key]) => !sensitive.has(key.toLowerCase()))
+        .filter(([key]) => !sensitive.has(key.trim().toLowerCase()))
         .map(([key, item]) => [key, scrub(item)]),
     );
   }
