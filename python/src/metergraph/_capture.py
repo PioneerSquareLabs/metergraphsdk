@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import platform
+import secrets
 import sys
 import time
 from dataclasses import dataclass
@@ -223,9 +224,66 @@ def _request_id(response: Any) -> str | None:
     value = (
         _get(response, "_request_id")
         or _get(response, "response_id")
+        or _get(response, "responseId")
         or _get(response, "id")
     )
     return str(value) if value is not None else None
+
+
+def _response_content(response: Any, aggregate_text: str | None = None) -> Any:
+    if aggregate_text is not None:
+        return aggregate_text
+    direct = _get(response, "output_text") or _get(response, "text")
+    if direct is not None:
+        return scrub(direct)
+    choice = _first(_get(response, "choices"))
+    message = _get(choice, "message")
+    content = _get(message, "content")
+    if content is not None:
+        return scrub(content)
+    parsed = _get(message, "parsed")
+    if parsed is not None:
+        return scrub(parsed)
+    normalized_text = _response_text(response)
+    if normalized_text is not None:
+        return normalized_text
+    blocks = _get(response, "content")
+    if blocks is not None:
+        return scrub(blocks)
+    outputs = _get(response, "output")
+    if outputs is not None:
+        return scrub(outputs)
+    candidates = _get(response, "candidates")
+    if candidates is not None:
+        return scrub(candidates)
+    return None
+
+
+def _response_envelope(
+    response: Any,
+    *,
+    aggregate_text: str | None,
+    tool_calls: list[dict] | None,
+    error: BaseException | None,
+    status: str,
+) -> dict[str, Any]:
+    envelope: dict[str, Any] = {
+        "role": "assistant",
+        "content": _response_content(response, aggregate_text),
+        "tool_calls": tool_calls or [],
+        "finish_reason": _stop_reason(response),
+        "request_id": _request_id(response),
+        "model": _get(response, "model")
+        or _get(response, "model_version")
+        or _get(response, "modelVersion"),
+        "status": status,
+    }
+    if error is not None:
+        envelope["error"] = {
+            "type": type(error).__name__,
+            "message": str(error),
+        }
+    return {key: value for key, value in envelope.items() if value is not None}
 
 
 def _tool_names(request: Mapping[str, Any]) -> list[dict[str, str]] | None:
@@ -273,7 +331,11 @@ def _tool_policies(request: Mapping[str, Any]) -> dict[str, str]:
     return policies
 
 
-def _tool_events(request: Mapping[str, Any], response: Any) -> list[dict] | None:
+def _tool_events(
+    request: Mapping[str, Any],
+    response: Any,
+    stream_chunks: list[Any] | None = None,
+) -> list[dict] | None:
     """Normalize completed history and newly requested provider tool calls."""
     policies = _tool_policies(request)
     calls: dict[str, dict] = {}
@@ -320,9 +382,37 @@ def _tool_events(request: Mapping[str, Any], response: Any) -> list[dict] | None
                     bool(_get(block, "is_error", False)),
                 )
 
+    def gemini_parts(value: Any) -> None:
+        parts = _get(value, "parts")
+        if not isinstance(parts, list):
+            return
+        for part in parts:
+            function_call = _get(part, "function_call") or _get(
+                part, "functionCall"
+            )
+            if function_call is not None:
+                call(
+                    _get(function_call, "id"),
+                    _get(function_call, "name"),
+                    _get(function_call, "args")
+                    or _get(function_call, "arguments"),
+                )
+            function_response = _get(part, "function_response") or _get(
+                part, "functionResponse"
+            )
+            if function_response is not None:
+                complete(
+                    _get(function_response, "id")
+                    or _get(function_response, "name"),
+                    _get(function_response, "response"),
+                    False,
+                )
+
     history = request.get("messages")
     if not isinstance(history, list):
         history = request.get("input")
+    if not isinstance(history, list):
+        history = request.get("contents")
     if isinstance(history, list):
         for message in history:
             for tool_call in _get(message, "tool_calls", []) or []:
@@ -353,6 +443,7 @@ def _tool_events(request: Mapping[str, Any], response: Any) -> list[dict] | None
                     bool(_get(message, "is_error", False)),
                 )
             content_blocks(_get(message, "content"))
+            gemini_parts(message)
 
     choice = _first(_get(response, "choices"))
     response_message = _get(choice, "message")
@@ -372,6 +463,60 @@ def _tool_events(request: Mapping[str, Any], response: Any) -> list[dict] | None
                 _get(output, "name"),
                 _get(output, "arguments"),
             )
+    for candidate in _get(response, "candidates", []) or []:
+        gemini_parts(_get(candidate, "content"))
+
+    openai_deltas: dict[str, dict[str, str]] = {}
+    anthropic_deltas: dict[str, dict[str, str]] = {}
+    for chunk in stream_chunks or []:
+        for choice in _get(chunk, "choices", []) or []:
+            delta = _get(choice, "delta")
+            for position, tool_call in enumerate(
+                _get(delta, "tool_calls", []) or []
+            ):
+                key = str(
+                    _get(tool_call, "index")
+                    if _get(tool_call, "index") is not None
+                    else position
+                )
+                item = openai_deltas.setdefault(
+                    key, {"id": key, "name": "", "arguments": ""}
+                )
+                if _get(tool_call, "id"):
+                    item["id"] = str(_get(tool_call, "id"))
+                fn = _get(tool_call, "function")
+                if _get(fn, "name"):
+                    item["name"] += str(_get(fn, "name"))
+                if _get(fn, "arguments"):
+                    item["arguments"] += str(_get(fn, "arguments"))
+        kind = _get(chunk, "type")
+        if kind == "content_block_start":
+            block = _get(chunk, "content_block")
+            if _get(block, "type") == "tool_use":
+                key = str(_get(chunk, "index", len(anthropic_deltas)))
+                initial_input = scrub(_get(block, "input", {}))
+                anthropic_deltas[key] = {
+                    "id": str(_get(block, "id") or key),
+                    "name": str(_get(block, "name") or ""),
+                    "arguments": (
+                        ""
+                        if initial_input == {}
+                        else json.dumps(initial_input, separators=(",", ":"))
+                    ),
+                }
+        elif kind == "content_block_delta":
+            delta = _get(chunk, "delta")
+            if _get(delta, "type") == "input_json_delta":
+                key = str(_get(chunk, "index", "0"))
+                item = anthropic_deltas.setdefault(
+                    key, {"id": key, "name": "", "arguments": ""}
+                )
+                item["arguments"] += str(_get(delta, "partial_json") or "")
+        for candidate in _get(chunk, "candidates", []) or []:
+            gemini_parts(_get(candidate, "content"))
+    for item in [*openai_deltas.values(), *anthropic_deltas.values()]:
+        if item["name"]:
+            call(item["id"], item["name"], item["arguments"])
 
     return [calls[key] for key in order] or None
 
@@ -399,12 +544,12 @@ def _capture_frames(
 
 @dataclass
 class Options:
-    capture_text: bool = False
+    capture_text: bool = True
     redact: Callable[[str, str], str] | None = None
     app_root: str = os.getcwd()
     skip_frames: tuple[str, ...] = ()
     environment: str | None = None
-    text_max_bytes: int = 100_000
+    text_max_bytes: int = 100 * 1024
 
 
 class Runtime:
@@ -442,6 +587,14 @@ class Runtime:
             func=context.func_name or func,
             module=context.func_module or module,
             frames=frames,
+            trace_id=context.trace_id or secrets.token_hex(16),
+            span_id=secrets.token_hex(8),
+            parent_span_id=context.parent_span_id,
+            trace_name=context.trace_name
+            or context.route
+            or context.func_name
+            or func
+            or endpoint,
         )
 
     def _text(
@@ -476,6 +629,10 @@ class CallState:
     func: str | None
     module: str | None
     frames: list[dict]
+    trace_id: str
+    span_id: str
+    parent_span_id: str | None
+    trace_name: str
     done: bool = False
 
     def finish(
@@ -487,6 +644,7 @@ class CallState:
         stream: bool = False,
         ttft_ms: int | None = None,
         response_text: str | None = None,
+        stream_chunks: list[Any] | None = None,
     ) -> None:
         if self.done:
             return
@@ -502,17 +660,13 @@ class CallState:
             "request",
             enabled=capture_text,
         )
-        response_json, response_truncated = self.runtime._text(
-            response_text if response_text is not None else _response_text(response),
-            "response",
-            enabled=capture_text,
-        )
-        tool_calls = _tool_events(request_clean, response)
+        full_tool_calls = _tool_events(request_clean, response, stream_chunks)
+        tool_calls = full_tool_calls
         tool_truncated = False
         if tool_calls and capture_text:
             encoded_tools, tool_truncated = self.runtime._text(
                 json.dumps(tool_calls, separators=(",", ":"), default=repr),
-                "tool_calls",
+                "response",
                 enabled=True,
             )
             try:
@@ -529,6 +683,25 @@ class CallState:
                 }
                 for item in tool_calls
             ]
+        effective_status = status or (
+            "error" if error else _stop_reason(response) or "success"
+        )
+        response_json, response_truncated = self.runtime._text(
+            json.dumps(
+                _response_envelope(
+                    response,
+                    aggregate_text=response_text,
+                    tool_calls=full_tool_calls if capture_text else None,
+                    error=error,
+                    status=effective_status,
+                ),
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=repr,
+            ),
+            "response",
+            enabled=capture_text,
+        )
         row: dict[str, Any] = {
             "ts": self.ts,
             "route": self.context.route,
@@ -536,10 +709,13 @@ class CallState:
             "model": self.request.get("model"),
             **_usage(response),
             "latency_ms": round((time.perf_counter() - self.started) * 1000),
-            "status": status
-            or ("error" if error else _stop_reason(response) or "success"),
+            "status": effective_status,
             "session_id": self.context.session_id,
             "conversation_id": self.context.session_id,
+            "trace_id": self.trace_id,
+            "span_id": self.span_id,
+            "parent_span_id": self.parent_span_id,
+            "trace_name": self.trace_name,
             "template_hash": template_hash(self.request),
             "unit_name": self.context.unit_name,
             "unit_count": self.context.unit_count,
@@ -548,8 +724,8 @@ class CallState:
             "request_id": _request_id(response),
             "batch": self.request.get("batch") is True,
             "batch_custom_id": self.request.get("batch_custom_id"),
-            # The worker requires an explicit positive stamp before sending
-            # any content to Bedrock. Missing/old rows therefore fail closed.
+            # An explicit false is the application-level sensitive-operation
+            # opt-out. Hosted ingestion otherwise preserves available content.
             "content_opted_in": capture_text,
             "request_json": request_json,
             "response_text": response_json,
@@ -580,10 +756,12 @@ class _StreamState:
         self.iterator = None
         self.last = None
         self.parts: list[str] = []
+        self.chunks: list[Any] = []
         self.ttft_ms: int | None = None
 
     def chunk(self, value: Any) -> Any:
         self.last = value
+        self.chunks.append(value)
         text = _chunk_text(value)
         if text:
             if self.ttft_ms is None:
@@ -614,6 +792,7 @@ class _StreamState:
             stream=True,
             ttft_ms=self.ttft_ms,
             response_text="".join(self.parts) or None,
+            stream_chunks=self.chunks,
         )
 
     async def finish_async(
@@ -636,6 +815,7 @@ class _StreamState:
             stream=True,
             ttft_ms=self.ttft_ms,
             response_text="".join(self.parts) or None,
+            stream_chunks=self.chunks,
         )
 
 
@@ -754,6 +934,7 @@ class AsyncStream:
                     stream=True,
                     ttft_ms=self._state.ttft_ms,
                     response_text="".join(self._state.parts) or None,
+                    stream_chunks=self._state.chunks,
                 )
         except Exception:
             pass

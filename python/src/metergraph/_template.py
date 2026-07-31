@@ -14,7 +14,23 @@ _EMAIL = re.compile(r"\b[^\s@]+@[^\s@]+\.[^\s@]+\b")
 _URL = re.compile(r"\bhttps?://\S+")
 _NUMBER = re.compile(r"(?<![A-Za-z])[-+]?\d+(?:\.\d+)?(?![A-Za-z])")
 _LONG_TOKEN = re.compile(r"\b[A-Za-z0-9_-]{24,}\b")
-_SENSITIVE_KEYS = {"api_key", "apikey", "authorization", "headers", "token", "secret"}
+_SENSITIVE_KEYS = {
+    "api-key",
+    "api_key",
+    "apikey",
+    "authorization",
+    "client_secret",
+    "cookie",
+    "headers",
+    "id_token",
+    "password",
+    "proxy-authorization",
+    "refresh_token",
+    "secret",
+    "set-cookie",
+    "token",
+    "x-api-key",
+}
 
 
 def _normalize_text(value: str) -> str:
@@ -31,7 +47,7 @@ def scrub(value: Any) -> Any:
         return {
             str(k): scrub(v)
             for k, v in value.items()
-            if str(k).lower() not in _SENSITIVE_KEYS
+            if str(k).strip().lower() not in _SENSITIVE_KEYS
         }
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return [scrub(item) for item in value]

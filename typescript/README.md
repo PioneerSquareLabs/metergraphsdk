@@ -9,7 +9,7 @@ client; call `init(...)` before the first `wrap()` only to pass options in
 code.
 
 ```ts
-import { wrap, route, modelFor, recordOutcome, setSession } from "metergraph";
+import { wrap, route, trace, modelFor, recordOutcome, setSession } from "metergraph";
 import OpenAI from "openai";
 
 // new Anthropic() and new GoogleGenAI({}) wrap the same way.
@@ -17,10 +17,12 @@ const client = wrap(new OpenAI());
 setSession("ticket-123");
 
 let model = "gpt-4.1-mini";
-await route("ticket-classifier", async () => {
-  model = modelFor("ticket-classifier", { default: model });
-  await client.chat.completions.create({ model, messages: [] });
-}, { unit: "answer", captureText: true });
+await trace("ticket-workflow", () =>
+  route("ticket-classifier", async () => {
+    model = modelFor("ticket-classifier", { default: model });
+    await client.chat.completions.create({ model, messages: [] });
+  }, { unit: "answer" })
+);
 
 recordOutcome("ticket-classifier", {
   model,
@@ -38,9 +40,23 @@ required and throws if missing so a caller error surfaces immediately
 instead of an `undefined` model reaching a provider call.
 
 Set `METERGRAPH_APP_TOKEN`; `METERGRAPH_INGEST_URL` is only needed to override
-the hosted HTTPS endpoint. Content is metadata-only by default; set
-`METERGRAPH_CAPTURE_TEXT=1` globally or `captureText: true` on an individual
-route to opt in. Actual wire batches never exceed 512 KiB after optional gzip.
+the hosted HTTPS endpoint. SDK 0.3 captures the scrubbed provider request and a
+normalized response envelope, including assistant content and tool calls, by
+default. Provider credentials and transport headers are removed. Request and
+response are each limited to 100 KiB of UTF-8 with an explicit truncation
+marker. Set `METERGRAPH_CAPTURE_TEXT=0`, initialize with
+`captureText: false`, or set `captureText: false` on an individual `route()` or
+`trace()` to opt out for sensitive operations. The public open-source server
+still discards content; hosted workspaces retain it under their metadata
+retention period.
+
+`trace(name, fn, { traceId, parentSpanId, captureText })` groups calls into a
+logical trace using `AsyncLocalStorage`. Nested traces reuse the active trace
+unless given a different trace ID. Calls outside a trace become one-span
+traces. Manual IDs can join work across process boundaries; automatic W3C HTTP
+propagation is not included.
+
+Actual wire batches never exceed 512 KiB after optional gzip.
 Long-running Node processes use an unref'd
 background timer. On Workers or Vercel, call
 `bindWaitUntil(ctx)` once per request. On Lambda, use `wrapHandler(handler)`
@@ -72,9 +88,13 @@ import * as mg from "metergraph". wrap() returns the same client and
 initializes itself from the environment: METERGRAPH_APP_TOKEN is required
 (capture is silently off without it) and METERGRAPH_INGEST_URL is only for
 self-hosted servers. Add both to .env.example, and never commit a real token.
-Capture is metadata-only (tokens, latency, model, no prompt/completion
-content) and fail-open, so do not change call sites, arguments, or error
-handling; async and streaming work unchanged. Wrap each function that calls a
+SDK 0.3 captures scrubbed provider requests and normalized responses by
+default for the hosted dashboard; use METERGRAPH_CAPTURE_TEXT=0 or
+captureText: false around sensitive operations. Provider credentials and
+transport headers must never be captured. Capture is fail-open, so do not
+change call sites, arguments, or error handling; async and streaming work
+unchanged. Use mg.trace("stable-name", fn) to group multi-call workflows. Wrap
+each function that calls a
 wrapped client with mg.track("stable.name", fn), because stack-based
 attribution is unreliable under bundlers. On serverless (Lambda / Workers /
 Vercel), ensure delivery before the runtime freezes: mg.wrapHandler(handler),

@@ -5,7 +5,9 @@ import {
   route,
   setSession,
   setTags,
+  trace,
   type RouteOptions,
+  type TraceOptions,
 } from "./context.js";
 import { track } from "./track.js";
 import { Transport, type TransportMode, type WaitUntil } from "./transport.js";
@@ -88,12 +90,15 @@ export function init(options: MetergraphOptions = {}): void {
       mode: options.transport ?? "auto",
     });
     setCaptureRuntime(new CaptureRuntime(transport, {
-      captureText: options.captureText ?? envBool("METERGRAPH_CAPTURE_TEXT", false),
+      captureText: options.captureText ?? envBool("METERGRAPH_CAPTURE_TEXT", true),
       redact: options.redact,
       appRoot: options.appRoot ?? (typeof process === "undefined" ? "" : process.cwd()),
       skipFrames: options.skipFrames ?? [],
       environment: options.environment ?? env("METERGRAPH_ENV"),
-      textMaxBytes: Number(env("METERGRAPH_TEXT_MAX_BYTES") ?? 100_000),
+      textMaxBytes: Math.min(
+        100 * 1024,
+        Math.max(1, Number(env("METERGRAPH_TEXT_MAX_BYTES") ?? 100 * 1024)),
+      ),
     }));
     config = new ConfigPoller(
       token,
@@ -203,5 +208,5 @@ export function wrap<T extends Record<PropertyKey, any>>(
 
 export const wrapClient = wrap;
 
-export { route, setSession, setTags, track };
-export type { RouteOptions, TransportMode };
+export { route, setSession, setTags, trace, track };
+export type { RouteOptions, TraceOptions, TransportMode };

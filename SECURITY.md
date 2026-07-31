@@ -28,9 +28,11 @@ disclosure timeline.
 sends nothing — capture is off by default until explicitly configured. Once
 configured, every wrapped call produces one row of usage metadata (tokens,
 latency, model, route/session/tag labels, a structural template hash) sent to
-`METERGRAPH_INGEST_URL`. Prompt and completion content is **never** included
-unless `capture_text`/`captureText` is explicitly turned on, globally or per
-route. Even then, known-sensitive request keys (`api_key`, `authorization`,
+`METERGRAPH_INGEST_URL`. In SDK 0.3, configured clients include a scrubbed
+provider request and normalized response by default. Applications can opt out
+globally with `METERGRAPH_CAPTURE_TEXT=0`, at initialization, or around an
+individual route or trace. Request and response are independently limited to
+100 KiB of UTF-8. Known-sensitive request keys (`api_key`, `authorization`,
 `headers`, `token`, `secret`) are stripped before anything is serialized —
 see `scrub()` in [`python/src/metergraph/_template.py`](python/src/metergraph/_template.py)
 and [`typescript/src/template.ts`](typescript/src/template.ts).
@@ -46,8 +48,8 @@ degrade or crash the host application.
 sent as `Authorization: Bearer <token>` on every ingest and config-poll
 request. The hosted default endpoint is HTTPS. If you self-host and point
 `METERGRAPH_INGEST_URL` at a plain `http://` endpoint (as local development
-setups typically do), the token and any captured metadata — including opted-in
-content — travel in plaintext on that path. Treat the token like any other
+setups typically do), the token and any captured metadata — including request
+and response content — travel in plaintext on that path. Treat the token like any other
 API credential: scope it per application, and don't commit it.
 
 **Blast radius of a compromised or malicious ingest endpoint.** Beyond
