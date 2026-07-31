@@ -1,6 +1,6 @@
 # Metergraph SDKs
 
-Capture SDKs for [Metergraph](https://github.com/PioneerSquareLabs/metergraph), which tracks LLM costs by application function. Wrap your OpenAI, Anthropic, or Gemini client and every call is attributed to the function that made it, with token counts (input/output, cache reads, aggregate and TTL-specific cache writes, reasoning), latency, and model. SDK rows contain usage counters, never embedded prices or client-computed cost. Prompt and completion content is never sent unless you explicitly opt in against the hosted service. The SDKs have no runtime dependencies.
+Capture SDKs for [Metergraph](https://github.com/PioneerSquareLabs/metergraph), which tracks LLM costs by application function and trace. Wrap your OpenAI, Anthropic, or Gemini client and every call is attributed to the function that made it, with token counts (input/output, cache reads, aggregate and TTL-specific cache writes, reasoning), latency, and model. SDK rows contain usage counters, never embedded prices or client-computed cost. SDK 0.3 sends scrubbed request and normalized response content to the hosted service by default; applications can opt out globally or around a sensitive route or trace. The SDKs have no runtime dependencies.
 
 | Package | Registry | Source |
 |---|---|---|
@@ -14,9 +14,9 @@ The fastest way to instrument an existing codebase is to paste this into Claude 
 ```text
 Instrument this codebase's LLM API costs with Metergraph
 (https://github.com/PioneerSquareLabs/metergraphsdk). It captures per-call
-token usage (in/out, cached, reasoning), latency, and model, attributed to the
-application function that made the call. Metadata only: no prompt or
-completion content.
+token usage (in/out, cached, reasoning), latency, model, scrubbed request, and
+normalized response, attributed to the application function and logical trace
+that made the call. Set METERGRAPH_CAPTURE_TEXT=0 for metadata-only capture.
 
 1. Install the SDK: `pip install metergraph` (Python) or `npm install
    metergraph` (TypeScript/JavaScript). Zero runtime dependencies.
@@ -40,13 +40,16 @@ completion content.
      functions with @metergraph.track to pin a stable name.
    - TypeScript: wrap each LLM-calling function with
      mg.track("stable.name", fn), because stack-based attribution is
-     unreliable under bundlers. Do this for every function that calls a
-     wrapped client.
-5. Serverless only (Lambda / Cloudflare Workers / Vercel): ensure delivery
+   unreliable under bundlers. Do this for every function that calls a
+   wrapped client.
+5. Wrap multi-call operations in metergraph.trace("stable-name") in Python or
+   mg.trace("stable-name", fn) in TypeScript. Use capture_text=False /
+   captureText: false around sensitive operations.
+6. Serverless only (Lambda / Cloudflare Workers / Vercel): ensure delivery
    before the runtime freezes. Wrap handlers with mg.wrapHandler(handler),
    or call mg.bindWaitUntil(ctx) once per request, or await mg.flush() before
    returning. Long-running servers and scripts need nothing extra.
-6. The SDK is fail-open: transport problems never break or slow LLM calls, so
+7. The SDK is fail-open: transport problems never break or slow LLM calls, so
    do not add defensive try/except around wrapping or the wrapped calls.
 
 When done, list every client you wrapped and where, and flag any LLM calls
@@ -89,6 +92,10 @@ def summarize_invoice(invoice):
 
 Attribution is automatic in Python: the SDK walks the stack to the nearest application function. `@metergraph.track` pins an explicit, stable name instead. Sync and async clients both work, streaming included. To configure in code rather than env vars, call `metergraph.init(token=..., ...)` before the first `wrap()`.
 
+Use `with metergraph.trace("checkout"):` or the equivalent decorator to group
+multiple provider calls. Set `capture_text=False` on `init()`, `route()`, or
+`trace()` when an operation must remain metadata-only.
+
 ## TypeScript / JavaScript
 
 ```bash
@@ -122,6 +129,9 @@ const summarizeInvoice = mg.track("billing.summarize_invoice", async (invoice) =
 
 In TypeScript, use `track()` for attribution. It stays reliable across bundlers and minifiers, where stack parsing does not. All three provider SDKs are optional peer dependencies, and the SDK itself has no runtime dependencies. To configure in code, call `mg.init({ token, ... })` before the first `wrap()`.
 
+Use `await mg.trace("checkout", async () => { ... })` to group multiple calls,
+and pass `{ captureText: false }` for a metadata-only operation.
+
 ## Where the data goes
 
 ```bash
@@ -129,7 +139,7 @@ export METERGRAPH_INGEST_URL=http://localhost:8787   # your self-hosted server
 export METERGRAPH_APP_TOKEN=<token>
 ```
 
-Point `METERGRAPH_INGEST_URL` at a [self-hosted Metergraph server](https://github.com/PioneerSquareLabs/metergraph), or leave it unset to use the hosted service. Without a token, capture is off entirely; the SDK never sends anything silently. Transport problems never break or slow your LLM calls either. When the collector is unreachable, capture drops and your application carries on.
+Point `METERGRAPH_INGEST_URL` at a [self-hosted Metergraph server](https://github.com/PioneerSquareLabs/metergraph), or leave it unset to use the hosted service. Without a token, capture is off entirely; the SDK never sends anything silently. Hosted SDK 0.3 capture includes scrubbed request and response content by default, independently capped at 100 KiB; the public self-hosted server discards content even when the SDK sends it. Transport problems never break or slow your LLM calls either. When the collector is unreachable, capture drops and your application carries on.
 
 See [`examples/`](examples) for runnable per-provider examples, including an offline fake-provider demo that needs no API keys.
 
