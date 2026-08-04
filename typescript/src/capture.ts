@@ -44,8 +44,9 @@ function first(value: unknown): unknown {
 }
 
 function number(value: unknown): number | undefined {
+  if (typeof value === "boolean") return undefined;
   const parsed = Number(value);
-  return value == null || !Number.isFinite(parsed) ? undefined : parsed;
+  return value == null || !Number.isSafeInteger(parsed) || parsed < 0 ? undefined : parsed;
 }
 
 function usageValue(value: unknown): Record<string, number | undefined> {

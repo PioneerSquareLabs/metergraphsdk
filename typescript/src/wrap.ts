@@ -237,12 +237,36 @@ function streamProxy(stream: AnyRecord, state: ReturnType<CaptureRuntime["start"
   let ttftMs: number | undefined;
   const parts: string[] = [];
   const chunks: unknown[] = [];
+  const hasOutput = (chunk: unknown) => {
+    if (chunkText(chunk)) return true;
+    const value = chunk as AnyRecord;
+    if (Array.isArray(value?.choices)
+      && value.choices.some((choice: AnyRecord) => choice?.delta?.tool_calls?.length)) {
+      return true;
+    }
+    if (typeof value?.delta === "string" && String(value?.type).includes("reasoning")) {
+      return value.delta.length > 0;
+    }
+    if (value?.delta?.thinking || value?.delta?.reasoning) return true;
+    if (value?.type === "content_block_start") {
+      return value.content_block?.type === "tool_use";
+    }
+    if (value?.type === "content_block_delta") {
+      return value.delta?.type === "input_json_delta";
+    }
+    return Array.isArray(value?.candidates)
+      && value.candidates.some((candidate: AnyRecord) => candidate?.content?.parts?.some(
+        (part: AnyRecord) => part?.function_call || part?.functionCall,
+      ));
+  };
   const observe = (chunk: unknown) => {
     last = chunk;
     chunks.push(chunk);
     const text = chunkText(chunk);
+    if (ttftMs === undefined && hasOutput(chunk)) {
+      ttftMs = Math.round(performance.now() - state.started);
+    }
     if (text) {
-      ttftMs ??= Math.round(performance.now() - state.started);
       parts.push(text);
     }
     return chunk;

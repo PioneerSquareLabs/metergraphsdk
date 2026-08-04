@@ -6,6 +6,7 @@ import functools
 import inspect
 import json
 import logging
+import math
 import os
 import platform
 import secrets
@@ -40,8 +41,17 @@ def _first(value: Any) -> Any:
 
 def _int(value: Any) -> int | None:
     try:
-        return int(value) if value is not None else None
-    except (TypeError, ValueError):
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value if value >= 0 else None
+        parsed = float(value)
+        return (
+            int(parsed)
+            if math.isfinite(parsed) and parsed >= 0 and parsed.is_integer()
+            else None
+        )
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -201,6 +211,30 @@ def _chunk_text(chunk: Any) -> str | None:
         text = _get(_get(chunk, "delta"), "text")
         return text if isinstance(text, str) else None
     return None
+
+
+def _chunk_has_output(chunk: Any) -> bool:
+    """Recognize the first user-visible text, reasoning, or tool output."""
+    if _chunk_text(chunk):
+        return True
+    for choice in _get(chunk, "choices", []) or []:
+        if _get(_get(choice, "delta"), "tool_calls"):
+            return True
+    kind = _get(chunk, "type")
+    delta = _get(chunk, "delta")
+    if isinstance(delta, str) and "reasoning" in str(kind):
+        return bool(delta)
+    if _get(delta, "thinking") or _get(delta, "reasoning"):
+        return True
+    if kind == "content_block_start":
+        return _get(_get(chunk, "content_block"), "type") == "tool_use"
+    if kind == "content_block_delta":
+        return _get(_get(chunk, "delta"), "type") == "input_json_delta"
+    for candidate in _get(chunk, "candidates", []) or []:
+        for part in _get(_get(candidate, "content"), "parts", []) or []:
+            if _get(part, "function_call") or _get(part, "functionCall"):
+                return True
+    return False
 
 
 def _usage_only_chunk(chunk: Any, call: "CallState") -> bool:
@@ -769,14 +803,14 @@ class _StreamState:
         self.last = value
         self.chunks.append(value)
         text = _chunk_text(value)
+        if self.ttft_ms is None and _chunk_has_output(value):
+            self.ttft_ms = round((time.perf_counter() - self.call.started) * 1000)
         if text:
-            if self.ttft_ms is None:
-                self.ttft_ms = round((time.perf_counter() - self.call.started) * 1000)
             self.parts.append(text)
         return value
 
     def finish(
-        self, status: str = "success", error: BaseException | None = None
+        self, status: str | None = None, error: BaseException | None = None
     ) -> None:
         response = self.last
         if not error:
@@ -802,7 +836,7 @@ class _StreamState:
         )
 
     async def finish_async(
-        self, status: str = "success", error: BaseException | None = None
+        self, status: str | None = None, error: BaseException | None = None
     ) -> None:
         response = self.last
         if not error:
@@ -1347,7 +1381,7 @@ def _uses_vercel_gateway(client: Any) -> bool:
     if base_url is None:
         return False
     try:
-        return urlsplit(str(base_url)).hostname == _VERCEL_GATEWAY_HOST
+        return urlsplit(str(base_url).strip()).hostname == _VERCEL_GATEWAY_HOST
     except (TypeError, ValueError):
         return False
 
@@ -1409,7 +1443,7 @@ def wrap(client: Any, *, provider: str | None = None) -> Any:
     """
     try:
         gateway = (
-            provider.lower() in _VERCEL_PROVIDER_ALIASES
+            provider.strip().lower() in _VERCEL_PROVIDER_ALIASES
             if isinstance(provider, str)
             else _uses_vercel_gateway(client)
         )

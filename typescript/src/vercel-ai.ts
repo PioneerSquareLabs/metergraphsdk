@@ -107,6 +107,7 @@ function outputChunk(part: AnyRecord): boolean {
     "tool-input-delta",
     "tool-call",
     "tool-result",
+    "tool-error",
     "file",
     "source",
   ].includes(String(part?.type));
