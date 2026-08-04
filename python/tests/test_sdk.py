@@ -122,6 +122,7 @@ def test_wrap_sync_records_usage_context_and_preserves_response(tmp_path):
     assert row["unit_name"] == "answer"
     assert row["conversation_id"] == "conversation-7"
     assert row["tool_calls"] is None
+    assert row["tool_names"] is None
     assert row["content_opted_in"] is True
     assert row["request_json"]
     assert row["func"].endswith(
@@ -575,6 +576,7 @@ def test_openai_completed_tool_history_is_replay_grade(tmp_path):
             "idempotency": "idempotent",
         }
     ]
+    assert rows.rows[0]["tool_names"] == ["lookup_order"]
 
 
 def test_anthropic_response_tool_use_is_requested_not_replayable(tmp_path):
@@ -614,6 +616,7 @@ def test_anthropic_response_tool_use_is_requested_not_replayable(tmp_path):
             "idempotency": "non_idempotent",
         }
     ]
+    assert rows.rows[0]["tool_names"] == ["create_refund"]
     assert captured_response(rows.rows[0])["tool_calls"] == rows.rows[0]["tool_calls"]
 
 
@@ -662,6 +665,7 @@ def test_gemini_response_normalizes_function_calls(tmp_path):
             "idempotency": "non_idempotent",
         }
     ]
+    assert rows.rows[0]["tool_names"] == ["lookup_order"]
     assert captured_response(rows.rows[0])["tool_calls"] == rows.rows[0]["tool_calls"]
 
 
@@ -1031,6 +1035,7 @@ def test_stream_records_ttft_and_final_usage(tmp_path):
         "status": "requested",
         "idempotency": "non_idempotent",
     }
+    assert rows.rows[0]["tool_names"] == ["lookup"]
     assert rows.rows[0]["request_json"].find("include_usage") >= 0
     _capture.set_runtime(None)
 

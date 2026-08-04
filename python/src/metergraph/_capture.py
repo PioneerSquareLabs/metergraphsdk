@@ -683,6 +683,11 @@ class CallState:
                 }
                 for item in tool_calls
             ]
+        tool_names = (
+            list(dict.fromkeys(item["name"] for item in full_tool_calls))
+            if full_tool_calls
+            else None
+        )
         effective_status = status or (
             "error" if error else _stop_reason(response) or "success"
         )
@@ -720,6 +725,7 @@ class CallState:
             "unit_name": self.context.unit_name,
             "unit_count": self.context.unit_count,
             "tool_calls": tool_calls,
+            "tool_names": tool_names,
             "endpoint": self.endpoint,
             "request_id": _request_id(response),
             "batch": self.request.get("batch") is True,
