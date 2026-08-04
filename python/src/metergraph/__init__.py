@@ -115,10 +115,13 @@ def init(
 
 
 def wrap(client: Any, *, provider: str | None = None) -> Any:
-    """Wrap an OpenAI, Anthropic, or Google client for capture.
+    """Wrap an OpenAI, Anthropic, Google, or Vercel AI Gateway client.
 
     Calls init() automatically, so with env-var configuration this is the
-    only setup line needed. Call init(...) first to pass options in code.
+    only setup line needed. OpenAI and Anthropic clients using Vercel's public
+    AI Gateway URL are detected automatically; pass ``provider="vercel"`` to
+    force gateway handling for a compatible client with a custom URL. Call
+    init(...) first to pass Metergraph options in code.
     """
     init()
     return _wrap(client, provider=provider)

@@ -135,6 +135,61 @@ def test_wrap_captures_openai_create_through_a_real_client(tmp_path):
     _capture.set_runtime(None)
 
 
+def test_wrap_captures_vercel_gateway_through_real_async_openai_client(tmp_path):
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root=str(tmp_path))))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "ai-gateway.vercel.sh"
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-gateway",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "anthropic/claude-sonnet-4.6",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "hi"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 3,
+                    "total_tokens": 14,
+                    "prompt_tokens_details": {"cached_tokens": 5},
+                },
+            },
+        )
+
+    client = AsyncOpenAI(
+        api_key="test",
+        base_url="https://ai-gateway.vercel.sh/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    metergraph.wrap(client)
+
+    async def run():
+        return await client.chat.completions.create(
+            model="anthropic/claude-sonnet-4.6",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+    response = asyncio.run(run())
+
+    assert response.choices[0].message.content == "hi"
+    assert len(rows.rows) == 1
+    row = rows.rows[0]
+    assert row["provider"] == "anthropic"
+    assert row["model"] == "anthropic/claude-sonnet-4.6"
+    assert row["input_tokens"] == 11
+    assert row["output_tokens"] == 3
+    assert row["cache_read_tokens"] == 5
+    _capture.set_runtime(None)
+
+
 def test_wrap_captures_anthropic_messages_create_through_a_real_client(tmp_path):
     rows = Rows()
     _capture.set_runtime(Runtime(rows, Options(app_root=str(tmp_path))))
@@ -174,6 +229,52 @@ def test_wrap_captures_anthropic_messages_create_through_a_real_client(tmp_path)
     assert row["endpoint"] == "messages"
     assert row["provider"] == "anthropic"
     assert row["input_tokens"] == 5
+    assert row["output_tokens"] == 2
+    _capture.set_runtime(None)
+
+
+def test_wrap_detects_vercel_gateway_through_real_async_anthropic_client(tmp_path):
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root=str(tmp_path))))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "ai-gateway.vercel.sh"
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_gateway",
+                "type": "message",
+                "role": "assistant",
+                "model": "anthropic/claude-sonnet-4.6",
+                "content": [{"type": "text", "text": "hi"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 7, "output_tokens": 2},
+            },
+        )
+
+    client = AsyncAnthropic(
+        api_key="test",
+        base_url="https://ai-gateway.vercel.sh",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    metergraph.wrap(client)
+
+    async def run():
+        return await client.messages.create(
+            model="anthropic/claude-sonnet-4.6",
+            max_tokens=10,
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+    response = asyncio.run(run())
+
+    assert response.content[0].text == "hi"
+    assert len(rows.rows) == 1
+    row = rows.rows[0]
+    assert row["provider"] == "anthropic"
+    assert row["model"] == "anthropic/claude-sonnet-4.6"
+    assert row["endpoint"] == "messages"
+    assert row["input_tokens"] == 7
     assert row["output_tokens"] == 2
     _capture.set_runtime(None)
 

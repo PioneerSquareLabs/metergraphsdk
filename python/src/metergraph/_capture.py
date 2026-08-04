@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
+from urllib.parse import urlsplit
 
 from ._context import CaptureContext, snapshot
 from ._template import scrub, template_hash
@@ -204,8 +205,7 @@ def _chunk_text(chunk: Any) -> str | None:
 
 def _usage_only_chunk(chunk: Any, call: "CallState") -> bool:
     return (
-        call.provider == "openai"
-        and call.endpoint == "chat.completions"
+        call.endpoint == "chat.completions"
         and _get(chunk, "choices") == []
         and _get(chunk, "usage") is not None
     )
@@ -1198,7 +1198,14 @@ def _patch_anthropic_batch_results(owner: Any) -> bool:
     return True
 
 
-def _patch(owner: Any, method_name: str, provider: str, endpoint: str) -> bool:
+def _patch(
+    owner: Any,
+    method_name: str,
+    provider: str,
+    endpoint: str,
+    *,
+    gateway: bool = False,
+) -> bool:
     original = getattr(owner, method_name, None)
     if not callable(original):
         return False
@@ -1223,7 +1230,8 @@ def _patch(owner: Any, method_name: str, provider: str, endpoint: str) -> bool:
                 else:
                     kwargs = {**kwargs, "stream_options": {"include_usage": True}}
         request = _request(args, kwargs)
-        call = runtime.call_state(provider, endpoint, request)
+        capture_provider = _gateway_provider(request) if gateway else provider
+        call = runtime.call_state(capture_provider, endpoint, request)
         try:
             result = original(*args, **kwargs)
         except BaseException as exc:
@@ -1321,14 +1329,44 @@ def _resolve(client: Any, path: str) -> Any:
     return obj
 
 
-def _apply_seams(client: Any, provider: str) -> list[str]:
+_VERCEL_GATEWAY_HOST = "ai-gateway.vercel.sh"
+_VERCEL_PROVIDER_ALIASES = {"gateway", "vercel", "vercel-ai-gateway"}
+
+
+def _uses_vercel_gateway(client: Any) -> bool:
+    """Recognize the public AI Gateway URL exposed by supported Python SDKs."""
+    base_url = getattr(client, "base_url", None) or getattr(
+        client, "_base_url", None
+    )
+    if base_url is None:
+        return False
+    try:
+        return urlsplit(str(base_url)).hostname == _VERCEL_GATEWAY_HOST
+    except (TypeError, ValueError):
+        return False
+
+
+def _gateway_provider(request: Mapping[str, Any]) -> str:
+    """Use the creator in Vercel's required `creator/model` identifier."""
+    model = str(request.get("model") or "").strip().lower()
+    creator, separator, _ = model.partition("/")
+    return creator if separator and creator else "vercel-ai-gateway"
+
+
+def _apply_seams(client: Any, provider: str, *, gateway: bool = False) -> list[str]:
     patched: list[str] = []
     for seam in SEAM_TABLES.get(provider, ()):
         try:
             owner = _resolve(client, seam.path)
         except Exception:
             continue  # a pathological client property must never break wrap()
-        if owner is not None and _patch(owner, seam.method, provider, seam.endpoint):
+        if owner is not None and _patch(
+            owner,
+            seam.method,
+            provider,
+            seam.endpoint,
+            gateway=gateway,
+        ):
             patched.append(f"{seam.path}.{seam.method}")
     return patched
 
@@ -1356,22 +1394,42 @@ def _apply_batch_extras(client: Any, provider: str) -> int:
 def wrap(client: Any, *, provider: str | None = None) -> Any:
     """Patch supported resource methods on an OpenAI, Anthropic, or Google client.
 
+    OpenAI and Anthropic clients pointed at Vercel AI Gateway are recognized
+    automatically. ``provider="vercel"`` can force gateway attribution for a
+    compatible client whose public base URL has been customized.
+
     Never raises: an unrecognized client shape, or an exception while probing
     it, results in an unmodified, uninstrumented client — not a crash.
     """
     try:
-        resolved_provider = provider or _detect_provider(client)
-        patched = _apply_seams(client, resolved_provider)
-        patched_count = len(patched) + _apply_batch_extras(client, resolved_provider)
+        gateway = (
+            provider.lower() in _VERCEL_PROVIDER_ALIASES
+            if isinstance(provider, str)
+            else _uses_vercel_gateway(client)
+        )
+        resolved_provider = (
+            _detect_provider(client)
+            if gateway
+            else provider or _detect_provider(client)
+        )
+        patched = _apply_seams(client, resolved_provider, gateway=gateway)
+        patched_count = len(patched)
+        if not gateway:
+            patched_count += _apply_batch_extras(client, resolved_provider)
+        client_label = (
+            f"Vercel AI Gateway via {resolved_provider}"
+            if gateway
+            else resolved_provider
+        )
         if not patched_count:
             log.warning(
-                "Metergraph found no supported methods on %s client", resolved_provider
+                "Metergraph found no supported methods on %s client", client_label
             )
         else:
             log.info(
                 "Metergraph patched %d seam(s) on %s client: %s",
                 patched_count,
-                resolved_provider,
+                client_label,
                 ", ".join(patched) or "(batch-only)",
             )
     except Exception:

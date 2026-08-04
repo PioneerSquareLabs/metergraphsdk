@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 authors = [{ name = "Pioneer Square Labs" }]
-keywords = ["llm", "observability", "openai", "anthropic", "gemini", "cost-tracking"]
+keywords = ["llm", "observability", "openai", "anthropic", "gemini", "vercel-ai-gateway", "cost-tracking"]
 classifiers = [
     "Intended Audience :: Developers",
     "Topic :: Software Development :: Libraries :: Python Modules",
