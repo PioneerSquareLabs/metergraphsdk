@@ -1,6 +1,6 @@
 # Metergraph SDKs
 
-Capture SDKs for [Metergraph](https://github.com/PioneerSquareLabs/metergraph), which tracks LLM costs by application function and trace. Wrap your OpenAI, Anthropic, or Gemini client and every call is attributed to the function that made it, with token counts (input/output, cache reads, aggregate and TTL-specific cache writes, reasoning), latency, and model. SDK rows contain usage counters, never embedded prices or client-computed cost. SDK 0.3 sends scrubbed request and normalized response content to the hosted service by default; applications can opt out globally or around a sensitive route or trace. The SDKs have no runtime dependencies.
+Capture SDKs for [Metergraph](https://github.com/PioneerSquareLabs/metergraph), which tracks LLM costs by application function and trace. Wrap your OpenAI, Anthropic, Gemini, or Python Vercel AI Gateway client—or add Metergraph middleware to a TypeScript Vercel AI SDK language model—and every call is attributed to the function that made it, with token counts (input/output, cache reads, aggregate and TTL-specific cache writes, reasoning), latency, and model. SDK rows contain usage counters, never embedded prices or client-computed cost. SDK 0.3 sends scrubbed request and normalized response content to the hosted service by default; applications can opt out globally or around a sensitive route or trace. The SDKs have no runtime dependencies.
 
 | Package | Registry | Source |
 |---|---|---|
@@ -30,6 +30,13 @@ that made the call. Set METERGRAPH_CAPTURE_TEXT=0 for metadata-only capture.
    wrap() returns the same client and initializes itself from the environment.
    Do not change any call sites, arguments, or error handling; streaming and
    async work unchanged.
+   Python OpenAI/Anthropic clients whose base URL is
+   https://ai-gateway.vercel.sh are Vercel AI Gateway clients and are detected
+   automatically. Preserve their AI_GATEWAY_API_KEY / VERCEL_OIDC_TOKEN and
+   creator-qualified model IDs; Metergraph must never capture those secrets.
+   For Vercel AI SDK `generateText` / `streamText` calls, wrap each language
+   model with `wrapLanguageModel({ model, middleware:
+   mg.vercelAISDKMiddleware() })` instead of wrapping a provider client.
 3. Configuration is env-var based: METERGRAPH_APP_TOKEN is required (capture
    is silently off without it), and METERGRAPH_INGEST_URL is only needed when
    self-hosting the server from https://github.com/PioneerSquareLabs/metergraph.
@@ -52,9 +59,8 @@ that made the call. Set METERGRAPH_CAPTURE_TEXT=0 for metadata-only capture.
 7. The SDK is fail-open: transport problems never break or slow LLM calls, so
    do not add defensive try/except around wrapping or the wrapped calls.
 
-When done, list every client you wrapped and where, and flag any LLM calls
-made through libraries other than the official openai / anthropic /
-@google/genai (google-genai) SDKs, since those are not captured.
+When done, list every client and Vercel AI SDK model you instrumented and where,
+and flag any LLM calls made through other paths, since those are not captured.
 ```
 
 ## Python
@@ -81,6 +87,30 @@ anthropic_client = metergraph.wrap(Anthropic())
 from google import genai
 gemini_client = metergraph.wrap(genai.Client())
 ```
+
+Vercel's Python integration is AI Gateway through the official OpenAI or
+Anthropic client (the `ai` middleware package itself is TypeScript). Metergraph
+detects the public gateway URL automatically and uses the `creator/model`
+prefix for catalog pricing:
+
+```python
+import os
+from openai import OpenAI
+
+gateway = metergraph.wrap(OpenAI(
+    api_key=os.getenv("AI_GATEWAY_API_KEY") or os.getenv("VERCEL_OIDC_TOKEN"),
+    base_url="https://ai-gateway.vercel.sh/v1",
+))
+
+gateway.chat.completions.create(
+    model="anthropic/claude-sonnet-4.6",
+    messages=[{"role": "user", "content": "Hello"}],
+)
+```
+
+Sync, async, streaming, tool calls, and Responses API requests use the same
+capture path. For a compatible client behind a custom gateway URL, pass
+`provider="vercel"` to `metergraph.wrap()`.
 
 Then use the wrapped client exactly as before:
 
@@ -127,10 +157,29 @@ const summarizeInvoice = mg.track("billing.summarize_invoice", async (invoice) =
 });
 ```
 
-In TypeScript, use `track()` for attribution. It stays reliable across bundlers and minifiers, where stack parsing does not. All three provider SDKs are optional peer dependencies, and the SDK itself has no runtime dependencies. To configure in code, call `mg.init({ token, ... })` before the first `wrap()`.
+In TypeScript, use `track()` for attribution. It stays reliable across bundlers and minifiers, where stack parsing does not. Provider SDKs and the Vercel AI SDK are optional peer dependencies, and Metergraph itself has no runtime dependencies. To configure in code, call `mg.init({ token, ... })` before the first `wrap()`.
 
 Use `await mg.trace("checkout", async () => { ... })` to group multiple calls,
 and pass `{ captureText: false }` for a metadata-only operation.
+
+Vercel AI SDK models use the same capture and trace path through middleware:
+
+```ts
+import { generateText, wrapLanguageModel } from "ai";
+import { openai } from "@ai-sdk/openai";
+
+const model = wrapLanguageModel({
+  model: openai("gpt-5.6-luna"),
+  middleware: mg.vercelAISDKMiddleware(),
+});
+
+await mg.trace("support-answer", () =>
+  generateText({ model, prompt: "Help this customer" })
+);
+```
+
+Each provider request in a multi-step AI SDK tool loop becomes its own costed
+span. Provider options and transport headers are excluded from capture.
 
 ## Where the data goes
 

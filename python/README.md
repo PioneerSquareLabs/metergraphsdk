@@ -1,6 +1,7 @@
 # metergraph (Python)
 
-Zero-runtime-dependency capture for OpenAI, Anthropic, and Gemini clients.
+Zero-runtime-dependency capture for OpenAI, Anthropic, Gemini, and Python
+Vercel AI Gateway clients.
 `wrap()` initializes capture from the environment, so setup is one line per
 client; call `metergraph.init(...)` before the first `wrap()` only to pass
 options in code.
@@ -29,6 +30,31 @@ metergraph.record_outcome(
     escalated=False,
 )
 ```
+
+Vercel's supported Python surface is AI Gateway through the OpenAI or
+Anthropic SDK. Point either client at the public gateway and `wrap()` detects
+it automatically:
+
+```python
+import os
+import metergraph
+from openai import OpenAI
+
+gateway = metergraph.wrap(OpenAI(
+    api_key=os.getenv("AI_GATEWAY_API_KEY") or os.getenv("VERCEL_OIDC_TOKEN"),
+    base_url="https://ai-gateway.vercel.sh/v1",
+))
+
+gateway.chat.completions.create(
+    model="anthropic/claude-sonnet-4.6",
+    messages=[{"role": "user", "content": "Hello"}],
+)
+```
+
+Creator-qualified model IDs are normalized for gateway catalog pricing. Sync,
+async, streaming, tool calls, and OpenAI Responses API calls are captured. Use
+`metergraph.wrap(client, provider="vercel")` only when a compatible client is
+behind a custom gateway URL that cannot be detected automatically.
 
 Configuration:
 
@@ -80,6 +106,9 @@ Instrument this codebase's LLM API costs with the `metergraph` PyPI package
 (https://github.com/PioneerSquareLabs/metergraphsdk): pip install metergraph,
 then wrap every OpenAI()/AsyncOpenAI(), Anthropic()/AsyncAnthropic(), and
 genai.Client() construction in place, e.g. client = metergraph.wrap(OpenAI()).
+OpenAI or Anthropic clients pointed at https://ai-gateway.vercel.sh are Vercel
+AI Gateway clients and are detected automatically; keep their creator/model ID
+and AI_GATEWAY_API_KEY / VERCEL_OIDC_TOKEN configuration unchanged.
 wrap() returns the same client and initializes itself from the environment:
 METERGRAPH_APP_TOKEN is required (capture is silently off without it) and
 METERGRAPH_INGEST_URL is only for self-hosted servers. Add both to

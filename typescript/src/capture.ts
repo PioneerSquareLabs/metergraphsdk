@@ -20,7 +20,7 @@ interface Frame {
   l: number;
 }
 
-interface CallState {
+export interface CallState {
   provider: string;
   endpoint: string;
   request: Record<string, unknown>;
@@ -44,30 +44,66 @@ function first(value: unknown): unknown {
 }
 
 function number(value: unknown): number | undefined {
+  if (typeof value === "boolean") return undefined;
   const parsed = Number(value);
-  return value == null || !Number.isFinite(parsed) ? undefined : parsed;
+  return value == null || !Number.isSafeInteger(parsed) || parsed < 0 ? undefined : parsed;
 }
 
-function usage(response: unknown): Record<string, number | undefined> {
-  const value = get(response, "usage") ?? get(response, "usage_metadata") ?? get(response, "usageMetadata");
+function usageValue(value: unknown): Record<string, number | undefined> {
   const prompt = get(value, "prompt_tokens_details") ?? get(value, "input_tokens_details")
     ?? get(value, "promptTokensDetails") ?? get(value, "inputTokensDetails");
   const completion = get(value, "completion_tokens_details") ?? get(value, "output_tokens_details")
     ?? get(value, "completionTokensDetails") ?? get(value, "outputTokensDetails");
+  const aiInput = get(value, "inputTokens");
+  const aiOutput = get(value, "outputTokens");
+  const aiInputDetails = get(value, "inputTokenDetails");
+  const aiOutputDetails = get(value, "outputTokenDetails");
   const cacheCreation = get(value, "cache_creation") ?? get(value, "cacheCreation");
   return {
-    input_tokens: number(get(value, "prompt_tokens") ?? get(value, "input_tokens") ?? get(value, "promptTokenCount")),
-    output_tokens: number(get(value, "completion_tokens") ?? get(value, "output_tokens") ?? get(value, "candidatesTokenCount")),
-    cache_read_tokens: number(get(value, "cache_read_input_tokens") ?? get(prompt, "cached_tokens") ?? get(value, "cachedContentTokenCount")),
+    input_tokens: number(get(value, "prompt_tokens") ?? get(value, "input_tokens")
+      ?? get(value, "promptTokenCount") ?? get(aiInput, "total") ?? aiInput),
+    output_tokens: number(get(value, "completion_tokens") ?? get(value, "output_tokens")
+      ?? get(value, "candidatesTokenCount") ?? get(aiOutput, "total") ?? aiOutput),
+    cache_read_tokens: number(get(value, "cache_read_input_tokens")
+      ?? get(prompt, "cached_tokens") ?? get(value, "cachedContentTokenCount")
+      ?? get(aiInput, "cacheRead") ?? get(aiInputDetails, "cacheReadTokens")),
     cache_write_tokens: number(get(value, "cache_creation_input_tokens")
       ?? get(prompt, "cache_write_tokens") ?? get(value, "cacheCreationInputTokens")
-      ?? get(prompt, "cacheWriteTokens")),
+      ?? get(prompt, "cacheWriteTokens") ?? get(aiInput, "cacheWrite")
+      ?? get(aiInputDetails, "cacheWriteTokens")),
     cache_write_5m_tokens: number(get(cacheCreation, "ephemeral_5m_input_tokens")
       ?? get(cacheCreation, "ephemeral5mInputTokens")),
     cache_write_1h_tokens: number(get(cacheCreation, "ephemeral_1h_input_tokens")
       ?? get(cacheCreation, "ephemeral1hInputTokens")),
-    reasoning_tokens: number(get(completion, "reasoning_tokens") ?? get(value, "thoughtsTokenCount")),
+    reasoning_tokens: number(get(completion, "reasoning_tokens")
+      ?? get(value, "thoughtsTokenCount") ?? get(aiOutput, "reasoning")
+      ?? get(aiOutputDetails, "reasoningTokens")),
   };
+}
+
+function usage(response: unknown): Record<string, number | undefined> {
+  const value = get(response, "usage") ?? get(response, "usage_metadata")
+    ?? get(response, "usageMetadata");
+  const normalized = usageValue(value);
+  const raw = get(value, "raw");
+  if (!raw || typeof raw !== "object") return normalized;
+
+  // AI SDK v4 retains provider-native usage under `raw`. Standardized totals
+  // and cache counts have consistent gateway semantics, while raw data fills
+  // provider-only details such as Anthropic's cache-write TTL split.
+  const provider = usageValue(raw);
+  const providerSpecific = new Set([
+    "cache_write_5m_tokens",
+    "cache_write_1h_tokens",
+  ]);
+  return Object.fromEntries(
+    Object.entries(normalized).map(([key, fallback]) => [
+      key,
+      providerSpecific.has(key)
+        ? provider[key] ?? fallback
+        : fallback ?? provider[key],
+    ]),
+  );
 }
 
 function responseText(response: unknown): string | undefined {
@@ -95,13 +131,17 @@ function responseText(response: unknown): string | undefined {
 
 export function chunkText(chunk: unknown): string | undefined {
   const delta = get(first(get(chunk, "choices")), "delta") ?? get(chunk, "delta");
+  if (typeof delta === "string" && get(chunk, "type") === "text-delta") return delta;
   const text = get(delta, "content") ?? get(delta, "text") ?? get(chunk, "text");
   return typeof text === "string" ? text : undefined;
 }
 
 function stopReason(response: unknown): string | undefined {
-  const value = get(response, "stop_reason") ?? get(response, "status") ?? get(first(get(response, "choices")), "finish_reason");
-  return value == null ? undefined : String(value);
+  const value = get(response, "stop_reason") ?? get(response, "status")
+    ?? get(response, "finishReason") ?? get(response, "finish_reason")
+    ?? get(first(get(response, "choices")), "finish_reason");
+  const normalized = get(value, "unified") ?? get(value, "raw") ?? value;
+  return normalized == null ? undefined : String(normalized);
 }
 
 function toolNames(request: Record<string, unknown>): { name: string }[] | undefined {
@@ -190,6 +230,18 @@ function toolEvents(
           get(block, "content"),
           Boolean(get(block, "is_error")),
         );
+      } else if (kind === "tool-call") {
+        add(
+          get(block, "toolCallId") ?? get(block, "tool_call_id") ?? get(block, "id"),
+          get(block, "toolName") ?? get(block, "tool_name") ?? get(block, "name"),
+          get(block, "input") ?? get(block, "arguments"),
+        );
+      } else if (kind === "tool-result" || kind === "tool-error") {
+        complete(
+          get(block, "toolCallId") ?? get(block, "tool_call_id") ?? get(block, "id"),
+          get(block, "output") ?? get(block, "result") ?? get(block, "error"),
+          kind === "tool-error" || Boolean(get(block, "isError") ?? get(block, "is_error")),
+        );
       }
     }
   };
@@ -216,6 +268,8 @@ function toolEvents(
       ? request.input
       : Array.isArray(request.contents)
         ? request.contents
+        : Array.isArray(request.prompt)
+          ? request.prompt
         : [];
   for (const message of history) {
     const messageCalls = get(message, "tool_calls");
@@ -303,7 +357,19 @@ function toolEvents(
       }
     }
     const kind = get(chunk, "type");
-    if (kind === "content_block_start") {
+    if (kind === "tool-call") {
+      add(
+        get(chunk, "toolCallId") ?? get(chunk, "tool_call_id") ?? get(chunk, "id"),
+        get(chunk, "toolName") ?? get(chunk, "tool_name") ?? get(chunk, "name"),
+        get(chunk, "input") ?? get(chunk, "arguments"),
+      );
+    } else if (kind === "tool-result" || kind === "tool-error") {
+      complete(
+        get(chunk, "toolCallId") ?? get(chunk, "tool_call_id") ?? get(chunk, "id"),
+        get(chunk, "output") ?? get(chunk, "result") ?? get(chunk, "error"),
+        kind === "tool-error" || Boolean(get(chunk, "isError") ?? get(chunk, "is_error")),
+      );
+    } else if (kind === "content_block_start") {
       const block = get(chunk, "content_block");
       if (get(block, "type") === "tool_use") {
         const key = String(get(chunk, "index") ?? anthropicDeltas.size);
@@ -363,15 +429,16 @@ function responseEnvelope(
   error: unknown,
   status: string,
 ): Record<string, unknown> {
+  const responseMetadata = get(response, "response");
   const envelope: Record<string, unknown> = {
     role: "assistant",
     content: responseContent(response, aggregate),
     tool_calls: tools ?? [],
     finish_reason: stopReason(response),
     request_id: get(response, "_request_id") ?? get(response, "response_id")
-      ?? get(response, "responseId") ?? get(response, "id"),
+      ?? get(response, "responseId") ?? get(response, "id") ?? get(responseMetadata, "id"),
     model: get(response, "model") ?? get(response, "model_version")
-      ?? get(response, "modelVersion"),
+      ?? get(response, "modelVersion") ?? get(responseMetadata, "modelId"),
     status,
   };
   if (error !== undefined) {
@@ -501,15 +568,33 @@ export class CaptureRuntime {
       ),
       "response",
     );
-    const persistedTools = captureText
-      ? fullTools
-      : fullTools?.map((item) => ({
+    let toolTruncated = false;
+    let persistedTools: ToolEvent[] | undefined;
+    if (fullTools && captureText) {
+      const encodedTools = text(JSON.stringify(fullTools), "response");
+      toolTruncated = encodedTools.truncated;
+      try {
+        persistedTools = encodedTools.value
+          ? JSON.parse(encodedTools.value) as ToolEvent[]
+          : undefined;
+      } catch {
+        // A truncated JSON payload is intentionally omitted. The bounded,
+        // redacted response envelope still describes the call and the row's
+        // text_truncated flag tells ingestion why this field is unavailable.
+        persistedTools = undefined;
+      }
+    } else if (fullTools) {
+      persistedTools = fullTools.map((item) => ({
         call_id: item.call_id,
         name: item.name,
         status: item.status,
         idempotency: item.idempotency,
       }));
+    }
     const firstFrame = state.frames[0];
+    const observedToolNames = fullTools
+      ? [...new Set(fullTools.map((item) => item.name))]
+      : undefined;
     this.transport.enqueue({
       ts: state.ts,
       route: state.context.route,
@@ -527,10 +612,12 @@ export class CaptureRuntime {
       template_hash: templateHash(state.request),
       unit_name: state.context.unitName,
       unit_count: state.context.unitCount,
-      tool_calls: persistedTools ?? toolNames(state.request),
+      tool_calls: fullTools ? persistedTools : toolNames(state.request),
+      tool_names: observedToolNames?.length ? observedToolNames : undefined,
       endpoint: state.endpoint,
       request_id: get(response, "_request_id") ?? get(response, "response_id")
-        ?? get(response, "responseId") ?? get(response, "id"),
+        ?? get(response, "responseId") ?? get(response, "id")
+        ?? get(get(response, "response"), "id"),
       batch: state.request.batch === true,
       batch_custom_id: state.request.batch_custom_id,
       // Explicit false is the sensitive-operation opt-out; hosted ingestion
@@ -538,7 +625,7 @@ export class CaptureRuntime {
       content_opted_in: captureText,
       request_json: request.value,
       response_text: output.value,
-      text_truncated: request.truncated || output.truncated,
+      text_truncated: request.truncated || output.truncated || toolTruncated,
       stream: extra.stream ?? false,
       ttft_ms: extra.ttftMs,
       func: state.context.funcName

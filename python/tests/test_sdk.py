@@ -122,11 +122,72 @@ def test_wrap_sync_records_usage_context_and_preserves_response(tmp_path):
     assert row["unit_name"] == "answer"
     assert row["conversation_id"] == "conversation-7"
     assert row["tool_calls"] is None
+    assert row["tool_names"] is None
     assert row["content_opted_in"] is True
     assert row["request_json"]
     assert row["func"].endswith(
         ":test_wrap_sync_records_usage_context_and_preserves_response"
     )
+    _capture.set_runtime(None)
+
+
+def test_wrap_auto_detects_vercel_gateway_openai_protocol(tmp_path):
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root=str(tmp_path))))
+
+    class Completions:
+        def create(self, **kwargs):
+            return response("gateway done")
+
+    client = SimpleNamespace(
+        base_url="https://ai-gateway.vercel.sh/v1/",
+        chat=SimpleNamespace(completions=Completions()),
+    )
+    metergraph.wrap(client)
+    result = client.chat.completions.create(
+        model="anthropic/claude-sonnet-4.6",
+        messages=[{"role": "user", "content": "hello"}],
+    )
+
+    assert result.choices[0].message.content == "gateway done"
+    assert len(rows.rows) == 1
+    row = rows.rows[0]
+    assert row["provider"] == "anthropic"
+    assert row["model"] == "anthropic/claude-sonnet-4.6"
+    assert row["endpoint"] == "chat.completions"
+    assert row["input_tokens"] == 12
+    _capture.set_runtime(None)
+
+
+def test_wrap_vercel_override_supports_custom_anthropic_protocol_url(tmp_path):
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root=str(tmp_path))))
+
+    class Messages:
+        def create(self, **kwargs):
+            return SimpleNamespace(
+                content=[SimpleNamespace(text="gateway done")],
+                usage=SimpleNamespace(input_tokens=8, output_tokens=3),
+                stop_reason="end_turn",
+            )
+
+    client = SimpleNamespace(
+        base_url="https://gateway.example.test",
+        messages=Messages(),
+    )
+    metergraph.wrap(client, provider="vercel")
+    client.messages.create(
+        model="openai/gpt-5.4",
+        max_tokens=20,
+        messages=[{"role": "user", "content": "hello"}],
+    )
+
+    assert len(rows.rows) == 1
+    row = rows.rows[0]
+    assert row["provider"] == "openai"
+    assert row["model"] == "openai/gpt-5.4"
+    assert row["endpoint"] == "messages"
+    assert row["input_tokens"] == 8
     _capture.set_runtime(None)
 
 
@@ -515,6 +576,7 @@ def test_openai_completed_tool_history_is_replay_grade(tmp_path):
             "idempotency": "idempotent",
         }
     ]
+    assert rows.rows[0]["tool_names"] == ["lookup_order"]
 
 
 def test_anthropic_response_tool_use_is_requested_not_replayable(tmp_path):
@@ -554,6 +616,7 @@ def test_anthropic_response_tool_use_is_requested_not_replayable(tmp_path):
             "idempotency": "non_idempotent",
         }
     ]
+    assert rows.rows[0]["tool_names"] == ["create_refund"]
     assert captured_response(rows.rows[0])["tool_calls"] == rows.rows[0]["tool_calls"]
 
 
@@ -602,6 +665,7 @@ def test_gemini_response_normalizes_function_calls(tmp_path):
             "idempotency": "non_idempotent",
         }
     ]
+    assert rows.rows[0]["tool_names"] == ["lookup_order"]
     assert captured_response(rows.rows[0])["tool_calls"] == rows.rows[0]["tool_calls"]
 
 
@@ -971,7 +1035,59 @@ def test_stream_records_ttft_and_final_usage(tmp_path):
         "status": "requested",
         "idempotency": "non_idempotent",
     }
+    assert rows.rows[0]["tool_names"] == ["lookup"]
     assert rows.rows[0]["request_json"].find("include_usage") >= 0
+    _capture.set_runtime(None)
+
+
+def test_vercel_gateway_stream_preserves_usage_and_creator(tmp_path):
+    rows = Rows()
+    _capture.set_runtime(
+        Runtime(rows, Options(app_root=str(tmp_path), capture_text=True))
+    )
+
+    class Completions:
+        def create(self, **kwargs):
+            assert kwargs["stream_options"] == {"include_usage": True}
+            return iter(
+                [
+                    SimpleNamespace(
+                        choices=[SimpleNamespace(delta=SimpleNamespace(content="ok"))],
+                        usage=None,
+                    ),
+                    SimpleNamespace(
+                        choices=[],
+                        usage=SimpleNamespace(
+                            prompt_tokens=9,
+                            completion_tokens=2,
+                            prompt_tokens_details=SimpleNamespace(cached_tokens=4),
+                        ),
+                    ),
+                ]
+            )
+
+    client = SimpleNamespace(
+        base_url="https://ai-gateway.vercel.sh/v1",
+        chat=SimpleNamespace(completions=Completions()),
+    )
+    metergraph.wrap(client)
+    chunks = list(
+        client.chat.completions.create(
+            model="xai/grok-4.3",
+            messages=[],
+            stream=True,
+        )
+    )
+
+    assert len(chunks) == 1
+    row = rows.rows[0]
+    assert row["provider"] == "xai"
+    assert row["model"] == "xai/grok-4.3"
+    assert row["stream"] is True
+    assert row["input_tokens"] == 9
+    assert row["output_tokens"] == 2
+    assert row["cache_read_tokens"] == 4
+    assert captured_response(row)["content"] == "ok"
     _capture.set_runtime(None)
 
 

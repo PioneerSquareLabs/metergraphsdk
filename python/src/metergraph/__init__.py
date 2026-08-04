@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import math
 import os
 import uuid
 from datetime import datetime, timezone
@@ -115,10 +116,13 @@ def init(
 
 
 def wrap(client: Any, *, provider: str | None = None) -> Any:
-    """Wrap an OpenAI, Anthropic, or Google client for capture.
+    """Wrap an OpenAI, Anthropic, Google, or Vercel AI Gateway client.
 
     Calls init() automatically, so with env-var configuration this is the
-    only setup line needed. Call init(...) first to pass options in code.
+    only setup line needed. OpenAI and Anthropic clients using Vercel's public
+    AI Gateway URL are detected automatically; pass ``provider="vercel"`` to
+    force gateway handling for a compatible client with a custom URL. Call
+    init(...) first to pass Metergraph options in code.
     """
     init()
     return _wrap(client, provider=provider)
@@ -154,26 +158,33 @@ def record_outcome(
     event_id = str(event_id or uuid.uuid4()).strip()[:128]
     try:
         feedback_score = float(feedback_score) if feedback_score is not None else None
-        turns_to_resolution = (
-            int(turns_to_resolution) if turns_to_resolution is not None else None
-        )
         edit_distance_ratio = (
             float(edit_distance_ratio) if edit_distance_ratio is not None else None
-        )
-        regeneration_count = (
-            int(regeneration_count) if regeneration_count is not None else None
         )
     except (TypeError, ValueError, OverflowError):
         return False
     if not route_name or not model or not session_key or not event_id:
         return False
-    if feedback_score is not None and not -1 <= feedback_score <= 1:
+    if feedback_score is not None and (
+        not math.isfinite(feedback_score) or not -1 <= feedback_score <= 1
+    ):
         return False
-    if turns_to_resolution is not None and not 1 <= turns_to_resolution <= 1_000_000:
+    if turns_to_resolution is not None and (
+        isinstance(turns_to_resolution, bool)
+        or not isinstance(turns_to_resolution, int)
+        or not 1 <= turns_to_resolution <= 1_000_000
+    ):
         return False
-    if edit_distance_ratio is not None and not 0 <= edit_distance_ratio <= 1:
+    if edit_distance_ratio is not None and (
+        not math.isfinite(edit_distance_ratio)
+        or not 0 <= edit_distance_ratio <= 1
+    ):
         return False
-    if regeneration_count is not None and not 0 <= regeneration_count <= 1_000_000:
+    if regeneration_count is not None and (
+        isinstance(regeneration_count, bool)
+        or not isinstance(regeneration_count, int)
+        or not 0 <= regeneration_count <= 1_000_000
+    ):
         return False
     if escalated is not None and not isinstance(escalated, bool):
         return False
