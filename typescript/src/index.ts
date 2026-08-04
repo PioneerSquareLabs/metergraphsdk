@@ -12,6 +12,12 @@ import {
 import { track } from "./track.js";
 import { Transport, type TransportMode, type WaitUntil } from "./transport.js";
 import { setCaptureRuntime, wrap as wrapProvider } from "./wrap.js";
+import {
+  createVercelAISDKMiddleware,
+  type VercelAISDKMiddleware,
+  type VercelAISDKMiddlewareOptions,
+  type VercelAISDKSpecificationVersion,
+} from "./vercel-ai.js";
 
 export interface MetergraphOptions {
   token?: string;
@@ -208,5 +214,25 @@ export function wrap<T extends Record<PropertyKey, any>>(
 
 export const wrapClient = wrap;
 
+/**
+ * Capture Vercel AI SDK language-model calls through its middleware API.
+ * The returned middleware has no runtime dependency on `ai`.
+ */
+export function vercelAISDKMiddleware<
+  TVersion extends VercelAISDKSpecificationVersion = "v3",
+>(
+  options: VercelAISDKMiddlewareOptions<TVersion> = {},
+): VercelAISDKMiddleware<TVersion> {
+  init();
+  return createVercelAISDKMiddleware(options);
+}
+
 export { route, setSession, setTags, trace, track };
-export type { RouteOptions, TraceOptions, TransportMode };
+export type {
+  RouteOptions,
+  TraceOptions,
+  TransportMode,
+  VercelAISDKMiddleware,
+  VercelAISDKMiddlewareOptions,
+  VercelAISDKSpecificationVersion,
+};

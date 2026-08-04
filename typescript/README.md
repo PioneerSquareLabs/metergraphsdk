@@ -1,8 +1,9 @@
 # metergraph (TypeScript)
 
-Zero-runtime-dependency capture for OpenAI, Anthropic, and Gemini clients on
-Node 18+, including AWS Lambda. Worker-style `waitUntil` hooks are present but
-are not part of the v1 public-package qualification contract.
+Zero-runtime-dependency capture for OpenAI, Anthropic, and Gemini clients plus
+provider-independent Vercel AI SDK language models on Node 18+, including AWS
+Lambda. Worker-style `waitUntil` hooks are present but are not part of the v1
+public-package qualification contract.
 
 `wrap()` initializes capture from the environment, so setup is one line per
 client; call `init(...)` before the first `wrap()` only to pass options in
@@ -32,6 +33,40 @@ recordOutcome("ticket-classifier", {
   escalated: false,
 });
 ```
+
+## Vercel AI SDK
+
+Use Metergraph as language-model middleware. It records each actual provider
+request made by `generateText` or `streamText`, so multi-step tool loops produce
+one costed span per model call rather than an inaccurate aggregate:
+
+```ts
+import { generateText, wrapLanguageModel } from "ai";
+import { openai } from "@ai-sdk/openai";
+import * as mg from "metergraph";
+
+const model = wrapLanguageModel({
+  model: openai("gpt-5.6-luna"),
+  middleware: mg.vercelAISDKMiddleware(),
+});
+
+const result = await mg.trace("support-answer", () =>
+  mg.route("support.answer", () =>
+    generateText({ model, prompt: "Help this customer" })
+  )
+);
+```
+
+The middleware is provider-independent and retains the model/provider identity,
+normalized input, output, cache, and reasoning tokens, response ID, finish
+reason, latency, streaming TTFT, and tool calls. Vercel AI Gateway model IDs
+such as `anthropic/claude-sonnet-5` are attributed to their upstream provider
+for server-side pricing. Provider options, abort signals, and transport headers
+are never serialized. Calls outside `trace()` remain valid one-span traces;
+wrap a multi-call workflow in `trace()` to group its spans.
+
+The default middleware version works with AI SDK 6 and 7. For AI SDK 5, use
+`vercelAISDKMiddleware({ specificationVersion: "v2" })`.
 
 `modelFor(routeName, { default, sessionKey })` takes an options object.
 **Breaking change from `metergraph@0.1.0`**, which took positional
@@ -99,7 +134,9 @@ wrapped client with mg.track("stable.name", fn), because stack-based
 attribution is unreliable under bundlers. On serverless (Lambda / Workers /
 Vercel), ensure delivery before the runtime freezes: mg.wrapHandler(handler),
 or mg.bindWaitUntil(ctx) once per request, or await mg.flush() before
-returning; long-running servers need nothing extra. When done, list every
-client you wrapped and flag LLM calls made outside the official openai /
-@anthropic-ai/sdk / @google/genai SDKs, since those are not captured.
+returning; long-running servers need nothing extra. For Vercel AI SDK calls,
+wrap each language model with wrapLanguageModel({ model, middleware:
+mg.vercelAISDKMiddleware() }); do not also wrap its internal provider transport.
+When done, list every client and AI SDK model you instrumented, and flag LLM
+calls made outside these supported paths.
 ```

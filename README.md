@@ -1,6 +1,6 @@
 # Metergraph SDKs
 
-Capture SDKs for [Metergraph](https://github.com/PioneerSquareLabs/metergraph), which tracks LLM costs by application function and trace. Wrap your OpenAI, Anthropic, or Gemini client and every call is attributed to the function that made it, with token counts (input/output, cache reads, aggregate and TTL-specific cache writes, reasoning), latency, and model. SDK rows contain usage counters, never embedded prices or client-computed cost. SDK 0.3 sends scrubbed request and normalized response content to the hosted service by default; applications can opt out globally or around a sensitive route or trace. The SDKs have no runtime dependencies.
+Capture SDKs for [Metergraph](https://github.com/PioneerSquareLabs/metergraph), which tracks LLM costs by application function and trace. Wrap your OpenAI, Anthropic, or Gemini client—or add Metergraph middleware to a Vercel AI SDK language model—and every call is attributed to the function that made it, with token counts (input/output, cache reads, aggregate and TTL-specific cache writes, reasoning), latency, and model. SDK rows contain usage counters, never embedded prices or client-computed cost. SDK 0.3 sends scrubbed request and normalized response content to the hosted service by default; applications can opt out globally or around a sensitive route or trace. The SDKs have no runtime dependencies.
 
 | Package | Registry | Source |
 |---|---|---|
@@ -30,6 +30,9 @@ that made the call. Set METERGRAPH_CAPTURE_TEXT=0 for metadata-only capture.
    wrap() returns the same client and initializes itself from the environment.
    Do not change any call sites, arguments, or error handling; streaming and
    async work unchanged.
+   For Vercel AI SDK `generateText` / `streamText` calls, wrap each language
+   model with `wrapLanguageModel({ model, middleware:
+   mg.vercelAISDKMiddleware() })` instead of wrapping a provider client.
 3. Configuration is env-var based: METERGRAPH_APP_TOKEN is required (capture
    is silently off without it), and METERGRAPH_INGEST_URL is only needed when
    self-hosting the server from https://github.com/PioneerSquareLabs/metergraph.
@@ -52,9 +55,8 @@ that made the call. Set METERGRAPH_CAPTURE_TEXT=0 for metadata-only capture.
 7. The SDK is fail-open: transport problems never break or slow LLM calls, so
    do not add defensive try/except around wrapping or the wrapped calls.
 
-When done, list every client you wrapped and where, and flag any LLM calls
-made through libraries other than the official openai / anthropic /
-@google/genai (google-genai) SDKs, since those are not captured.
+When done, list every client and Vercel AI SDK model you instrumented and where,
+and flag any LLM calls made through other paths, since those are not captured.
 ```
 
 ## Python
@@ -127,10 +129,29 @@ const summarizeInvoice = mg.track("billing.summarize_invoice", async (invoice) =
 });
 ```
 
-In TypeScript, use `track()` for attribution. It stays reliable across bundlers and minifiers, where stack parsing does not. All three provider SDKs are optional peer dependencies, and the SDK itself has no runtime dependencies. To configure in code, call `mg.init({ token, ... })` before the first `wrap()`.
+In TypeScript, use `track()` for attribution. It stays reliable across bundlers and minifiers, where stack parsing does not. Provider SDKs and the Vercel AI SDK are optional peer dependencies, and Metergraph itself has no runtime dependencies. To configure in code, call `mg.init({ token, ... })` before the first `wrap()`.
 
 Use `await mg.trace("checkout", async () => { ... })` to group multiple calls,
 and pass `{ captureText: false }` for a metadata-only operation.
+
+Vercel AI SDK models use the same capture and trace path through middleware:
+
+```ts
+import { generateText, wrapLanguageModel } from "ai";
+import { openai } from "@ai-sdk/openai";
+
+const model = wrapLanguageModel({
+  model: openai("gpt-5.6-luna"),
+  middleware: mg.vercelAISDKMiddleware(),
+});
+
+await mg.trace("support-answer", () =>
+  generateText({ model, prompt: "Help this customer" })
+);
+```
+
+Each provider request in a multi-step AI SDK tool loop becomes its own costed
+span. Provider options and transport headers are excluded from capture.
 
 ## Where the data goes
 

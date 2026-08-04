@@ -14,7 +14,9 @@
   "files": ["dist", "README.md"],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test test/*.test.mjs"
+    "prepack": "npm run build",
+    "test": "npm run build && npm run test:types && node --test test/*.test.mjs",
+    "test:types": "tsc --noEmit --strict --skipLibCheck --target ES2022 --module NodeNext --moduleResolution NodeNext test/types.test.ts"
   },
   "engines": {
     "node": ">=18"
@@ -30,9 +32,10 @@
   "bugs": {
     "url": "https://github.com/PioneerSquareLabs/metergraphsdk/issues"
   },
-  "keywords": ["llm", "observability", "openai", "anthropic", "gemini", "cost-tracking"],
+  "keywords": ["llm", "observability", "openai", "anthropic", "gemini", "vercel-ai-sdk", "cost-tracking"],
   "dependencies": {},
   "devDependencies": {
+    "ai": "^7.0.51",
     "@types/node": "^24.0.0",
     "typescript": "^5.8.0",
     "openai": "^7",
@@ -42,11 +45,13 @@
   "peerDependencies": {
     "@anthropic-ai/sdk": ">=0.30",
     "@google/genai": ">=1",
+    "ai": ">=5",
     "openai": ">=4"
   },
   "peerDependenciesMeta": {
     "openai": {"optional": true},
     "@anthropic-ai/sdk": {"optional": true},
-    "@google/genai": {"optional": true}
+    "@google/genai": {"optional": true},
+    "ai": {"optional": true}
   }
 }

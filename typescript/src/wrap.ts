@@ -19,6 +19,11 @@ export function setCaptureRuntime(value?: CaptureRuntime): void {
   runtime = value;
 }
 
+/** @internal Used by optional framework adapters without adding runtime dependencies. */
+export function getCaptureRuntime(): CaptureRuntime | undefined {
+  return runtime;
+}
+
 function requestFrom(args: unknown[]): Record<string, unknown> {
   const first = args[0];
   return first && typeof first === "object" ? { ...(first as Record<string, unknown>) } : {};

@@ -10,6 +10,7 @@ import { gunzipSync } from "node:zlib";
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
 import { GoogleGenAI } from "@google/genai";
+import { generateText, streamText, wrapLanguageModel } from "ai";
 
 import {
   DEFAULT_INGEST_URL,
@@ -22,6 +23,7 @@ import {
   shutdown,
   track,
   trace,
+  vercelAISDKMiddleware,
   wrap,
 } from "../dist/index.js";
 import { CaptureRuntime } from "../dist/capture.js";
@@ -511,6 +513,293 @@ test("capture scrubs credentials, applies redaction, and independently bounds UT
   assert.equal(row.text_truncated, true);
   assert.match(row.request_json, /<metergraph:truncated>$/);
   assert.match(row.response_text, /<metergraph:truncated>$/);
+});
+
+test("captured tool calls use response redaction and the shared UTF-8 bound", () => {
+  const rows = [];
+  const runtime = stubRuntime(rows, {
+    redact(value, kind) {
+      return value.replaceAll("customer-secret", `<redacted-${kind}>`);
+    },
+  });
+  const state = runtime.start("openai", "responses", {
+    model: "test",
+    input: "invoke the tool",
+    tools: [{ type: "function", function: { name: "lookup_order" } }],
+  });
+  runtime.finish(state, {
+    id: "response-tool-1",
+    output: [{
+      type: "function_call",
+      call_id: "call_1",
+      name: "lookup_order",
+      arguments: JSON.stringify({
+        account: "customer-secret",
+        payload: "ü".repeat(80_000),
+      }),
+    }],
+    status: "completed",
+  });
+
+  const row = rows[0];
+  assert.doesNotMatch(row.response_text, /customer-secret/);
+  assert.ok(Buffer.byteLength(row.response_text) <= 100 * 1024);
+  assert.equal(row.tool_calls, undefined);
+  assert.equal(row.text_truncated, true);
+
+  const small = runtime.start("openai", "responses", {
+    model: "test",
+    input: "invoke the tool",
+    tools: [{ type: "function", function: { name: "lookup_order" } }],
+  });
+  runtime.finish(small, {
+    id: "response-tool-2",
+    output: [{
+      type: "function_call",
+      call_id: "call_2",
+      name: "lookup_order",
+      arguments: JSON.stringify({ account: "customer-secret" }),
+    }],
+    status: "completed",
+  });
+  assert.doesNotMatch(JSON.stringify(rows[1].tool_calls), /customer-secret/);
+  assert.match(JSON.stringify(rows[1].tool_calls), /redacted-response/);
+});
+
+test("async provider errors are captured without changing the thrown error", async (t) => {
+  const rows = [];
+  setCaptureRuntime(stubRuntime(rows));
+  t.after(() => setCaptureRuntime());
+  class ProviderUnavailableError extends Error {
+    constructor(message) {
+      super(message);
+      this.name = "ProviderUnavailableError";
+    }
+  }
+  const client = wrap({
+    messages: {
+      async create() {
+        throw new ProviderUnavailableError("provider down");
+      },
+    },
+  }, "anthropic");
+
+  await assert.rejects(
+    client.messages.create({ model: "claude-test", messages: [] }),
+    (error) => error instanceof ProviderUnavailableError
+      && error.message === "provider down",
+  );
+  assert.equal(rows[0].error, true);
+  assert.equal(rows[0].error_type, "ProviderUnavailableError");
+  assert.deepEqual(capturedResponse(rows[0]).error, {
+    type: "ProviderUnavailableError",
+    message: "provider down",
+  });
+});
+
+test("Vercel AI SDK middleware captures generateText and streamText in one trace", async (t) => {
+  const rows = [];
+  setCaptureRuntime(stubRuntime(rows));
+  t.after(() => setCaptureRuntime());
+
+  const usage = {
+    inputTokens: { total: 12, noCache: 8, cacheRead: 4, cacheWrite: 2 },
+    outputTokens: { total: 5, text: 3, reasoning: 2 },
+  };
+  const baseModel = {
+    specificationVersion: "v4",
+    provider: "openai.responses",
+    modelId: "gpt-5.6-luna",
+    supportedUrls: {},
+    async doGenerate(options) {
+      assert.equal(options.headers.authorization, "Bearer provider-secret");
+      return {
+        content: [{ type: "text", text: "generated answer" }],
+        finishReason: { unified: "stop", raw: "stop" },
+        usage,
+        warnings: [],
+        response: {
+          id: "ai-generate-1",
+          timestamp: new Date(),
+          modelId: "gpt-5.6-luna",
+        },
+      };
+    },
+    async doStream() {
+      return {
+        stream: new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: "stream-start", warnings: [] });
+            controller.enqueue({
+              type: "response-metadata",
+              id: "ai-stream-1",
+              timestamp: new Date(),
+              modelId: "gpt-5.6-luna",
+            });
+            controller.enqueue({ type: "text-start", id: "text-1" });
+            controller.enqueue({ type: "text-delta", id: "text-1", delta: "streamed " });
+            controller.enqueue({ type: "text-delta", id: "text-1", delta: "answer" });
+            controller.enqueue({ type: "text-end", id: "text-1" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: { unified: "stop", raw: "stop" },
+              usage,
+            });
+            controller.close();
+          },
+        }),
+      };
+    },
+  };
+  const model = wrapLanguageModel({
+    model: baseModel,
+    middleware: vercelAISDKMiddleware(),
+  });
+  const traceId = "a".repeat(32);
+
+  await trace("ai-workflow", async () => {
+    await route("support.answer", async () => {
+      const generated = await generateText({
+        model,
+        prompt: "help the customer",
+        headers: { authorization: "Bearer provider-secret" },
+        providerOptions: { openai: { apiKey: "provider-secret" } },
+      });
+      assert.equal(generated.text, "generated answer");
+
+      const streamed = streamText({ model, prompt: "stream the answer" });
+      assert.equal(await streamed.text, "streamed answer");
+    });
+  }, { traceId });
+
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((row) => row.endpoint), ["ai.doGenerate", "ai.doStream"]);
+  assert.deepEqual(new Set(rows.map((row) => row.trace_id)), new Set([traceId]));
+  assert.deepEqual(new Set(rows.map((row) => row.trace_name)), new Set(["ai-workflow"]));
+  assert.deepEqual(new Set(rows.map((row) => row.route)), new Set(["support.answer"]));
+  for (const row of rows) {
+    assert.equal(row.provider, "openai");
+    assert.equal(row.model, "gpt-5.6-luna");
+    assert.equal(row.input_tokens, 12);
+    assert.equal(row.output_tokens, 5);
+    assert.equal(row.cache_read_tokens, 4);
+    assert.equal(row.cache_write_tokens, 2);
+    assert.equal(row.reasoning_tokens, 2);
+    assert.doesNotMatch(row.request_json, /provider-secret|authorization|apiKey/);
+  }
+  assert.equal(rows[0].request_id, "ai-generate-1");
+  assert.equal(capturedResponse(rows[0]).content, "generated answer");
+  assert.equal(rows[1].request_id, "ai-stream-1");
+  assert.equal(rows[1].stream, true);
+  assert.equal(capturedResponse(rows[1]).content, "streamed answer");
+  assert.ok(rows[1].ttft_ms >= 0);
+});
+
+test("Vercel AI SDK middleware captures gateway tool calls and preserves failures", async (t) => {
+  const rows = [];
+  setCaptureRuntime(stubRuntime(rows));
+  t.after(() => setCaptureRuntime());
+  const middleware = vercelAISDKMiddleware({ specificationVersion: "v4" });
+  const model = { provider: "gateway", modelId: "anthropic/claude-sonnet-5" };
+  const params = {
+    prompt: [{ role: "user", content: [{ type: "text", text: "look it up" }] }],
+    tools: [{ type: "function", name: "lookup_order", inputSchema: { type: "object" } }],
+  };
+  const response = {
+    content: [
+      { type: "tool-call", toolCallId: "call-1", toolName: "lookup_order", input: "{\"id\":\"ord-1\"}" },
+      { type: "tool-result", toolCallId: "call-1", toolName: "lookup_order", result: { found: true } },
+    ],
+    finishReason: { unified: "tool-calls", raw: "tool_use" },
+    usage: {
+      inputTokens: { total: 20, noCache: 20, cacheRead: 0, cacheWrite: 0 },
+      outputTokens: { total: 7, text: 0, reasoning: 0 },
+    },
+    response: { id: "gateway-1", modelId: "claude-sonnet-5" },
+  };
+
+  assert.equal(await middleware.wrapGenerate({
+    model,
+    params,
+    doGenerate: async () => response,
+    doStream: async () => assert.fail("unexpected stream fallback"),
+  }), response);
+
+  class GatewayFailure extends Error {
+    constructor(message) {
+      super(message);
+      this.name = "GatewayFailure";
+    }
+  }
+  const failure = new GatewayFailure("gateway unavailable");
+  await assert.rejects(
+    middleware.wrapGenerate({
+      model,
+      params,
+      doGenerate: async () => { throw failure; },
+      doStream: async () => assert.fail("unexpected stream fallback"),
+    }),
+    (error) => error === failure,
+  );
+
+  assert.equal(rows[0].provider, "anthropic");
+  assert.equal(rows[0].model, "anthropic/claude-sonnet-5");
+  assert.deepEqual(rows[0].tool_names, ["lookup_order"]);
+  assert.deepEqual(rows[0].tool_calls, [{
+    call_id: "call-1",
+    name: "lookup_order",
+    arguments: { id: "ord-1" },
+    result: { found: true },
+    status: "completed",
+    idempotency: "non_idempotent",
+  }]);
+  assert.equal(rows[1].error, true);
+  assert.equal(rows[1].error_type, "GatewayFailure");
+  assert.deepEqual(capturedResponse(rows[1]).error, {
+    type: "GatewayFailure",
+    message: "gateway unavailable",
+  });
+});
+
+test("Vercel AI SDK middleware enriches normalized usage with raw TTL details", async (t) => {
+  const rows = [];
+  setCaptureRuntime(stubRuntime(rows));
+  t.after(() => setCaptureRuntime());
+
+  const middleware = vercelAISDKMiddleware({ specificationVersion: "v4" });
+  const response = {
+    content: [{ type: "text", text: "cached" }],
+    finishReason: { unified: "stop", raw: "end_turn" },
+    usage: {
+      inputTokens: { total: 140, noCache: 90, cacheRead: 40, cacheWrite: 10 },
+      outputTokens: { total: 12, text: 10, reasoning: 2 },
+      raw: {
+        input_tokens: 90,
+        output_tokens: 12,
+        cache_read_input_tokens: 40,
+        cache_creation_input_tokens: 10,
+        cache_creation: {
+          ephemeral_5m_input_tokens: 7,
+          ephemeral_1h_input_tokens: 3,
+        },
+      },
+    },
+  };
+
+  await middleware.wrapGenerate({
+    model: { provider: "gateway", modelId: "anthropic/claude-sonnet-5" },
+    params: { prompt: [] },
+    doGenerate: async () => response,
+    doStream: async () => assert.fail("unexpected stream fallback"),
+  });
+
+  assert.equal(rows[0].input_tokens, 140);
+  assert.equal(rows[0].output_tokens, 12);
+  assert.equal(rows[0].cache_read_tokens, 40);
+  assert.equal(rows[0].cache_write_tokens, 10);
+  assert.equal(rows[0].cache_write_5m_tokens, 7);
+  assert.equal(rows[0].cache_write_1h_tokens, 3);
+  assert.equal(rows[0].reasoning_tokens, 2);
 });
 
 test("track attributes rows to the wrapped function name", async (t) => {
