@@ -1,6 +1,7 @@
 name: Publish TypeScript SDK
 
 on:
+  workflow_dispatch:
   push:
     tags: ["sdk-js-v*"]
 
