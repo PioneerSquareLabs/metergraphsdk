@@ -33,3 +33,33 @@ jobs:
         working-directory: typescript
       - run: npm test
         working-directory: typescript
+
+  typescript-ai-sdk:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - node: 18
+            ai: 5
+            fixture: ai-sdk-v5.types.ts
+          - node: 18
+            ai: 6
+            fixture: ai-sdk-current.types.ts
+          - node: 22
+            ai: 7
+            fixture: ai-sdk-current.types.ts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm install
+        working-directory: typescript
+      - run: npm install --no-save ai@${{ matrix.ai }}
+        working-directory: typescript
+      - run: npm run build
+        working-directory: typescript
+      - run: npx tsc --noEmit --strict --skipLibCheck --target ES2022 --module NodeNext --moduleResolution NodeNext test/${{ matrix.fixture }}
+        working-directory: typescript
+      - run: AI_SDK_MAJOR=${{ matrix.ai }} node --test --test-name-pattern="Vercel" test/*.test.mjs
+        working-directory: typescript

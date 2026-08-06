@@ -606,8 +606,9 @@ test("Vercel AI SDK middleware captures generateText and streamText in one trace
     inputTokens: { total: 12, noCache: 8, cacheRead: 4, cacheWrite: 2 },
     outputTokens: { total: 5, text: 3, reasoning: 2 },
   };
+  const aiSDK5 = process.env.AI_SDK_MAJOR === "5";
   const baseModel = {
-    specificationVersion: "v4",
+    specificationVersion: aiSDK5 ? "v2" : "v4",
     provider: "openai.responses",
     modelId: "gpt-5.6-luna",
     supportedUrls: {},
@@ -651,10 +652,11 @@ test("Vercel AI SDK middleware captures generateText and streamText in one trace
       };
     },
   };
-  const model = wrapLanguageModel({
-    model: baseModel,
-    middleware: vercelAISDKMiddleware(),
-  });
+  const middleware = aiSDK5
+    ? vercelAISDKMiddleware({ aiSdkVersion: 5 })
+    : vercelAISDKMiddleware();
+  assert.equal(middleware.specificationVersion, aiSDK5 ? "v2" : "v3");
+  const model = wrapLanguageModel({ model: baseModel, middleware });
   const traceId = "a".repeat(32);
 
   await trace("ai-workflow", async () => {

@@ -65,8 +65,19 @@ for server-side pricing. Provider options, abort signals, and transport headers
 are never serialized. Calls outside `trace()` remain valid one-span traces;
 wrap a multi-call workflow in `trace()` to group its spans.
 
-The default middleware version works with AI SDK 6 and 7. For AI SDK 5, use
-`vercelAISDKMiddleware({ specificationVersion: "v2" })`.
+| Vercel AI SDK | Metergraph middleware | Node.js |
+|---|---|---|
+| 5 | `vercelAISDKMiddleware({ aiSdkVersion: 5 })` | 18+ |
+| 6 | `vercelAISDKMiddleware()` | 18+ |
+| 7 | `vercelAISDKMiddleware()` | 22+ |
+
+Metergraph itself supports Node.js 18+; the AI SDK version you choose may
+impose a newer runtime requirement — AI SDK 7 requires Node.js 22+.
+
+Advanced/backward compatibility: the middleware also accepts a raw
+`specificationVersion` (`"v2"` | `"v3"` | `"v4"`) instead of `aiSdkVersion`,
+for callers pinning the underlying Vercel middleware protocol directly.
+`aiSdkVersion` and `specificationVersion` cannot be combined.
 
 `modelFor(routeName, { default, sessionKey })` takes an options object.
 **Breaking change from `metergraph@0.1.0`**, which took positional

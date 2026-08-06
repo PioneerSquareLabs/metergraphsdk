@@ -16,6 +16,8 @@ import {
   createVercelAISDKMiddleware,
   type VercelAISDKMiddleware,
   type VercelAISDKMiddlewareOptions,
+  type VercelAISDKMiddlewareSpecificationOptions,
+  type VercelAISDKMiddlewareVersionOptions,
   type VercelAISDKSpecificationVersion,
 } from "./vercel-ai.js";
 
@@ -218,13 +220,19 @@ export const wrapClient = wrap;
  * Capture Vercel AI SDK language-model calls through its middleware API.
  * The returned middleware has no runtime dependency on `ai`.
  */
+export function vercelAISDKMiddleware(
+  options: VercelAISDKMiddlewareVersionOptions,
+): VercelAISDKMiddleware<"v2">;
 export function vercelAISDKMiddleware<
   TVersion extends VercelAISDKSpecificationVersion = "v3",
 >(
-  options: VercelAISDKMiddlewareOptions<TVersion> = {},
-): VercelAISDKMiddleware<TVersion> {
+  options?: VercelAISDKMiddlewareSpecificationOptions<TVersion>,
+): VercelAISDKMiddleware<TVersion>;
+export function vercelAISDKMiddleware(
+  options: VercelAISDKMiddlewareOptions<any> = {},
+): VercelAISDKMiddleware<any> {
   init();
-  return createVercelAISDKMiddleware(options);
+  return createVercelAISDKMiddleware(options as any);
 }
 
 export { route, setSession, setTags, trace, track };

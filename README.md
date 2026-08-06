@@ -178,8 +178,29 @@ await mg.trace("support-answer", () =>
 );
 ```
 
+Swap in a Vercel AI Gateway model the same way, with no other changes:
+
+```ts
+import { gateway } from "ai";
+
+const model = wrapLanguageModel({
+  model: gateway("anthropic/claude-sonnet-4.5"),
+  middleware: mg.vercelAISDKMiddleware(),
+});
+```
+
 Each provider request in a multi-step AI SDK tool loop becomes its own costed
 span. Provider options and transport headers are excluded from capture.
+
+| Vercel AI SDK | Metergraph middleware | Node.js |
+|---|---|---|
+| 5 | `vercelAISDKMiddleware({ aiSdkVersion: 5 })` | 18+ |
+| 6 | `vercelAISDKMiddleware()` | 18+ |
+| 7 | `vercelAISDKMiddleware()` | 22+ |
+
+Metergraph itself supports Node.js 18+; the AI SDK version you choose may
+require a newer runtime. See [`typescript/README.md`](typescript/README.md)
+for the `specificationVersion` advanced/backward-compatibility option.
 
 ## Where the data goes
 

@@ -16,7 +16,7 @@
     "build": "tsc -p tsconfig.json",
     "prepack": "npm run build",
     "test": "npm run build && npm run test:types && node --test test/*.test.mjs",
-    "test:types": "tsc --noEmit --strict --skipLibCheck --target ES2022 --module NodeNext --moduleResolution NodeNext test/types.test.ts"
+    "test:types": "tsc --noEmit --strict --skipLibCheck --target ES2022 --module NodeNext --moduleResolution NodeNext test/ai-sdk-current.types.ts"
   },
   "engines": {
     "node": ">=18"
@@ -35,7 +35,7 @@
   "keywords": ["llm", "observability", "openai", "anthropic", "gemini", "vercel-ai-sdk", "cost-tracking"],
   "dependencies": {},
   "devDependencies": {
-    "ai": "^7.0.51",
+    "ai": "^6.0.0",
     "@types/node": "^24.0.0",
     "typescript": "^5.8.0",
     "openai": "^7",
@@ -45,7 +45,7 @@
   "peerDependencies": {
     "@anthropic-ai/sdk": ">=0.30",
     "@google/genai": ">=1",
-    "ai": ">=5",
+    "ai": ">=5 <8",
     "openai": ">=4"
   },
   "peerDependenciesMeta": {

@@ -4,15 +4,32 @@ import { getCaptureRuntime } from "./wrap.js";
 type AnyRecord = Record<PropertyKey, any>;
 export type VercelAISDKSpecificationVersion = "v2" | "v3" | "v4";
 
-export interface VercelAISDKMiddlewareOptions<
+export interface VercelAISDKMiddlewareVersionOptions {
+  /**
+   * Set to 5 when instrumenting AI SDK 5. Maps to middleware protocol v2.
+   * Cannot be combined with specificationVersion.
+   */
+  aiSdkVersion: 5;
+  specificationVersion?: never;
+}
+
+export interface VercelAISDKMiddlewareSpecificationOptions<
   TVersion extends VercelAISDKSpecificationVersion = "v3",
 > {
+  aiSdkVersion?: never;
   /**
-   * AI SDK 6 uses v3 middleware and AI SDK 7 accepts it for backwards
-   * compatibility. Pass v2 when instrumenting AI SDK 5.
+   * Advanced option: the raw Vercel middleware protocol version. AI SDK 6
+   * uses v3 middleware and AI SDK 7 accepts it for backwards compatibility.
+   * Prefer aiSdkVersion for AI SDK 5.
    */
   specificationVersion?: TVersion;
 }
+
+export type VercelAISDKMiddlewareOptions<
+  TVersion extends VercelAISDKSpecificationVersion = "v3",
+> =
+  | VercelAISDKMiddlewareVersionOptions
+  | VercelAISDKMiddlewareSpecificationOptions<TVersion>;
 
 export interface VercelAISDKMiddleware<
   TVersion extends VercelAISDKSpecificationVersion = "v3",
@@ -23,13 +40,13 @@ export interface VercelAISDKMiddleware<
     doStream: () => PromiseLike<any>;
     params: AnyRecord;
     model: AnyRecord;
-  }): PromiseLike<any>;
+  }): Promise<any>;
   wrapStream(options: {
     doGenerate: () => PromiseLike<any>;
     doStream: () => PromiseLike<any>;
     params: AnyRecord;
     model: AnyRecord;
-  }): PromiseLike<any>;
+  }): Promise<any>;
 }
 
 const GATEWAY_PROVIDERS = new Set(["gateway", "vercel", "vercel-ai-gateway"]);
@@ -203,12 +220,23 @@ function wrapStreamResult(
   return { ...result, stream };
 }
 
+export function createVercelAISDKMiddleware(
+  options: VercelAISDKMiddlewareVersionOptions,
+): VercelAISDKMiddleware<"v2">;
 export function createVercelAISDKMiddleware<
   TVersion extends VercelAISDKSpecificationVersion = "v3",
 >(
-  options: VercelAISDKMiddlewareOptions<TVersion> = {},
-): VercelAISDKMiddleware<TVersion> {
-  const specificationVersion = (options.specificationVersion ?? "v3") as TVersion;
+  options?: VercelAISDKMiddlewareSpecificationOptions<TVersion>,
+): VercelAISDKMiddleware<TVersion>;
+export function createVercelAISDKMiddleware(
+  options: VercelAISDKMiddlewareOptions<any> = {},
+): VercelAISDKMiddleware<any> {
+  if (options.aiSdkVersion === 5 && options.specificationVersion !== undefined) {
+    throw new TypeError("aiSdkVersion and specificationVersion cannot be combined");
+  }
+  const specificationVersion = (
+    options.aiSdkVersion === 5 ? "v2" : options.specificationVersion ?? "v3"
+  );
   return {
     specificationVersion,
     async wrapGenerate({ doGenerate, params, model }) {

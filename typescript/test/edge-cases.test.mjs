@@ -42,6 +42,17 @@ test("Vercel middleware versions and disabled capture are exact pass-throughs", 
   assert.equal(createVercelAISDKMiddleware().specificationVersion, "v3");
   assert.equal(createVercelAISDKMiddleware({ specificationVersion: "v2" }).specificationVersion, "v2");
   assert.equal(createVercelAISDKMiddleware({ specificationVersion: "v4" }).specificationVersion, "v4");
+  assert.equal(
+    createVercelAISDKMiddleware({ aiSdkVersion: 5 }).specificationVersion,
+    "v2",
+  );
+  assert.throws(
+    () => createVercelAISDKMiddleware({
+      aiSdkVersion: 5,
+      specificationVersion: "v3",
+    }),
+    /aiSdkVersion.*specificationVersion/,
+  );
 
   const generated = { content: [{ type: "text", text: "unchanged" }] };
   let generateCalls = 0;
