@@ -1,6 +1,6 @@
 [project]
 name = "metergraph"
-version = "0.3.1"
+version = "0.3.2"
 description = "Fire-and-forget LLM spend capture for Metergraph"
 readme = "README.md"
 requires-python = ">=3.10"
