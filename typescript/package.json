@@ -35,7 +35,7 @@
   "keywords": ["llm", "observability", "openai", "anthropic", "gemini", "vercel-ai-sdk", "cost-tracking"],
   "dependencies": {},
   "devDependencies": {
-    "ai": "^6.0.0",
+    "ai": "^7.0.55",
     "@types/node": "^24.0.0",
     "typescript": "^5.8.0",
     "openai": "^7",
