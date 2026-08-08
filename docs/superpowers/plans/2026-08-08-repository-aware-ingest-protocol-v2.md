@@ -17,136 +17,762 @@
 - Both the initial exchange and every refresh are short-timeout (default 3 seconds) and fail-open: no session ⇒ capture buffers/drops silently and the constructor never blocks the caller — no added latency on the customer's LLM call path.
 - Legacy protocol v1 (no discovered `.metergraph/config.json`) is byte-for-byte unmodified: same app-token-per-call transport behavior as SDK 0.3.x.
 - No token (app or session) may ever appear in a log line, an exception message, or a URL.
-- No new runtime dependency in either package.
+- No new runtime dependency in either package (dev-only tooling dependencies for contract verification -- `jsonschema` in Python, `ajv`/`ajv-formats` in TypeScript -- are fine; they ship in neither package's runtime distribution).
+- **Single versioned contract artifact.** The `/v1/ingest/sessions` request/response shape has exactly one canonical, authoritative body: the JSON Schema metergraph-internal publishes at `https://metergraph.dev/contracts/ingest-session-v2.schema.json`. metergraphsdk never stores an independent copy of that schema body -- only a pinned `(url, sha256)` pointer in `contracts/ingest-session-v2.lock.json` -- and validates against the fetched canonical document, not a locally-maintained duplicate.
 
 ---
 
 ## File map
 
 **New:**
-- `python/tests/fixtures/ingest_session_contract.json` — shared request/response shape both SDKs' tests assert against (mirrors the existing `seam_endpoints.json` pattern).
+- `contracts/ingest-session-v2.lock.json` — the one pinned pointer `(schema_url, sha256)` metergraphsdk holds to the canonical, metergraph-internal-owned schema; never a copy of the schema body itself.
+- `python/scripts/verify_ingest_contract.py` — fetches the canonical schema (or a local/URL override), verifies its SHA-256 against the lock file, and validates Python SDK request/response shapes against it.
+- `python/tests/test_ingest_contract_verification.py` — offline tests for the Python verifier (local fake server / file override only, no real network).
 - `python/src/metergraph/_repo_config.py` — read-only `.metergraph/config.json` discovery, walking up from `app_root`.
 - `python/src/metergraph/_session.py` — `SessionManager`: app-token↔session-token exchange, background refresh, fail-open.
 - `python/src/metergraph/_setup.py` — `metergraph-setup` CLI: GitHub-origin detection + config write.
-- `python/tests/test_repository_aware_ingest.py` — all new Python tests (grows across tasks 1, 3–9).
+- `python/tests/test_repository_aware_ingest.py` — all new Python SDK-behavior tests (grows across tasks 2–9).
+- `typescript/scripts/verify-ingest-contract.mjs` — TS equivalent of `verify_ingest_contract.py`.
+- `typescript/test/ingest-contract-verification.test.mjs` — offline tests for the TS verifier.
 - `typescript/src/repo-config.ts` — TS equivalent of `_repo_config.py`.
 - `typescript/src/session.ts` — TS equivalent of `_session.py`.
 - `typescript/src/setup.ts` — TS equivalent of `_setup.py`, exposed as the `metergraph-setup` npm bin.
-- `typescript/test/repository-aware-ingest.test.mjs` — all new TS tests (grows across tasks 11–18).
+- `typescript/test/repository-aware-ingest.test.mjs` — all new TS SDK-behavior tests (grows across tasks 11–18).
 
 **Modified:**
+- `python/pyproject.toml` — version → `0.4.0`, new `[project.scripts]` entry, `jsonschema` added to dev dependencies.
 - `python/src/metergraph/_capture.py` — `Options.repo_root`, `_capture_frames()` gains a `p` (repo-relative path) key per frame, `Runtime.call_state` passes it through.
 - `python/src/metergraph/_transport.py` — `Writer.__init__` gains `session=`, `_deliver` sources the bearer token from the session when present, 401/403 invalidates the session instead of going fatal.
 - `python/src/metergraph/__init__.py` — `init()` discovers repo config and wires `SessionManager` + session-aware `Writer` + `Options.repo_root`; `shutdown()` stops the session manager.
-- `python/pyproject.toml` — version → `0.4.0`, new `[project.scripts]` entry.
 - `python/src/metergraph/_version.py` — fallback version string → `0.4.0`.
+- `typescript/package.json` — version → `0.4.0`, new `bin` entry, `ajv`/`ajv-formats` added to dev dependencies, new `verify:contract` script.
 - `typescript/src/capture.ts` — `RuntimeOptions.repoRoot`, `frames()` gains a `p` key per frame, `CaptureRuntime.start` passes it through.
 - `typescript/src/transport.ts` — `TransportOptions.session`, `deliver()` sources the bearer token from the session when present, 401/403 invalidates the session instead of going fatal.
 - `typescript/src/index.ts` — `init()` discovers repo config and wires `SessionManager` + session-aware `Transport` + `RuntimeOptions.repoRoot`; `shutdown()` stops the session manager.
 - `typescript/src/version.ts` — `SDK_VERSION` → `"0.4.0"`.
-- `typescript/package.json` — version → `0.4.0`, new `bin` entry.
 - `README.md`, `python/README.md`, `typescript/README.md`, `examples/README.md` — setup-command documentation, agent-prompt updates, 0.4 references.
+- `.github/workflows/ci.yml` — adds `workflow_dispatch`/`schedule` triggers and a new, separately named `contract-verification` job that runs the canonical (non-override) contract check.
 
-No CI workflow changes are needed: `pytest python/tests -q` auto-discovers any `test_*.py` file under `python/tests`, and `npm test`'s `node --test test/*.test.mjs` auto-discovers any `*.test.mjs` file under `typescript/test` — both new test files are picked up without touching `.github/workflows/ci.yml`.
+`pytest python/tests -q` and `npm test`'s `node --test test/*.test.mjs` auto-discover any new `test_*.py` / `*.test.mjs` file, so ordinary offline unit tests need no further CI wiring. The one deliberate CI change in this plan is the new `contract-verification` job (Task 1, Step 10), which is the only part of this plan that talks to the real network and is intentionally kept separate from those offline jobs.
 
 ---
 
-### Task 1: Shared ingest-session contract fixture
+### Task 1: Canonical ingest-session contract — lock manifest and verification tooling
 
-**Files:**
-- Create: `python/tests/fixtures/ingest_session_contract.json`
-- Create: `python/tests/test_repository_aware_ingest.py`
+metergraph-internal is the single source of truth for the `/v1/ingest/sessions` contract: it publishes the immutable JSON Schema at `https://metergraph.dev/contracts/ingest-session-v2.schema.json`, plus a manifest/index of published contracts at `https://metergraph.dev/contracts/index.json` (entries: `id`, `url`, `sha256`, `published_at`). metergraphsdk never stores an independent copy of the schema body. It stores exactly one small **lock manifest** — `contracts/ingest-session-v2.lock.json` — holding only the schema's URL and its pinned SHA-256, plus two verification scripts (one per language) that fetch the canonical schema, verify it against that pinned hash, and validate real SDK request/response shapes against it. A local-file or alternate-URL override lets metergraph-internal and metergraphsdk coordinate on a draft schema before it's deployed, without ever touching the pinned hash. This is the only piece of the plan that talks to the network in "canonical" mode; it runs as a separately named CI job/command, never as part of the offline `pytest`/`node --test` unit-test runs.
 
-**Interfaces:**
-- Produces: a JSON fixture with top-level keys `request` (`method`, `path`, `auth_header`, `body_keys`, `example`) and `response` (`body_keys`, `example`) that later tasks' tests (Python task 4, TS task 13) load and assert their real request/response handling against.
-
-- [ ] **Step 1: Write the failing test**
-
-```python
-# python/tests/test_repository_aware_ingest.py
-from __future__ import annotations
-
-import json
-from pathlib import Path
-
-
-FIXTURES = Path(__file__).parent / "fixtures"
-
-
-def test_ingest_session_contract_fixture_has_expected_shape():
-    fixture = json.loads((FIXTURES / "ingest_session_contract.json").read_text())
-    assert fixture["request"]["method"] == "POST"
-    assert fixture["request"]["path"] == "/v1/ingest/sessions"
-    assert fixture["request"]["auth_header"] == "Authorization"
-    assert sorted(fixture["request"]["body_keys"]) == sorted(
-        ["protocol_version", "repository", "sdk_version"]
-    )
-    assert fixture["request"]["example"]["protocol_version"] == 2
-    assert sorted(fixture["response"]["body_keys"]) == sorted(
-        ["session_token", "expires_at", "repository_id"]
-    )
-    assert set(fixture["response"]["example"]) == set(fixture["response"]["body_keys"])
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cd python && python -m pytest tests/test_repository_aware_ingest.py -v`
-Expected: FAIL with `FileNotFoundError` (the fixture file does not exist yet).
-
-- [ ] **Step 3: Create the fixture**
+The two verifier scripts assume metergraph-internal publishes exactly this JSON Schema (Draft 2020-12) at the canonical URL — this is the artifact whose SHA-256 the lock file below pins:
 
 ```json
 {
-  "request": {
-    "method": "POST",
-    "path": "/v1/ingest/sessions",
-    "auth_header": "Authorization",
-    "body_keys": ["protocol_version", "repository", "sdk_version"],
-    "example": {
-      "protocol_version": 2,
-      "repository": "owner/repository",
-      "sdk_version": "0.4.0"
-    }
-  },
-  "response": {
-    "body_keys": ["session_token", "expires_at", "repository_id"],
-    "example": {
-      "session_token": "mgs_example_session_token",
-      "expires_at": "2026-08-08T12:34:56+00:00",
-      "repository_id": "repo_example"
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://metergraph.dev/contracts/ingest-session-v2.schema.json",
+  "title": "Metergraph ingest session v2",
+  "$defs": {
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "repository", "sdk_version"],
+      "properties": {
+        "protocol_version": { "const": 2 },
+        "repository": { "type": "string", "pattern": "^[^/]+/[^/]+$" },
+        "sdk_version": { "type": "string" }
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_token", "expires_at", "repository_id"],
+      "properties": {
+        "session_token": { "type": "string", "minLength": 1 },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "repository_id": { "type": "string", "minLength": 1 }
+      }
     }
   }
 }
 ```
 
-This fixture is this repo's own record of the agreed `/v1/ingest/sessions` contract, in the same spirit as the existing `python/tests/fixtures/seam_endpoints.json`. The authoritative definition is the versioned OpenAPI/JSON Schema owned by metergraph-internal; keeping this copy in sync is a manual step today (cross-repo contract automation is out of scope for this plan, same as it is for the claim API in the source design).
+Serialized with `json.dumps(schema, indent=2)` plus a trailing newline, that document's SHA-256 is `fc20625bec077abfb21bf2ef4da1ba1a44f33cb73447f5e42c2a096052f3d2f9` — the value the lock file below pins. If metergraph-internal's actual published bytes differ (even by whitespace) once the endpoint goes live, the canonical verification command in Step 10 will fail loudly with both hashes printed; that is the pin working as intended, not a bug. The fix at that point is a single deliberate, reviewed edit to this lock file's `sha256` (a normal pinned-dependency bump, the same shape as updating any other lockfile hash after confirming out-of-band that the new content is the agreed contract) — never a silent auto-accept, and never a second independent copy of the schema body living in this repo.
 
-- [ ] **Step 4: Run test to verify it passes**
+**Files:**
+- Create: `contracts/ingest-session-v2.lock.json`
+- Create: `python/scripts/verify_ingest_contract.py`
+- Create: `python/tests/test_ingest_contract_verification.py`
+- Modify: `python/pyproject.toml`
+- Create: `typescript/scripts/verify-ingest-contract.mjs`
+- Create: `typescript/test/ingest-contract-verification.test.mjs`
+- Modify: `typescript/package.json`
+- Modify: `.github/workflows/ci.yml`
 
-Run: `cd python && python -m pytest tests/test_repository_aware_ingest.py -v`
+**Interfaces:**
+- Produces (Python, `python/scripts/verify_ingest_contract.py`): `SchemaSource` (dataclass: `content: bytes`, `sha256: str`, `origin: str`, `pinned: bool`), `ContractVerificationError`, `resolve_schema_source() -> SchemaSource`, `load_schema_document(source: SchemaSource) -> dict`, `validate_instance(document: dict, definition: str, instance: Any) -> None`, `main() -> int`. Task 4 extends this module's `main()` with `_validate_sdk_examples()` once `metergraph._session` exists.
+- Produces (TypeScript, `typescript/scripts/verify-ingest-contract.mjs`): `resolveSchemaSource()`, `loadSchemaDocument(source)`, `validateInstance(document, definition, instance)`, `main()`. Task 13 extends this module's `main()` with `validateSdkExamples()` once `typescript/dist/session.js` exists.
+- Consumes: nothing from earlier tasks (this is the first task).
+
+- [ ] **Step 1: Write the failing Python verifier tests**
+
+```python
+# python/tests/test_ingest_contract_verification.py
+from __future__ import annotations
+
+import hashlib
+import json
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+import pytest
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "python" / "scripts"))
+import verify_ingest_contract as vic  # noqa: E402
+
+
+EXAMPLE_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://metergraph.dev/contracts/ingest-session-v2.schema.json",
+    "$defs": {
+        "request": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["protocol_version", "repository", "sdk_version"],
+            "properties": {
+                "protocol_version": {"const": 2},
+                "repository": {"type": "string", "pattern": "^[^/]+/[^/]+$"},
+                "sdk_version": {"type": "string"},
+            },
+        },
+        "response": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["session_token", "expires_at", "repository_id"],
+            "properties": {
+                "session_token": {"type": "string", "minLength": 1},
+                "expires_at": {"type": "string", "format": "date-time"},
+                "repository_id": {"type": "string", "minLength": 1},
+            },
+        },
+    },
+}
+
+
+def _serve_bytes(content: bytes):
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(content)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def test_resolve_schema_source_accepts_a_matching_pinned_hash(monkeypatch, tmp_path):
+    content = json.dumps(EXAMPLE_SCHEMA).encode()
+    digest = hashlib.sha256(content).hexdigest()
+    server = _serve_bytes(content)
+    monkeypatch.setattr(
+        vic,
+        "_read_lock",
+        lambda: {"schema_url": f"http://127.0.0.1:{server.server_port}/schema.json", "sha256": digest},
+    )
+    monkeypatch.setenv("METERGRAPH_CONTRACT_CACHE_DIR", str(tmp_path))
+
+    source = vic.resolve_schema_source()
+    server.shutdown()
+
+    assert source.pinned is True
+    assert source.sha256 == digest
+
+
+def test_resolve_schema_source_rejects_a_hash_mismatch(monkeypatch, tmp_path):
+    content = json.dumps(EXAMPLE_SCHEMA).encode()
+    server = _serve_bytes(content)
+    monkeypatch.setattr(
+        vic,
+        "_read_lock",
+        lambda: {"schema_url": f"http://127.0.0.1:{server.server_port}/schema.json", "sha256": "0" * 64},
+    )
+    monkeypatch.setenv("METERGRAPH_CONTRACT_CACHE_DIR", str(tmp_path))
+
+    with pytest.raises(vic.ContractVerificationError, match="pins"):
+        vic.resolve_schema_source()
+    server.shutdown()
+
+
+def test_resolve_schema_source_local_path_override_skips_the_pin_check(monkeypatch, tmp_path, capsys):
+    schema_path = tmp_path / "draft.schema.json"
+    schema_path.write_text(json.dumps(EXAMPLE_SCHEMA))
+    monkeypatch.setattr(
+        vic, "_read_lock", lambda: {"schema_url": "https://unused.example/x", "sha256": "0" * 64}
+    )
+    monkeypatch.setenv("METERGRAPH_CONTRACT_SCHEMA_PATH", str(schema_path))
+
+    source = vic.resolve_schema_source()
+
+    assert source.pinned is False
+    assert "skipping sha256 pin check" in capsys.readouterr().err
+
+
+def test_resolve_schema_source_url_override_skips_the_pin_check(monkeypatch, tmp_path, capsys):
+    content = json.dumps(EXAMPLE_SCHEMA).encode()
+    server = _serve_bytes(content)
+    monkeypatch.setattr(
+        vic, "_read_lock", lambda: {"schema_url": "https://unused.example/x", "sha256": "0" * 64}
+    )
+    monkeypatch.setenv("METERGRAPH_CONTRACT_SCHEMA_URL", f"http://127.0.0.1:{server.server_port}/draft.json")
+    monkeypatch.setenv("METERGRAPH_CONTRACT_CACHE_DIR", str(tmp_path))
+
+    source = vic.resolve_schema_source()
+    server.shutdown()
+
+    assert source.pinned is False
+    assert "skipping sha256 pin check" in capsys.readouterr().err
+
+
+def test_validate_instance_passes_for_a_conforming_request():
+    vic.validate_instance(
+        EXAMPLE_SCHEMA,
+        "request",
+        {"protocol_version": 2, "repository": "owner/repo", "sdk_version": "0.4.0"},
+    )  # does not raise
+
+
+def test_validate_instance_rejects_a_malformed_request():
+    import jsonschema
+
+    with pytest.raises(jsonschema.ValidationError):
+        vic.validate_instance(
+            EXAMPLE_SCHEMA,
+            "request",
+            {"protocol_version": 1, "repository": "owner/repo", "sdk_version": "0.4.0"},
+        )
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `cd python && python -m pytest tests/test_ingest_contract_verification.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'verify_ingest_contract'`
+
+- [ ] **Step 3: Create the lock manifest and implement the Python verifier**
+
+```json
+// contracts/ingest-session-v2.lock.json
+{
+  "contract_id": "ingest-session-v2",
+  "manifest_url": "https://metergraph.dev/contracts/index.json",
+  "schema_url": "https://metergraph.dev/contracts/ingest-session-v2.schema.json",
+  "sha256": "fc20625bec077abfb21bf2ef4da1ba1a44f33cb73447f5e42c2a096052f3d2f9"
+}
+```
+
+```python
+# python/scripts/verify_ingest_contract.py
+"""Fetch, pin-check, and validate the canonical ingest-session-v2 contract.
+
+Canonical source of truth: metergraph-internal publishes the immutable
+schema at the URL in contracts/ingest-session-v2.lock.json, plus a
+manifest/index at https://metergraph.dev/contracts/index.json. This repo
+never stores an independent copy of the schema body -- only a pinned
+(URL, sha256) pointer to it in that lock file.
+
+Usage:
+    python python/scripts/verify_ingest_contract.py
+
+Override for coordinated development before metergraph-internal deploys a
+schema revision (skips the sha256 pin check, still validates shape):
+    METERGRAPH_CONTRACT_SCHEMA_PATH=/path/to/draft.schema.json python ...
+    METERGRAPH_CONTRACT_SCHEMA_URL=https://staging.metergraph.dev/... python ...
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import sys
+import tempfile
+import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import jsonschema
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+LOCK_PATH = REPO_ROOT / "contracts" / "ingest-session-v2.lock.json"
+FETCH_TIMEOUT_SECONDS = 10.0
+CACHE_DIR_ENV = "METERGRAPH_CONTRACT_CACHE_DIR"
+
+
+@dataclass(frozen=True)
+class SchemaSource:
+    content: bytes
+    sha256: str
+    origin: str
+    pinned: bool  # True if verified against the lock file's expected hash
+
+
+class ContractVerificationError(Exception):
+    pass
+
+
+def _cache_dir() -> Path:
+    override = os.getenv(CACHE_DIR_ENV)
+    path = Path(override) if override else Path(tempfile.gettempdir()) / "metergraph-contracts"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _sha256(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _read_lock() -> dict[str, Any]:
+    return json.loads(LOCK_PATH.read_text())
+
+
+def resolve_schema_source() -> SchemaSource:
+    lock = _read_lock()
+    path_override = os.getenv("METERGRAPH_CONTRACT_SCHEMA_PATH")
+    url_override = os.getenv("METERGRAPH_CONTRACT_SCHEMA_URL")
+
+    if path_override:
+        content = Path(path_override).read_bytes()
+        print(
+            f"WARNING: using local override schema {path_override}; skipping sha256 pin check",
+            file=sys.stderr,
+        )
+        return SchemaSource(content=content, sha256=_sha256(content), origin=path_override, pinned=False)
+
+    url = url_override or lock["schema_url"]
+    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(request, timeout=FETCH_TIMEOUT_SECONDS) as response:
+        content = response.read()
+    digest = _sha256(content)
+    cache_path = _cache_dir() / f"{digest}.json"
+    if not cache_path.exists():
+        cache_path.write_bytes(content)
+
+    if url_override:
+        print(f"WARNING: using override schema URL {url}; skipping sha256 pin check", file=sys.stderr)
+        return SchemaSource(content=content, sha256=digest, origin=url, pinned=False)
+
+    expected = lock["sha256"]
+    if digest != expected:
+        raise ContractVerificationError(
+            f"canonical schema at {url} has sha256 {digest}, but {LOCK_PATH} pins "
+            f"{expected}. If this is an intentional contract revision, update the "
+            "lock file's sha256 after reviewing the change; otherwise this is drift or tampering."
+        )
+    return SchemaSource(content=content, sha256=digest, origin=url, pinned=True)
+
+
+def load_schema_document(source: SchemaSource) -> dict[str, Any]:
+    return json.loads(source.content)
+
+
+def validate_instance(document: dict[str, Any], definition: str, instance: Any) -> None:
+    jsonschema.validate(instance=instance, schema=document["$defs"][definition])
+
+
+def main() -> int:
+    try:
+        source = resolve_schema_source()
+        load_schema_document(source)
+    except ContractVerificationError as exc:
+        print(f"verify-ingest-contract: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"verify-ingest-contract: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    pin_state = "pinned" if source.pinned else "override (unpinned)"
+    print(f"verify-ingest-contract: OK -- {source.origin} ({pin_state}, sha256={source.sha256})")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+`validate_instance` validates directly against `document["$defs"][definition]` without a `$ref` resolver -- correct as long as `request`/`response` stay self-contained (no cross-references between them), which is true of the schema above.
+
+Add `jsonschema` to `python/pyproject.toml`'s dev dependencies:
+
+```toml
+[project.optional-dependencies]
+dev = ["pytest>=8", "openai>=2.50.0", "anthropic>=0.40", "google-genai>=1", "jsonschema>=4"]
+```
+
+Then install it: `cd python && pip install -e ".[dev]"`. This is a dev-only dependency for contract-verification tooling, not a runtime dependency of the `metergraph` package -- it does not violate the zero-runtime-dependency constraint.
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `cd python && python -m pytest tests/test_ingest_contract_verification.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit the Python side**
 
 ```bash
-git add python/tests/fixtures/ingest_session_contract.json python/tests/test_repository_aware_ingest.py
-git commit -m "Add shared ingest-session contract fixture"
+git add contracts/ingest-session-v2.lock.json python/scripts/verify_ingest_contract.py python/tests/test_ingest_contract_verification.py python/pyproject.toml
+git commit -m "Add canonical ingest-session contract lock manifest and Python verifier"
+```
+
+- [ ] **Step 6: Write the failing TypeScript verifier tests**
+
+```js
+// typescript/test/ingest-contract-verification.test.mjs
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import http from "node:http";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+
+import {
+  resolveSchemaSource,
+  validateInstance,
+} from "../scripts/verify-ingest-contract.mjs";
+
+const EXAMPLE_SCHEMA = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  $id: "https://metergraph.dev/contracts/ingest-session-v2.schema.json",
+  $defs: {
+    request: {
+      type: "object",
+      additionalProperties: false,
+      required: ["protocol_version", "repository", "sdk_version"],
+      properties: {
+        protocol_version: { const: 2 },
+        repository: { type: "string", pattern: "^[^/]+/[^/]+$" },
+        sdk_version: { type: "string" },
+      },
+    },
+    response: {
+      type: "object",
+      additionalProperties: false,
+      required: ["session_token", "expires_at", "repository_id"],
+      properties: {
+        session_token: { type: "string", minLength: 1 },
+        expires_at: { type: "string", format: "date-time" },
+        repository_id: { type: "string", minLength: 1 },
+      },
+    },
+  },
+};
+
+function sha256(content) {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+async function serveBytes(content) {
+  const server = http.createServer((request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(content);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return server;
+}
+
+test("resolveSchemaSource accepts a matching pinned hash", async (t) => {
+  const content = Buffer.from(JSON.stringify(EXAMPLE_SCHEMA));
+  const digest = sha256(content);
+  const server = await serveBytes(content);
+  t.after(async () => new Promise((resolve) => server.close(resolve)));
+  const cacheDir = mkdtempSync(join(tmpdir(), "metergraph-contract-cache-"));
+  t.after(() => rmSync(cacheDir, { recursive: true, force: true }));
+
+  const source = await resolveSchemaSource({
+    lock: { schema_url: `http://127.0.0.1:${server.address().port}/schema.json`, sha256: digest },
+    cacheDir,
+  });
+
+  assert.equal(source.pinned, true);
+  assert.equal(source.sha256, digest);
+});
+
+test("resolveSchemaSource rejects a hash mismatch", async (t) => {
+  const content = Buffer.from(JSON.stringify(EXAMPLE_SCHEMA));
+  const server = await serveBytes(content);
+  t.after(async () => new Promise((resolve) => server.close(resolve)));
+  const cacheDir = mkdtempSync(join(tmpdir(), "metergraph-contract-cache-"));
+  t.after(() => rmSync(cacheDir, { recursive: true, force: true }));
+
+  await assert.rejects(
+    () =>
+      resolveSchemaSource({
+        lock: { schema_url: `http://127.0.0.1:${server.address().port}/schema.json`, sha256: "0".repeat(64) },
+        cacheDir,
+      }),
+    /pins/,
+  );
+});
+
+test("resolveSchemaSource local path override skips the pin check", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "metergraph-contract-override-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const schemaPath = join(dir, "draft.schema.json");
+  writeFileSync(schemaPath, JSON.stringify(EXAMPLE_SCHEMA));
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(" "));
+
+  const source = await resolveSchemaSource({
+    lock: { schema_url: "https://unused.example/x", sha256: "0".repeat(64) },
+    schemaPathOverride: schemaPath,
+  });
+  console.warn = originalWarn;
+
+  assert.equal(source.pinned, false);
+  assert.ok(warnings.some((message) => message.includes("skipping sha256 pin check")));
+});
+
+test("validateInstance passes for a conforming request", () => {
+  validateInstance(EXAMPLE_SCHEMA, "request", {
+    protocol_version: 2,
+    repository: "owner/repo",
+    sdk_version: "0.4.0",
+  }); // does not throw
+});
+
+test("validateInstance rejects a malformed request", () => {
+  assert.throws(() =>
+    validateInstance(EXAMPLE_SCHEMA, "request", {
+      protocol_version: 1,
+      repository: "owner/repo",
+      sdk_version: "0.4.0",
+    }),
+  );
+});
+```
+
+- [ ] **Step 7: Run tests to verify they fail**
+
+Run: `cd typescript && node --test test/ingest-contract-verification.test.mjs`
+Expected: FAIL -- `Cannot find module '../scripts/verify-ingest-contract.mjs'`
+
+- [ ] **Step 8: Implement the TypeScript verifier**
+
+```js
+#!/usr/bin/env node
+// typescript/scripts/verify-ingest-contract.mjs
+// Fetch, pin-check, and validate the canonical ingest-session-v2 contract.
+//
+// Canonical source of truth: metergraph-internal publishes the immutable
+// schema at the URL in contracts/ingest-session-v2.lock.json, plus a
+// manifest/index at https://metergraph.dev/contracts/index.json. This repo
+// never stores an independent copy of the schema body -- only a pinned
+// (URL, sha256) pointer to it in that lock file.
+//
+// Usage:
+//   node typescript/scripts/verify-ingest-contract.mjs
+//
+// Override for coordinated development before metergraph-internal deploys a
+// schema revision (skips the sha256 pin check, still validates shape):
+//   METERGRAPH_CONTRACT_SCHEMA_PATH=/path/to/draft.schema.json node ...
+//   METERGRAPH_CONTRACT_SCHEMA_URL=https://staging.metergraph.dev/... node ...
+
+import Ajv from "ajv";
+import addFormats from "ajv-formats";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = join(__dirname, "..", "..");
+const LOCK_PATH = join(REPO_ROOT, "contracts", "ingest-session-v2.lock.json");
+const FETCH_TIMEOUT_MS = 10_000;
+
+function sha256(content) {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+function defaultCacheDir() {
+  const dir = join(tmpdir(), "metergraph-contracts");
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function readLock() {
+  return JSON.parse(readFileSync(LOCK_PATH, "utf8"));
+}
+
+export async function resolveSchemaSource(options = {}) {
+  const lock = options.lock ?? readLock();
+  const pathOverride = options.schemaPathOverride ?? process.env.METERGRAPH_CONTRACT_SCHEMA_PATH;
+  const urlOverride = options.schemaUrlOverride ?? process.env.METERGRAPH_CONTRACT_SCHEMA_URL;
+
+  if (pathOverride) {
+    const content = readFileSync(pathOverride);
+    console.warn(`WARNING: using local override schema ${pathOverride}; skipping sha256 pin check`);
+    return { content, sha256: sha256(content), origin: pathOverride, pinned: false };
+  }
+
+  const url = urlOverride ?? lock.schema_url;
+  const response = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+  if (!response.ok) throw new Error(`fetching ${url} failed with HTTP ${response.status}`);
+  const content = Buffer.from(await response.arrayBuffer());
+  const digest = sha256(content);
+  const cacheDir = options.cacheDir ?? defaultCacheDir();
+  const cachePath = join(cacheDir, `${digest}.json`);
+  if (!existsSync(cachePath)) writeFileSync(cachePath, content);
+
+  if (urlOverride) {
+    console.warn(`WARNING: using override schema URL ${url}; skipping sha256 pin check`);
+    return { content, sha256: digest, origin: url, pinned: false };
+  }
+
+  if (digest !== lock.sha256) {
+    throw new Error(
+      `canonical schema at ${url} has sha256 ${digest}, but ${LOCK_PATH} pins ` +
+      `${lock.sha256}. If this is an intentional contract revision, update the ` +
+      "lock file's sha256 after reviewing the change; otherwise this is drift or tampering.",
+    );
+  }
+  return { content, sha256: digest, origin: url, pinned: true };
+}
+
+export function loadSchemaDocument(source) {
+  return JSON.parse(source.content.toString("utf8"));
+}
+
+export function validateInstance(document, definition, instance) {
+  const ajv = new Ajv({ allErrors: true });
+  addFormats(ajv);
+  const validate = ajv.compile(document.$defs[definition]);
+  if (!validate(instance)) {
+    throw new Error(`schema validation failed: ${ajv.errorsText(validate.errors)}`);
+  }
+}
+
+export async function main() {
+  try {
+    const source = await resolveSchemaSource();
+    loadSchemaDocument(source);
+    const pinState = source.pinned ? "pinned" : "override (unpinned)";
+    console.log(`verify-ingest-contract: OK -- ${source.origin} (${pinState}, sha256=${source.sha256})`);
+    return 0;
+  } catch (error) {
+    console.error(`verify-ingest-contract: ${error instanceof Error ? error.message : String(error)}`);
+    return 1;
+  }
+}
+
+if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+  process.exit(await main());
+}
+```
+
+Add `ajv`/`ajv-formats` as dev dependencies and a `verify:contract` script in `typescript/package.json`:
+
+```json
+{
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
+    "test": "npm run build && npm run test:types && node --test test/*.test.mjs",
+    "test:types": "tsc --noEmit --strict --skipLibCheck --target ES2022 --module NodeNext --moduleResolution NodeNext test/ai-sdk-current.types.ts",
+    "verify:contract": "node scripts/verify-ingest-contract.mjs"
+  },
+  "devDependencies": {
+    "ai": "^7.0.55",
+    "ajv": "^8.17.0",
+    "ajv-formats": "^3.0.0",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0",
+    "openai": "^7",
+    "@anthropic-ai/sdk": "^0.30",
+    "@google/genai": "^1"
+  }
+}
+```
+
+Then install: `cd typescript && npm install`.
+
+- [ ] **Step 9: Run tests to verify they pass**
+
+Run: `cd typescript && npm install && node --test test/ingest-contract-verification.test.mjs`
+Expected: PASS
+
+- [ ] **Step 10: Wire canonical contract verification as a named CI job**
+
+Edit `.github/workflows/ci.yml`'s `on:` block to add manual and scheduled triggers alongside the existing ones:
+
+```yaml
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * *"
+```
+
+Add a new job:
+
+```yaml
+  contract-verification:
+    name: contract-verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e "python[dev]"
+      - run: python python/scripts/verify_ingest_contract.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+        working-directory: typescript
+      - run: npm run build
+        working-directory: typescript
+      - run: npm run verify:contract
+        working-directory: typescript
+```
+
+This job runs the *canonical* check (no override env vars set) against the real `https://metergraph.dev/contracts/ingest-session-v2.schema.json`. Until metergraph-internal deploys that endpoint, this job is expected to fail -- that is a known, external, out-of-this-repo's-control bootstrap gap, not a defect in this tooling. Do not add it as a required branch-protection status check until it has gone green at least once; it remains a real, always-invokable named job (`contract-verification`) and command (`python python/scripts/verify_ingest_contract.py`, `npm run verify:contract` in `typescript/`) from the moment this task lands, satisfying "named CI job/command" without gating unrelated SDK PRs on an endpoint this repo doesn't own or control the deploy timing of.
+
+- [ ] **Step 11: Commit the TypeScript side and CI wiring**
+
+```bash
+git add typescript/scripts/verify-ingest-contract.mjs typescript/test/ingest-contract-verification.test.mjs typescript/package.json typescript/package-lock.json .github/workflows/ci.yml
+git commit -m "Add TypeScript ingest-contract verifier and named canonical CI job"
 ```
 
 ### Task 2: Python — GitHub remote normalization and config writer
 
 **Files:**
 - Create: `python/src/metergraph/_setup.py`
-- Modify: `python/tests/test_repository_aware_ingest.py`
+- Create: `python/tests/test_repository_aware_ingest.py`
 
 **Interfaces:**
 - Produces: `normalize_github_remote(url: str) -> str` (raises `RepoDetectionError`), `write_config(repo_root: str, repository: str) -> Path`, `main(argv: list[str] | None = None) -> int`, exception `RepoDetectionError`.
 
 - [ ] **Step 1: Write the failing tests**
 
+This creates the shared test file every later Python task (3 onward) appends to; the header below (`json`, `Path`) is relied on by those later appends without being re-imported.
+
 ```python
-# append to python/tests/test_repository_aware_ingest.py
+# python/tests/test_repository_aware_ingest.py
+from __future__ import annotations
+
+import json
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -544,10 +1170,12 @@ git commit -m "Add Python .metergraph/config.json discovery"
 **Files:**
 - Create: `python/src/metergraph/_session.py`
 - Modify: `python/tests/test_repository_aware_ingest.py`
+- Modify: `python/scripts/verify_ingest_contract.py`
+- Modify: `python/tests/test_ingest_contract_verification.py`
 
 **Interfaces:**
-- Consumes: `FailureLogger` from `metergraph._failure_log`.
-- Produces: `SessionManager(app_token, base_url, *, repository, sdk_version, poll_seconds=15.0, timeout_seconds=3.0)` with `get_token() -> str | None`, `invalidate() -> None`, `stop() -> None`. Consumed by Task 6 (`Writer`) and Task 8 (`init()`).
+- Consumes: `FailureLogger` from `metergraph._failure_log`; `resolve_schema_source`, `load_schema_document`, `validate_instance` from `verify_ingest_contract` (Task 1).
+- Produces: `build_exchange_request_body(repository: str, sdk_version: str) -> dict`, `parse_session_response(doc: Mapping) -> tuple[str, float, str | None]` (raises `ValueError` if `session_token` is missing), `SessionManager(app_token, base_url, *, repository, sdk_version, poll_seconds=15.0, timeout_seconds=3.0)` with `get_token() -> str | None`, `invalidate() -> None`, `stop() -> None`. Consumed by Task 6 (`Writer`) and Task 8 (`init()`).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -600,10 +1228,7 @@ def test_session_manager_caches_token_from_a_successful_exchange():
     assert manager.get_token() == "session-abc"
 
 
-def test_session_manager_exchange_request_matches_shared_contract_fixture():
-    fixture = json.loads(
-        (FIXTURES / "ingest_session_contract.json").read_text()
-    )
+def test_session_manager_exchange_request_has_the_agreed_shape():
     captured = {}
 
     class Handler(BaseHTTPRequestHandler):
@@ -615,7 +1240,11 @@ def test_session_manager_exchange_request_matches_shared_contract_fixture():
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps(fixture["response"]["example"]).encode())
+            self.wfile.write(json.dumps({
+                "session_token": "session-abc",
+                "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+                "repository_id": "repo_123",
+            }).encode())
 
         def log_message(self, *args):
             pass
@@ -632,10 +1261,10 @@ def test_session_manager_exchange_request_matches_shared_contract_fixture():
     manager.stop()
     server.shutdown()
 
-    assert sorted(captured["body"].keys()) == sorted(fixture["request"]["body_keys"])
+    assert sorted(captured["body"].keys()) == ["protocol_version", "repository", "sdk_version"]
     assert captured["body"]["protocol_version"] == 2
     assert captured["headers"]["Authorization"] == "Bearer app-token-secret"
-    assert manager.get_token() == fixture["response"]["example"]["session_token"]
+    assert manager.get_token() == "session-abc"
 
 
 def test_session_manager_stays_unset_on_server_error(caplog):
@@ -769,6 +1398,25 @@ def _ttl_seconds(expires_at: Any) -> float:
     return max(MIN_TTL_SECONDS, (parsed - datetime.now(timezone.utc)).total_seconds())
 
 
+def build_exchange_request_body(repository: str, sdk_version: str) -> dict[str, Any]:
+    """The exact body shape POSTed to /v1/ingest/sessions -- pulled out as a
+    pure function so python/scripts/verify_ingest_contract.py (Task 1) can
+    validate it against the canonical schema without needing a live HTTP
+    round-trip."""
+    return {"protocol_version": 2, "repository": repository, "sdk_version": sdk_version}
+
+
+def parse_session_response(doc: Any) -> tuple[str, float, str | None]:
+    """Extract (session_token, ttl_seconds, repository_id) from a response
+    body. Raises ValueError if the document has no usable session_token --
+    pulled out as a pure function for the same reason as
+    build_exchange_request_body above."""
+    token = doc.get("session_token") if isinstance(doc, dict) else None
+    if not isinstance(token, str) or not token:
+        raise ValueError("response missing session_token")
+    return token, _ttl_seconds(doc.get("expires_at")), doc.get("repository_id")
+
+
 class SessionManager:
     """Exchanges the long-lived app token for a short-lived, repo-scoped
     session token and keeps it refreshed in the background.
@@ -842,11 +1490,7 @@ class SessionManager:
                 else self._app_token
             )
         body = json.dumps(
-            {
-                "protocol_version": 2,
-                "repository": self._repository,
-                "sdk_version": self._sdk_version,
-            }
+            build_exchange_request_body(self._repository, self._sdk_version)
         ).encode()
         request = urllib.request.Request(
             self._url,
@@ -879,8 +1523,9 @@ class SessionManager:
                 f"{type(exc).__name__}: {exc}",
             )
             return False
-        token = doc.get("session_token") if isinstance(doc, dict) else None
-        if not isinstance(token, str) or not token:
+        try:
+            token, ttl_seconds, repository_id = parse_session_response(doc)
+        except ValueError:
             self._failure_log.report(
                 "session_exchange_error",
                 f"session exchange against {self._url} returned no session_token",
@@ -888,8 +1533,8 @@ class SessionManager:
             return False
         with self._lock:
             self._session_token = token
-            self._expires_at = time.monotonic() + _ttl_seconds(doc.get("expires_at"))
-            self._repository_id = doc.get("repository_id")
+            self._expires_at = time.monotonic() + ttl_seconds
+            self._repository_id = repository_id
         return True
 
     def stop(self) -> None:
@@ -903,11 +1548,83 @@ class SessionManager:
 Run: `cd python && python -m pytest tests/test_repository_aware_ingest.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Write the failing test tying the verifier to the real SDK**
+
+Now that `metergraph._session` exists, extend the contract-verification tests from Task 1 to prove the real request/response handling -- not just a literal example -- conforms to the schema. This still runs fully offline via the local-path override.
+
+```python
+# append to python/tests/test_ingest_contract_verification.py
+def test_verify_ingest_contract_validates_the_real_python_sdk_request_and_response(
+    monkeypatch, tmp_path
+):
+    schema_path = tmp_path / "draft.schema.json"
+    schema_path.write_text(json.dumps(EXAMPLE_SCHEMA))
+    monkeypatch.setenv("METERGRAPH_CONTRACT_SCHEMA_PATH", str(schema_path))
+
+    exit_code = vic.main()
+
+    assert exit_code == 0
+```
+
+- [ ] **Step 6: Run test to verify it fails**
+
+Run: `cd python && python -m pytest tests/test_ingest_contract_verification.py -v -k real_python_sdk`
+Expected: FAIL -- `main()` currently only fetches and parses the schema; it never imports or validates against `metergraph._session`, so this test either errors or passes vacuously without exercising the real SDK. Confirm it fails (or add a temporary `assert False` marker check) before proceeding -- the point of this step is to prove Step 7 is necessary, not to skip straight to it.
+
+- [ ] **Step 7: Wire the verifier to the real SDK**
+
+Edit `python/scripts/verify_ingest_contract.py`. Add a function that imports and exercises the real SDK, and call it from `main()`:
+
+```python
+def _validate_sdk_examples(document: dict[str, Any]) -> None:
+    """Validate the real Python SDK's request/response handling, not just a
+    literal example -- imported lazily so this module is still usable
+    (fetch/hash/cache/override logic) before metergraph._session exists."""
+    from metergraph._session import build_exchange_request_body, parse_session_response
+    from metergraph._version import SDK_VERSION
+
+    request_body = build_exchange_request_body("owner/repository", SDK_VERSION)
+    validate_instance(document, "request", request_body)
+
+    example_response = {
+        "session_token": "mgs_example_session_token",
+        "expires_at": "2026-08-08T12:34:56+00:00",
+        "repository_id": "repo_example",
+    }
+    validate_instance(document, "response", example_response)
+    token, _ttl, _repo_id = parse_session_response(example_response)
+    assert token == example_response["session_token"]
+```
+
+Update `main()` to call it:
+
+```python
+def main() -> int:
+    try:
+        source = resolve_schema_source()
+        document = load_schema_document(source)
+        _validate_sdk_examples(document)
+    except ContractVerificationError as exc:
+        print(f"verify-ingest-contract: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"verify-ingest-contract: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    pin_state = "pinned" if source.pinned else "override (unpinned)"
+    print(f"verify-ingest-contract: OK -- {source.origin} ({pin_state}, sha256={source.sha256})")
+    return 0
+```
+
+- [ ] **Step 8: Run tests to verify they pass**
+
+Run: `cd python && python -m pytest tests/test_ingest_contract_verification.py tests/test_repository_aware_ingest.py -v`
+Expected: PASS
+
+- [ ] **Step 9: Commit**
 
 ```bash
-git add python/src/metergraph/_session.py python/tests/test_repository_aware_ingest.py
-git commit -m "Add Python SessionManager: app-token to session-token exchange"
+git add python/src/metergraph/_session.py python/tests/test_repository_aware_ingest.py python/scripts/verify_ingest_contract.py python/tests/test_ingest_contract_verification.py
+git commit -m "Add Python SessionManager and wire it into contract verification"
 ```
 
 ### Task 5: Python — SessionManager refresh and expiry/rejection fallback
@@ -2171,10 +2888,12 @@ git commit -m "Add TypeScript .metergraph/config.json discovery"
 **Files:**
 - Create: `typescript/src/session.ts`
 - Modify: `typescript/test/repository-aware-ingest.test.mjs`
+- Modify: `typescript/scripts/verify-ingest-contract.mjs`
+- Modify: `typescript/test/ingest-contract-verification.test.mjs`
 
 **Interfaces:**
-- Consumes: `FailureLogger` from `./failure-log.js`.
-- Produces: `SessionManager` with constructor `(appToken, baseUrl, repository, sdkVersion, pollMs?, timeoutMs?)`, `getToken(): string | undefined`, `invalidate(): void`, `stop(): void`. Consumed by Task 15 (`Transport`) and Task 17 (`index.ts`).
+- Consumes: `FailureLogger` from `./failure-log.js`; `resolveSchemaSource`, `loadSchemaDocument`, `validateInstance` from `./scripts/verify-ingest-contract.mjs` (Task 1).
+- Produces: `buildExchangeRequestBody(repository, sdkVersion)`, `parseSessionResponse(doc)` (throws if `session_token` is missing; returns `{ sessionToken, ttlMs, repositoryId }`), `SessionManager` with constructor `(appToken, baseUrl, repository, sdkVersion, pollMs?, timeoutMs?)`, `getToken(): string | undefined`, `invalidate(): void`, `stop(): void`. Consumed by Task 15 (`Transport`) and Task 17 (`index.ts`).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2183,13 +2902,6 @@ git commit -m "Add TypeScript .metergraph/config.json discovery"
 import http from "node:http";
 
 import { SessionManager } from "../dist/session.js";
-
-const FIXTURE = JSON.parse(
-  readFileSync(
-    join(process.cwd(), "..", "python", "tests", "fixtures", "ingest_session_contract.json"),
-    "utf8",
-  ),
-);
 
 async function serve(handler) {
   const server = http.createServer(handler);
@@ -2226,7 +2938,7 @@ test("SessionManager caches the token from a successful exchange", async (t) => 
   assert.equal(manager.getToken(), "session-abc");
 });
 
-test("SessionManager exchange request matches the shared contract fixture", async (t) => {
+test("SessionManager exchange request has the agreed shape", async (t) => {
   let capturedAuth;
   let capturedBody;
   const server = await serve(async (request, response) => {
@@ -2235,7 +2947,11 @@ test("SessionManager exchange request matches the shared contract fixture", asyn
     capturedAuth = request.headers.authorization;
     capturedBody = JSON.parse(Buffer.concat(chunks).toString());
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify(FIXTURE.response.example));
+    response.end(JSON.stringify({
+      session_token: "session-abc",
+      expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
+      repository_id: "repo_123",
+    }));
   });
   t.after(async () => new Promise((resolve) => server.close(resolve)));
 
@@ -2249,10 +2965,10 @@ test("SessionManager exchange request matches the shared contract fixture", asyn
   await manager.ready;
   t.after(() => manager.stop());
 
-  assert.deepEqual(Object.keys(capturedBody).sort(), [...FIXTURE.request.body_keys].sort());
+  assert.deepEqual(Object.keys(capturedBody).sort(), ["protocol_version", "repository", "sdk_version"]);
   assert.equal(capturedBody.protocol_version, 2);
   assert.equal(capturedAuth, "Bearer app-token-secret");
-  assert.equal(manager.getToken(), FIXTURE.response.example.session_token);
+  assert.equal(manager.getToken(), "session-abc");
 });
 
 test("SessionManager stays unset on server error", async (t) => {
@@ -2343,6 +3059,38 @@ interface SessionResponse {
   repository_id?: string;
 }
 
+export interface ParsedSessionResponse {
+  sessionToken: string;
+  ttlMs: number;
+  repositoryId?: string;
+}
+
+/**
+ * The exact body shape POSTed to /v1/ingest/sessions -- pulled out as a
+ * pure function so scripts/verify-ingest-contract.mjs (Task 1) can
+ * validate it against the canonical schema without a live HTTP round-trip.
+ */
+export function buildExchangeRequestBody(
+  repository: string,
+  sdkVersion: string,
+): Record<string, unknown> {
+  return { protocol_version: 2, repository, sdk_version: sdkVersion };
+}
+
+/**
+ * Extract the session token/TTL/repository id from a response body. Throws
+ * if there is no usable session_token -- pulled out as a pure function for
+ * the same reason as buildExchangeRequestBody above.
+ */
+export function parseSessionResponse(doc: SessionResponse): ParsedSessionResponse {
+  if (!doc.session_token) throw new Error("response missing session_token");
+  return {
+    sessionToken: doc.session_token,
+    ttlMs: doc.expires_at ? Date.parse(doc.expires_at) - Date.now() : DEFAULT_TTL_MS,
+    repositoryId: doc.repository_id,
+  };
+}
+
 export class SessionManager {
   private sessionToken?: string;
   private expiresAtMs = 0;
@@ -2406,11 +3154,7 @@ export class SessionManager {
           "Content-Type": "application/json",
           "Cache-Control": "no-store",
         },
-        body: JSON.stringify({
-          protocol_version: 2,
-          repository: this.repository,
-          sdk_version: this.sdkVersion,
-        }),
+        body: JSON.stringify(buildExchangeRequestBody(this.repository, this.sdkVersion)),
         signal: AbortSignal.timeout(this.timeoutMs),
       });
       if ((response.status === 401 || response.status === 403) && useSessionToken) {
@@ -2425,16 +3169,19 @@ export class SessionManager {
         return false;
       }
       const body = (await response.json()) as SessionResponse;
-      if (!body.session_token) {
+      let parsed: ParsedSessionResponse;
+      try {
+        parsed = parseSessionResponse(body);
+      } catch {
         this.failureLog.report(
           "session_exchange_error",
           `session exchange against ${this.baseUrl} returned no session_token`,
         );
         return false;
       }
-      this.sessionToken = body.session_token;
-      this.expiresAtMs = body.expires_at ? Date.parse(body.expires_at) : Date.now() + DEFAULT_TTL_MS;
-      this.repositoryId = body.repository_id;
+      this.sessionToken = parsed.sessionToken;
+      this.expiresAtMs = Date.now() + parsed.ttlMs;
+      this.repositoryId = parsed.repositoryId;
       return true;
     } catch (error) {
       this.failureLog.report(
@@ -2460,11 +3207,90 @@ Check `typescript/src/failure-log.ts`'s `FailureLogger.report` signature before 
 Run: `cd typescript && npm run build && node --test test/repository-aware-ingest.test.mjs`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Write the failing test tying the verifier to the real SDK**
+
+Now that `typescript/dist/session.js` exists, extend the contract-verification tests from Task 1 to prove the real request/response handling -- not just a literal example -- conforms to the schema. This still runs fully offline via the local-path override.
+
+```js
+// append to typescript/test/ingest-contract-verification.test.mjs
+import { main } from "../scripts/verify-ingest-contract.mjs";
+
+test("verify-ingest-contract validates the real TypeScript SDK request and response", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "metergraph-contract-sdk-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const schemaPath = join(dir, "draft.schema.json");
+  writeFileSync(schemaPath, JSON.stringify(EXAMPLE_SCHEMA));
+  process.env.METERGRAPH_CONTRACT_SCHEMA_PATH = schemaPath;
+  t.after(() => {
+    delete process.env.METERGRAPH_CONTRACT_SCHEMA_PATH;
+  });
+
+  const exitCode = await main();
+
+  assert.equal(exitCode, 0);
+});
+```
+
+- [ ] **Step 6: Run test to verify it fails**
+
+Run: `cd typescript && npm run build && node --test test/ingest-contract-verification.test.mjs`
+Expected: FAIL -- `main()` currently only fetches and parses the schema; it never imports or validates against `typescript/dist/session.js`. Confirm this fails before proceeding -- the point of this step is to prove Step 7 is necessary, not to skip straight to it.
+
+- [ ] **Step 7: Wire the verifier to the real SDK**
+
+Edit `typescript/scripts/verify-ingest-contract.mjs`. Add a function that imports and exercises the real SDK, and call it from `main()`:
+
+```js
+async function validateSdkExamples(document) {
+  const { buildExchangeRequestBody, parseSessionResponse } = await import(
+    join(REPO_ROOT, "typescript", "dist", "session.js")
+  );
+  const { SDK_VERSION } = await import(join(REPO_ROOT, "typescript", "dist", "version.js"));
+
+  const requestBody = buildExchangeRequestBody("owner/repository", SDK_VERSION);
+  validateInstance(document, "request", requestBody);
+
+  const exampleResponse = {
+    session_token: "mgs_example_session_token",
+    expires_at: "2026-08-08T12:34:56+00:00",
+    repository_id: "repo_example",
+  };
+  validateInstance(document, "response", exampleResponse);
+  const parsed = parseSessionResponse(exampleResponse);
+  if (parsed.sessionToken !== exampleResponse.session_token) {
+    throw new Error("parseSessionResponse did not round-trip session_token");
+  }
+}
+```
+
+Update `main()` to call it:
+
+```js
+export async function main() {
+  try {
+    const source = await resolveSchemaSource();
+    const document = loadSchemaDocument(source);
+    await validateSdkExamples(document);
+    const pinState = source.pinned ? "pinned" : "override (unpinned)";
+    console.log(`verify-ingest-contract: OK -- ${source.origin} (${pinState}, sha256=${source.sha256})`);
+    return 0;
+  } catch (error) {
+    console.error(`verify-ingest-contract: ${error instanceof Error ? error.message : String(error)}`);
+    return 1;
+  }
+}
+```
+
+- [ ] **Step 8: Run tests to verify they pass**
+
+Run: `cd typescript && npm run build && node --test test/ingest-contract-verification.test.mjs test/repository-aware-ingest.test.mjs`
+Expected: PASS
+
+- [ ] **Step 9: Commit**
 
 ```bash
-git add typescript/src/session.ts typescript/test/repository-aware-ingest.test.mjs
-git commit -m "Add TypeScript SessionManager: app-token to session-token exchange"
+git add typescript/src/session.ts typescript/test/repository-aware-ingest.test.mjs typescript/scripts/verify-ingest-contract.mjs typescript/test/ingest-contract-verification.test.mjs
+git commit -m "Add TypeScript SessionManager and wire it into contract verification"
 ```
 
 ### Task 14: TypeScript — SessionManager refresh and expiry/rejection fallback
@@ -3450,9 +4276,10 @@ git commit -m "Document repository-aware ingest protocol v2 and SDK 0.4 setup"
 
 ## Final self-review checklist (run once, after Task 20)
 
-- [ ] **Spec coverage.** Re-read the design doc's §3 (registration + session exchange), §4 (v1/v2 coexistence), and §8's frame-capture paragraph. Confirm: Task 2/11 cover non-secret config write with SDK import/runtime never writing (Tasks 3/12, 8/17 assert read-only discovery); Task 4/13 cover the exact `POST /v1/ingest/sessions` shape with `sdk_version` as the real package version; Task 6/15 cover "app token never sent on a normal trace call"; Task 5/14 cover the two-tier refresh; Task 9/18 cover redaction; Task 7/16 cover the additive repo-relative frame path; Task 10/19/20 cover the 0.4 release.
+- [ ] **Spec coverage.** Re-read the design doc's §3 (registration + session exchange), §4 (v1/v2 coexistence), and §8's frame-capture paragraph, plus the single-versioned-artifact requirement this amendment closes. Confirm: Task 1 establishes the one canonical, metergraph-internal-owned schema artifact plus a pinned `(url, sha256)` lock file, with a local/URL override for coordinated pre-deployment development, and a separately named `contract-verification` CI job/command that is the only network-touching piece; Task 2/11 cover non-secret config write with SDK import/runtime never writing (Tasks 3/12, 8/17 assert read-only discovery); Task 4/13 cover the exact `POST /v1/ingest/sessions` shape with `sdk_version` as the real package version, and extend Task 1's verifier to validate the real SDK's request/response functions (offline, via override) rather than a literal fixture; Task 6/15 cover "app token never sent on a normal trace call"; Task 5/14 cover the two-tier refresh; Task 9/18 cover redaction; Task 7/16 cover the additive repo-relative frame path; Task 10/19/20 cover the 0.4 release.
+- [ ] **No independent schema copy.** Confirm `contracts/ingest-session-v2.lock.json` holds only `(schema_url, sha256, manifest_url, contract_id)` -- never a copy of the schema body -- and that no file in this repo (a test fixture, a doc, a script) claims to be an independent or manually-synchronized source of truth for the contract shape. Test-only literal examples (e.g. `EXAMPLE_SCHEMA` in the verifier test files, or the inline response bodies in Task 4/13's SessionManager tests) are fine; they're synthetic test data feeding a local/override path, not a second persisted "real" copy.
 - [ ] **Placeholder scan.** Grep the finished plan for `TBD`, `TODO`, `FIXME`, `...`, and "similar to Task" -- none should appear in a place standing in for real content (only inside literal example strings/URLs, if any).
-- [ ] **Type consistency.** `SessionManager.get_token()`/`getToken()` and `.invalidate()` are the only two methods `Writer`/`Transport` call on a session object in every task (4/6/8/9 for Python, 13/15/17/18 for TS) -- confirm no task drifted to a different method name. `RepoConfig.repository`/`.repo_root` (Python) and `.repository`/`.repoRoot` (TS) are used identically in Tasks 3/8 and 12/17.
+- [ ] **Type consistency.** `SessionManager.get_token()`/`getToken()` and `.invalidate()` are the only two methods `Writer`/`Transport` call on a session object in every task (4/6/8/9 for Python, 13/15/17/18 for TS) -- confirm no task drifted to a different method name. `RepoConfig.repository`/`.repo_root` (Python) and `.repository`/`.repoRoot` (TS) are used identically in Tasks 3/8 and 12/17. `build_exchange_request_body`/`parse_session_response` (Python) and `buildExchangeRequestBody`/`parseSessionResponse` (TS), introduced in Task 4/13, are the only functions `_session.py`/`session.ts` and `verify_ingest_contract.py`/`verify-ingest-contract.mjs` share -- confirm no task drifted to inlining the request/response shape again instead of reusing them.
 - [ ] **`git diff --check`** across the whole branch before considering the plan executed.
 
 Report the plan's final commit hash and total task count (20) back to whoever requested this plan once all tasks and the self-review checklist are complete.
