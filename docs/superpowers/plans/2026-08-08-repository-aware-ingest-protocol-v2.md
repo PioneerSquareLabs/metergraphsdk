@@ -18,21 +18,21 @@
 - Legacy protocol v1 (no discovered `.metergraph/config.json`) is byte-for-byte unmodified: same app-token-per-call transport behavior as SDK 0.3.x.
 - No token (app or session) may ever appear in a log line, an exception message, or a URL.
 - No new runtime dependency in either package (dev-only tooling dependencies for contract verification -- `jsonschema` in Python, `ajv`/`ajv-formats` in TypeScript -- are fine; they ship in neither package's runtime distribution).
-- **Single versioned contract artifact.** The `/v1/ingest/sessions` request/response shape has exactly one canonical, authoritative body: the JSON Schema metergraph-internal publishes at `https://metergraph.dev/contracts/ingest-session-v2.schema.json`. metergraphsdk never stores an independent copy of that schema body -- only a pinned `(url, sha256)` pointer in `contracts/ingest-session-v2.lock.json` -- and validates against the fetched canonical document, not a locally-maintained duplicate.
+- **Two versioned contract artifacts, both canonical.** The `/v1/ingest/sessions` contract is published as two separate JSON Schema documents, each with its own authoritative body: the request shape at `https://metergraph.dev/contracts/ingest-session-request.v2.schema.json` and the response shape at `https://metergraph.dev/contracts/ingest-session-response.v2.schema.json` (plus a manifest/index at `https://metergraph.dev/contracts/index.json`). metergraphsdk never stores an independent copy of either schema body -- only a pinned `(url, sha256)` pointer to each in one lock manifest, `contracts/ingest-session-v2.lock.json` -- and validates against the two fetched canonical documents, not a locally-maintained duplicate of either.
 
 ---
 
 ## File map
 
 **New:**
-- `contracts/ingest-session-v2.lock.json` — the one pinned pointer `(schema_url, sha256)` metergraphsdk holds to the canonical, metergraph-internal-owned schema; never a copy of the schema body itself.
-- `python/scripts/verify_ingest_contract.py` — fetches the canonical schema (or a local/URL override), verifies its SHA-256 against the lock file, and validates Python SDK request/response shapes against it.
+- `contracts/ingest-session-v2.lock.json` — one lock manifest holding two pinned pointers, `(schema_url, sha256)` for the request artifact and `(schema_url, sha256)` for the response artifact; never a copy of either schema body itself.
+- `python/scripts/verify_ingest_contract.py` — fetches both canonical schemas (or a local/URL override for either), verifies each's SHA-256 against the lock file, and validates Python SDK request/response shapes against their respective document.
 - `python/tests/test_ingest_contract_verification.py` — offline tests for the Python verifier (local fake server / file override only, no real network).
 - `python/src/metergraph/_repo_config.py` — read-only `.metergraph/config.json` discovery, walking up from `app_root`.
 - `python/src/metergraph/_session.py` — `SessionManager`: app-token↔session-token exchange, background refresh, fail-open.
 - `python/src/metergraph/_setup.py` — `metergraph-setup` CLI: GitHub-origin detection + config write.
 - `python/tests/test_repository_aware_ingest.py` — all new Python SDK-behavior tests (grows across tasks 2–9).
-- `typescript/scripts/verify-ingest-contract.mjs` — TS equivalent of `verify_ingest_contract.py`.
+- `typescript/scripts/verify-ingest-contract.mjs` — TS equivalent of `verify_ingest_contract.py`; also fetches, hash-checks, and validates both artifacts.
 - `typescript/test/ingest-contract-verification.test.mjs` — offline tests for the TS verifier.
 - `typescript/src/repo-config.ts` — TS equivalent of `_repo_config.py`.
 - `typescript/src/session.ts` — TS equivalent of `_session.py`.
@@ -59,41 +59,49 @@
 
 ### Task 1: Canonical ingest-session contract — lock manifest and verification tooling
 
-metergraph-internal is the single source of truth for the `/v1/ingest/sessions` contract: it publishes the immutable JSON Schema at `https://metergraph.dev/contracts/ingest-session-v2.schema.json`, plus a manifest/index of published contracts at `https://metergraph.dev/contracts/index.json` (entries: `id`, `url`, `sha256`, `published_at`). metergraphsdk never stores an independent copy of the schema body. It stores exactly one small **lock manifest** — `contracts/ingest-session-v2.lock.json` — holding only the schema's URL and its pinned SHA-256, plus two verification scripts (one per language) that fetch the canonical schema, verify it against that pinned hash, and validate real SDK request/response shapes against it. A local-file or alternate-URL override lets metergraph-internal and metergraphsdk coordinate on a draft schema before it's deployed, without ever touching the pinned hash. This is the only piece of the plan that talks to the network in "canonical" mode; it runs as a separately named CI job/command, never as part of the offline `pytest`/`node --test` unit-test runs.
+metergraph-internal is the single source of truth for the `/v1/ingest/sessions` contract, and it publishes that contract as **two separate, independently versioned JSON Schema documents** -- a request schema and a response schema -- plus a manifest/index of published contracts:
 
-The two verifier scripts assume metergraph-internal publishes exactly this JSON Schema (Draft 2020-12) at the canonical URL — this is the artifact whose SHA-256 the lock file below pins:
+- `https://metergraph.dev/contracts/ingest-session-request.v2.schema.json`
+- `https://metergraph.dev/contracts/ingest-session-response.v2.schema.json`
+- `https://metergraph.dev/contracts/index.json` (entries: `id`, `url`, `sha256`, `published_at`)
+
+metergraphsdk never stores an independent copy of either schema body. It stores exactly one small **lock manifest** — `contracts/ingest-session-v2.lock.json` — holding both artifacts' pinned `(schema_url, sha256)` pairs, plus two verification scripts (one per language) that fetch both canonical schemas, verify each against its own pinned hash, and validate real SDK request/response shapes against their respective document. A local-file or alternate-URL override -- independently settable per artifact -- lets metergraph-internal and metergraphsdk coordinate on a draft schema before it's deployed, without ever touching either pinned hash. This is the only piece of the plan that talks to the network in "canonical" mode; it runs as a separately named CI job/command, never as part of the offline `pytest`/`node --test` unit-test runs.
+
+The verifier scripts assume metergraph-internal publishes exactly these two JSON Schemas (Draft 2020-12) at the canonical URLs — these are the artifacts whose SHA-256 the lock file below pins:
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://metergraph.dev/contracts/ingest-session-v2.schema.json",
-  "title": "Metergraph ingest session v2",
-  "$defs": {
-    "request": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["protocol_version", "repository", "sdk_version"],
-      "properties": {
-        "protocol_version": { "const": 2 },
-        "repository": { "type": "string", "pattern": "^[^/]+/[^/]+$" },
-        "sdk_version": { "type": "string" }
-      }
-    },
-    "response": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["session_token", "expires_at", "repository_id"],
-      "properties": {
-        "session_token": { "type": "string", "minLength": 1 },
-        "expires_at": { "type": "string", "format": "date-time" },
-        "repository_id": { "type": "string", "minLength": 1 }
-      }
-    }
+  "$id": "https://metergraph.dev/contracts/ingest-session-request.v2.schema.json",
+  "title": "Metergraph ingest session v2 request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "repository", "sdk_version"],
+  "properties": {
+    "protocol_version": { "const": 2 },
+    "repository": { "type": "string", "pattern": "^[^/]+/[^/]+$" },
+    "sdk_version": { "type": "string" }
   }
 }
 ```
 
-Serialized with `json.dumps(schema, indent=2)` plus a trailing newline, that document's SHA-256 is `fc20625bec077abfb21bf2ef4da1ba1a44f33cb73447f5e42c2a096052f3d2f9` — the value the lock file below pins. If metergraph-internal's actual published bytes differ (even by whitespace) once the endpoint goes live, the canonical verification command in Step 10 will fail loudly with both hashes printed; that is the pin working as intended, not a bug. The fix at that point is a single deliberate, reviewed edit to this lock file's `sha256` (a normal pinned-dependency bump, the same shape as updating any other lockfile hash after confirming out-of-band that the new content is the agreed contract) — never a silent auto-accept, and never a second independent copy of the schema body living in this repo.
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://metergraph.dev/contracts/ingest-session-response.v2.schema.json",
+  "title": "Metergraph ingest session v2 response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["session_token", "expires_at", "repository_id"],
+  "properties": {
+    "session_token": { "type": "string", "minLength": 1 },
+    "expires_at": { "type": "string", "format": "date-time" },
+    "repository_id": { "type": "string", "minLength": 1 }
+  }
+}
+```
+
+Serialized with `json.dumps(schema, indent=2)` plus a trailing newline, the request document's SHA-256 is `22debf343ca23c509adc116cc9390763466ff5246ee629a65cfb14ba70a2817d` and the response document's is `806447f4bcb4e44212597d295d47093922524acfcc73467c8eea782561524b34` — the values the lock file below pins, one per artifact. If metergraph-internal's actual published bytes for either document differ (even by whitespace) once the endpoints go live, the canonical verification command in Step 10 will fail loudly for that artifact, with both hashes printed; that is the pin working as intended, not a bug. The fix at that point is a single deliberate, reviewed edit to that artifact's entry in the lock file (a normal pinned-dependency bump, the same shape as updating any other lockfile hash after confirming out-of-band that the new content is the agreed contract) — never a silent auto-accept, and never a second independent copy of either schema body living in this repo.
 
 **Files:**
 - Create: `contracts/ingest-session-v2.lock.json`
@@ -106,8 +114,8 @@ Serialized with `json.dumps(schema, indent=2)` plus a trailing newline, that doc
 - Modify: `.github/workflows/ci.yml`
 
 **Interfaces:**
-- Produces (Python, `python/scripts/verify_ingest_contract.py`): `SchemaSource` (dataclass: `content: bytes`, `sha256: str`, `origin: str`, `pinned: bool`), `ContractVerificationError`, `resolve_schema_source() -> SchemaSource`, `load_schema_document(source: SchemaSource) -> dict`, `validate_instance(document: dict, definition: str, instance: Any) -> None`, `main() -> int`. Task 4 extends this module's `main()` with `_validate_sdk_examples()` once `metergraph._session` exists.
-- Produces (TypeScript, `typescript/scripts/verify-ingest-contract.mjs`): `resolveSchemaSource()`, `loadSchemaDocument(source)`, `validateInstance(document, definition, instance)`, `main()`. Task 13 extends this module's `main()` with `validateSdkExamples()` once `typescript/dist/session.js` exists.
+- Produces (Python, `python/scripts/verify_ingest_contract.py`): `SchemaSource` (dataclass: `content: bytes`, `sha256: str`, `origin: str`, `pinned: bool`), `ContractVerificationError`, `resolve_schema_source(kind: str) -> SchemaSource` (`kind` is `"request"` or `"response"`), `load_schema_document(source: SchemaSource) -> dict`, `validate_instance(document: dict, instance: Any) -> None`, `main() -> int`. Task 4 extends this module's `main()` with `_validate_sdk_examples(request_document, response_document)` once `metergraph._session` exists.
+- Produces (TypeScript, `typescript/scripts/verify-ingest-contract.mjs`): `resolveSchemaSource(kind, options?)`, `loadSchemaDocument(source)`, `validateInstance(document, instance)`, `main()`. Task 13 extends this module's `main()` with `validateSdkExamples(requestDocument, responseDocument)` once `typescript/dist/session.js` exists.
 - Consumes: nothing from earlier tasks (this is the first task).
 
 - [ ] **Step 1: Write the failing Python verifier tests**
@@ -131,30 +139,29 @@ sys.path.insert(0, str(REPO_ROOT / "python" / "scripts"))
 import verify_ingest_contract as vic  # noqa: E402
 
 
-EXAMPLE_SCHEMA = {
+EXAMPLE_REQUEST_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "$id": "https://metergraph.dev/contracts/ingest-session-v2.schema.json",
-    "$defs": {
-        "request": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["protocol_version", "repository", "sdk_version"],
-            "properties": {
-                "protocol_version": {"const": 2},
-                "repository": {"type": "string", "pattern": "^[^/]+/[^/]+$"},
-                "sdk_version": {"type": "string"},
-            },
-        },
-        "response": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["session_token", "expires_at", "repository_id"],
-            "properties": {
-                "session_token": {"type": "string", "minLength": 1},
-                "expires_at": {"type": "string", "format": "date-time"},
-                "repository_id": {"type": "string", "minLength": 1},
-            },
-        },
+    "$id": "https://metergraph.dev/contracts/ingest-session-request.v2.schema.json",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["protocol_version", "repository", "sdk_version"],
+    "properties": {
+        "protocol_version": {"const": 2},
+        "repository": {"type": "string", "pattern": "^[^/]+/[^/]+$"},
+        "sdk_version": {"type": "string"},
+    },
+}
+
+EXAMPLE_RESPONSE_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://metergraph.dev/contracts/ingest-session-response.v2.schema.json",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["session_token", "expires_at", "repository_id"],
+    "properties": {
+        "session_token": {"type": "string", "minLength": 1},
+        "expires_at": {"type": "string", "format": "date-time"},
+        "repository_id": {"type": "string", "minLength": 1},
     },
 }
 
@@ -175,18 +182,32 @@ def _serve_bytes(content: bytes):
     return server
 
 
-def test_resolve_schema_source_accepts_a_matching_pinned_hash(monkeypatch, tmp_path):
-    content = json.dumps(EXAMPLE_SCHEMA).encode()
+def _lock_pointing_at(kind: str, schema_url: str, sha256: str) -> dict:
+    """A full two-artifact lock dict where only `kind`'s entry matters for
+    the test exercising it; the other entry is present but unused."""
+    other = "response" if kind == "request" else "request"
+    return {
+        kind: {"schema_url": schema_url, "sha256": sha256},
+        other: {"schema_url": "https://unused.example/other", "sha256": "0" * 64},
+    }
+
+
+@pytest.mark.parametrize(
+    "kind,schema",
+    [("request", EXAMPLE_REQUEST_SCHEMA), ("response", EXAMPLE_RESPONSE_SCHEMA)],
+)
+def test_resolve_schema_source_accepts_a_matching_pinned_hash(kind, schema, monkeypatch, tmp_path):
+    content = json.dumps(schema).encode()
     digest = hashlib.sha256(content).hexdigest()
     server = _serve_bytes(content)
     monkeypatch.setattr(
         vic,
         "_read_lock",
-        lambda: {"schema_url": f"http://127.0.0.1:{server.server_port}/schema.json", "sha256": digest},
+        lambda: _lock_pointing_at(kind, f"http://127.0.0.1:{server.server_port}/schema.json", digest),
     )
     monkeypatch.setenv("METERGRAPH_CONTRACT_CACHE_DIR", str(tmp_path))
 
-    source = vic.resolve_schema_source()
+    source = vic.resolve_schema_source(kind)
     server.shutdown()
 
     assert source.pinned is True
@@ -194,54 +215,88 @@ def test_resolve_schema_source_accepts_a_matching_pinned_hash(monkeypatch, tmp_p
 
 
 def test_resolve_schema_source_rejects_a_hash_mismatch(monkeypatch, tmp_path):
-    content = json.dumps(EXAMPLE_SCHEMA).encode()
+    content = json.dumps(EXAMPLE_REQUEST_SCHEMA).encode()
     server = _serve_bytes(content)
     monkeypatch.setattr(
         vic,
         "_read_lock",
-        lambda: {"schema_url": f"http://127.0.0.1:{server.server_port}/schema.json", "sha256": "0" * 64},
+        lambda: _lock_pointing_at("request", f"http://127.0.0.1:{server.server_port}/schema.json", "0" * 64),
     )
     monkeypatch.setenv("METERGRAPH_CONTRACT_CACHE_DIR", str(tmp_path))
 
     with pytest.raises(vic.ContractVerificationError, match="pins"):
-        vic.resolve_schema_source()
+        vic.resolve_schema_source("request")
     server.shutdown()
 
 
 def test_resolve_schema_source_local_path_override_skips_the_pin_check(monkeypatch, tmp_path, capsys):
-    schema_path = tmp_path / "draft.schema.json"
-    schema_path.write_text(json.dumps(EXAMPLE_SCHEMA))
+    schema_path = tmp_path / "draft-request.schema.json"
+    schema_path.write_text(json.dumps(EXAMPLE_REQUEST_SCHEMA))
     monkeypatch.setattr(
-        vic, "_read_lock", lambda: {"schema_url": "https://unused.example/x", "sha256": "0" * 64}
+        vic, "_read_lock", lambda: _lock_pointing_at("request", "https://unused.example/x", "0" * 64)
     )
-    monkeypatch.setenv("METERGRAPH_CONTRACT_SCHEMA_PATH", str(schema_path))
+    monkeypatch.setenv("METERGRAPH_CONTRACT_REQUEST_SCHEMA_PATH", str(schema_path))
 
-    source = vic.resolve_schema_source()
+    source = vic.resolve_schema_source("request")
 
     assert source.pinned is False
     assert "skipping sha256 pin check" in capsys.readouterr().err
 
 
 def test_resolve_schema_source_url_override_skips_the_pin_check(monkeypatch, tmp_path, capsys):
-    content = json.dumps(EXAMPLE_SCHEMA).encode()
+    content = json.dumps(EXAMPLE_RESPONSE_SCHEMA).encode()
     server = _serve_bytes(content)
     monkeypatch.setattr(
-        vic, "_read_lock", lambda: {"schema_url": "https://unused.example/x", "sha256": "0" * 64}
+        vic, "_read_lock", lambda: _lock_pointing_at("response", "https://unused.example/x", "0" * 64)
     )
-    monkeypatch.setenv("METERGRAPH_CONTRACT_SCHEMA_URL", f"http://127.0.0.1:{server.server_port}/draft.json")
+    monkeypatch.setenv(
+        "METERGRAPH_CONTRACT_RESPONSE_SCHEMA_URL", f"http://127.0.0.1:{server.server_port}/draft.json"
+    )
     monkeypatch.setenv("METERGRAPH_CONTRACT_CACHE_DIR", str(tmp_path))
 
-    source = vic.resolve_schema_source()
+    source = vic.resolve_schema_source("response")
     server.shutdown()
 
     assert source.pinned is False
     assert "skipping sha256 pin check" in capsys.readouterr().err
 
 
+def test_resolve_schema_source_overrides_for_one_artifact_do_not_affect_the_other(
+    monkeypatch, tmp_path, capsys
+):
+    """A request-side override must never leak into the response-side fetch,
+    and vice versa -- each artifact's override env vars are independent."""
+    request_path = tmp_path / "draft-request.schema.json"
+    request_path.write_text(json.dumps(EXAMPLE_REQUEST_SCHEMA))
+    response_content = json.dumps(EXAMPLE_RESPONSE_SCHEMA).encode()
+    response_digest = hashlib.sha256(response_content).hexdigest()
+    server = _serve_bytes(response_content)
+    monkeypatch.setattr(
+        vic,
+        "_read_lock",
+        lambda: {
+            "request": {"schema_url": "https://unused.example/request", "sha256": "0" * 64},
+            "response": {
+                "schema_url": f"http://127.0.0.1:{server.server_port}/schema.json",
+                "sha256": response_digest,
+            },
+        },
+    )
+    monkeypatch.setenv("METERGRAPH_CONTRACT_REQUEST_SCHEMA_PATH", str(request_path))
+    monkeypatch.setenv("METERGRAPH_CONTRACT_CACHE_DIR", str(tmp_path))
+
+    request_source = vic.resolve_schema_source("request")
+    response_source = vic.resolve_schema_source("response")
+    server.shutdown()
+
+    assert request_source.pinned is False
+    assert response_source.pinned is True
+    assert response_source.sha256 == response_digest
+
+
 def test_validate_instance_passes_for_a_conforming_request():
     vic.validate_instance(
-        EXAMPLE_SCHEMA,
-        "request",
+        EXAMPLE_REQUEST_SCHEMA,
         {"protocol_version": 2, "repository": "owner/repo", "sdk_version": "0.4.0"},
     )  # does not raise
 
@@ -251,10 +306,27 @@ def test_validate_instance_rejects_a_malformed_request():
 
     with pytest.raises(jsonschema.ValidationError):
         vic.validate_instance(
-            EXAMPLE_SCHEMA,
-            "request",
+            EXAMPLE_REQUEST_SCHEMA,
             {"protocol_version": 1, "repository": "owner/repo", "sdk_version": "0.4.0"},
         )
+
+
+def test_validate_instance_passes_for_a_conforming_response():
+    vic.validate_instance(
+        EXAMPLE_RESPONSE_SCHEMA,
+        {
+            "session_token": "mgs_example",
+            "expires_at": "2026-08-08T12:34:56+00:00",
+            "repository_id": "repo_example",
+        },
+    )  # does not raise
+
+
+def test_validate_instance_rejects_a_malformed_response():
+    import jsonschema
+
+    with pytest.raises(jsonschema.ValidationError):
+        vic.validate_instance(EXAMPLE_RESPONSE_SCHEMA, {"session_token": "mgs_example"})
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -269,28 +341,38 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'verify_ingest_contrac
 {
   "contract_id": "ingest-session-v2",
   "manifest_url": "https://metergraph.dev/contracts/index.json",
-  "schema_url": "https://metergraph.dev/contracts/ingest-session-v2.schema.json",
-  "sha256": "fc20625bec077abfb21bf2ef4da1ba1a44f33cb73447f5e42c2a096052f3d2f9"
+  "request": {
+    "schema_url": "https://metergraph.dev/contracts/ingest-session-request.v2.schema.json",
+    "sha256": "22debf343ca23c509adc116cc9390763466ff5246ee629a65cfb14ba70a2817d"
+  },
+  "response": {
+    "schema_url": "https://metergraph.dev/contracts/ingest-session-response.v2.schema.json",
+    "sha256": "806447f4bcb4e44212597d295d47093922524acfcc73467c8eea782561524b34"
+  }
 }
 ```
 
 ```python
 # python/scripts/verify_ingest_contract.py
-"""Fetch, pin-check, and validate the canonical ingest-session-v2 contract.
+"""Fetch, pin-check, and validate the two canonical ingest-session-v2
+contract artifacts (request schema, response schema).
 
-Canonical source of truth: metergraph-internal publishes the immutable
-schema at the URL in contracts/ingest-session-v2.lock.json, plus a
+Canonical source of truth: metergraph-internal publishes both immutable
+schemas at the URLs in contracts/ingest-session-v2.lock.json, plus a
 manifest/index at https://metergraph.dev/contracts/index.json. This repo
-never stores an independent copy of the schema body -- only a pinned
-(URL, sha256) pointer to it in that lock file.
+never stores an independent copy of either schema body -- only a pinned
+(URL, sha256) pointer to each in that lock file.
 
 Usage:
     python python/scripts/verify_ingest_contract.py
 
 Override for coordinated development before metergraph-internal deploys a
-schema revision (skips the sha256 pin check, still validates shape):
-    METERGRAPH_CONTRACT_SCHEMA_PATH=/path/to/draft.schema.json python ...
-    METERGRAPH_CONTRACT_SCHEMA_URL=https://staging.metergraph.dev/... python ...
+schema revision (skips that artifact's sha256 pin check, still validates
+shape). Each artifact has its own independent override pair:
+    METERGRAPH_CONTRACT_REQUEST_SCHEMA_PATH=/path/to/draft-request.schema.json python ...
+    METERGRAPH_CONTRACT_REQUEST_SCHEMA_URL=https://staging.metergraph.dev/... python ...
+    METERGRAPH_CONTRACT_RESPONSE_SCHEMA_PATH=/path/to/draft-response.schema.json python ...
+    METERGRAPH_CONTRACT_RESPONSE_SCHEMA_URL=https://staging.metergraph.dev/... python ...
 """
 
 from __future__ import annotations
@@ -312,6 +394,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 LOCK_PATH = REPO_ROOT / "contracts" / "ingest-session-v2.lock.json"
 FETCH_TIMEOUT_SECONDS = 10.0
 CACHE_DIR_ENV = "METERGRAPH_CONTRACT_CACHE_DIR"
+ARTIFACT_KINDS = ("request", "response")
 
 
 @dataclass(frozen=True)
@@ -341,20 +424,23 @@ def _read_lock() -> dict[str, Any]:
     return json.loads(LOCK_PATH.read_text())
 
 
-def resolve_schema_source() -> SchemaSource:
-    lock = _read_lock()
-    path_override = os.getenv("METERGRAPH_CONTRACT_SCHEMA_PATH")
-    url_override = os.getenv("METERGRAPH_CONTRACT_SCHEMA_URL")
+def resolve_schema_source(kind: str) -> SchemaSource:
+    if kind not in ARTIFACT_KINDS:
+        raise ValueError(f"kind must be one of {ARTIFACT_KINDS}, got {kind!r}")
+    entry = _read_lock()[kind]
+    env_prefix = f"METERGRAPH_CONTRACT_{kind.upper()}_SCHEMA"
+    path_override = os.getenv(f"{env_prefix}_PATH")
+    url_override = os.getenv(f"{env_prefix}_URL")
 
     if path_override:
         content = Path(path_override).read_bytes()
         print(
-            f"WARNING: using local override schema {path_override}; skipping sha256 pin check",
+            f"WARNING: using local override {kind} schema {path_override}; skipping sha256 pin check",
             file=sys.stderr,
         )
         return SchemaSource(content=content, sha256=_sha256(content), origin=path_override, pinned=False)
 
-    url = url_override or lock["schema_url"]
+    url = url_override or entry["schema_url"]
     request = urllib.request.Request(url, headers={"Accept": "application/json"})
     with urllib.request.urlopen(request, timeout=FETCH_TIMEOUT_SECONDS) as response:
         content = response.read()
@@ -364,15 +450,16 @@ def resolve_schema_source() -> SchemaSource:
         cache_path.write_bytes(content)
 
     if url_override:
-        print(f"WARNING: using override schema URL {url}; skipping sha256 pin check", file=sys.stderr)
+        print(f"WARNING: using override {kind} schema URL {url}; skipping sha256 pin check", file=sys.stderr)
         return SchemaSource(content=content, sha256=digest, origin=url, pinned=False)
 
-    expected = lock["sha256"]
+    expected = entry["sha256"]
     if digest != expected:
         raise ContractVerificationError(
-            f"canonical schema at {url} has sha256 {digest}, but {LOCK_PATH} pins "
-            f"{expected}. If this is an intentional contract revision, update the "
-            "lock file's sha256 after reviewing the change; otherwise this is drift or tampering."
+            f"canonical {kind} schema at {url} has sha256 {digest}, but {LOCK_PATH} "
+            f"pins {expected} for {kind}. If this is an intentional contract revision, "
+            "update the lock file's sha256 for this artifact after reviewing the change; "
+            "otherwise this is drift or tampering."
         )
     return SchemaSource(content=content, sha256=digest, origin=url, pinned=True)
 
@@ -381,22 +468,25 @@ def load_schema_document(source: SchemaSource) -> dict[str, Any]:
     return json.loads(source.content)
 
 
-def validate_instance(document: dict[str, Any], definition: str, instance: Any) -> None:
-    jsonschema.validate(instance=instance, schema=document["$defs"][definition])
+def validate_instance(document: dict[str, Any], instance: Any) -> None:
+    jsonschema.validate(instance=instance, schema=document)
 
 
 def main() -> int:
     try:
-        source = resolve_schema_source()
-        load_schema_document(source)
+        request_source = resolve_schema_source("request")
+        response_source = resolve_schema_source("response")
+        load_schema_document(request_source)
+        load_schema_document(response_source)
     except ContractVerificationError as exc:
         print(f"verify-ingest-contract: {exc}", file=sys.stderr)
         return 1
     except Exception as exc:
         print(f"verify-ingest-contract: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
-    pin_state = "pinned" if source.pinned else "override (unpinned)"
-    print(f"verify-ingest-contract: OK -- {source.origin} ({pin_state}, sha256={source.sha256})")
+    for kind, source in (("request", request_source), ("response", response_source)):
+        pin_state = "pinned" if source.pinned else "override (unpinned)"
+        print(f"verify-ingest-contract: OK -- {kind} {source.origin} ({pin_state}, sha256={source.sha256})")
     return 0
 
 
@@ -404,7 +494,7 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-`validate_instance` validates directly against `document["$defs"][definition]` without a `$ref` resolver -- correct as long as `request`/`response` stay self-contained (no cross-references between them), which is true of the schema above.
+`validate_instance` validates directly against the whole `document` -- each artifact is now its own standalone schema (no `$defs` sub-selection), so there is nothing to pick out of it.
 
 Add `jsonschema` to `python/pyproject.toml`'s dev dependencies:
 
@@ -444,30 +534,29 @@ import {
   validateInstance,
 } from "../scripts/verify-ingest-contract.mjs";
 
-const EXAMPLE_SCHEMA = {
+const EXAMPLE_REQUEST_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
-  $id: "https://metergraph.dev/contracts/ingest-session-v2.schema.json",
-  $defs: {
-    request: {
-      type: "object",
-      additionalProperties: false,
-      required: ["protocol_version", "repository", "sdk_version"],
-      properties: {
-        protocol_version: { const: 2 },
-        repository: { type: "string", pattern: "^[^/]+/[^/]+$" },
-        sdk_version: { type: "string" },
-      },
-    },
-    response: {
-      type: "object",
-      additionalProperties: false,
-      required: ["session_token", "expires_at", "repository_id"],
-      properties: {
-        session_token: { type: "string", minLength: 1 },
-        expires_at: { type: "string", format: "date-time" },
-        repository_id: { type: "string", minLength: 1 },
-      },
-    },
+  $id: "https://metergraph.dev/contracts/ingest-session-request.v2.schema.json",
+  type: "object",
+  additionalProperties: false,
+  required: ["protocol_version", "repository", "sdk_version"],
+  properties: {
+    protocol_version: { const: 2 },
+    repository: { type: "string", pattern: "^[^/]+/[^/]+$" },
+    sdk_version: { type: "string" },
+  },
+};
+
+const EXAMPLE_RESPONSE_SCHEMA = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  $id: "https://metergraph.dev/contracts/ingest-session-response.v2.schema.json",
+  type: "object",
+  additionalProperties: false,
+  required: ["session_token", "expires_at", "repository_id"],
+  properties: {
+    session_token: { type: "string", minLength: 1 },
+    expires_at: { type: "string", format: "date-time" },
+    repository_id: { type: "string", minLength: 1 },
   },
 };
 
@@ -484,25 +573,35 @@ async function serveBytes(content) {
   return server;
 }
 
-test("resolveSchemaSource accepts a matching pinned hash", async (t) => {
-  const content = Buffer.from(JSON.stringify(EXAMPLE_SCHEMA));
-  const digest = sha256(content);
-  const server = await serveBytes(content);
-  t.after(async () => new Promise((resolve) => server.close(resolve)));
-  const cacheDir = mkdtempSync(join(tmpdir(), "metergraph-contract-cache-"));
-  t.after(() => rmSync(cacheDir, { recursive: true, force: true }));
+function lockPointingAt(kind, schemaUrl, sha) {
+  const other = kind === "request" ? "response" : "request";
+  return {
+    [kind]: { schema_url: schemaUrl, sha256: sha },
+    [other]: { schema_url: "https://unused.example/other", sha256: "0".repeat(64) },
+  };
+}
 
-  const source = await resolveSchemaSource({
-    lock: { schema_url: `http://127.0.0.1:${server.address().port}/schema.json`, sha256: digest },
-    cacheDir,
+for (const [kind, schema] of [["request", EXAMPLE_REQUEST_SCHEMA], ["response", EXAMPLE_RESPONSE_SCHEMA]]) {
+  test(`resolveSchemaSource accepts a matching pinned hash for ${kind}`, async (t) => {
+    const content = Buffer.from(JSON.stringify(schema));
+    const digest = sha256(content);
+    const server = await serveBytes(content);
+    t.after(async () => new Promise((resolve) => server.close(resolve)));
+    const cacheDir = mkdtempSync(join(tmpdir(), "metergraph-contract-cache-"));
+    t.after(() => rmSync(cacheDir, { recursive: true, force: true }));
+
+    const source = await resolveSchemaSource(kind, {
+      lock: lockPointingAt(kind, `http://127.0.0.1:${server.address().port}/schema.json`, digest),
+      cacheDir,
+    });
+
+    assert.equal(source.pinned, true);
+    assert.equal(source.sha256, digest);
   });
-
-  assert.equal(source.pinned, true);
-  assert.equal(source.sha256, digest);
-});
+}
 
 test("resolveSchemaSource rejects a hash mismatch", async (t) => {
-  const content = Buffer.from(JSON.stringify(EXAMPLE_SCHEMA));
+  const content = Buffer.from(JSON.stringify(EXAMPLE_REQUEST_SCHEMA));
   const server = await serveBytes(content);
   t.after(async () => new Promise((resolve) => server.close(resolve)));
   const cacheDir = mkdtempSync(join(tmpdir(), "metergraph-contract-cache-"));
@@ -510,8 +609,8 @@ test("resolveSchemaSource rejects a hash mismatch", async (t) => {
 
   await assert.rejects(
     () =>
-      resolveSchemaSource({
-        lock: { schema_url: `http://127.0.0.1:${server.address().port}/schema.json`, sha256: "0".repeat(64) },
+      resolveSchemaSource("request", {
+        lock: lockPointingAt("request", `http://127.0.0.1:${server.address().port}/schema.json`, "0".repeat(64)),
         cacheDir,
       }),
     /pins/,
@@ -521,14 +620,14 @@ test("resolveSchemaSource rejects a hash mismatch", async (t) => {
 test("resolveSchemaSource local path override skips the pin check", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "metergraph-contract-override-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const schemaPath = join(dir, "draft.schema.json");
-  writeFileSync(schemaPath, JSON.stringify(EXAMPLE_SCHEMA));
+  const schemaPath = join(dir, "draft-request.schema.json");
+  writeFileSync(schemaPath, JSON.stringify(EXAMPLE_REQUEST_SCHEMA));
   const warnings = [];
   const originalWarn = console.warn;
   console.warn = (...args) => warnings.push(args.join(" "));
 
-  const source = await resolveSchemaSource({
-    lock: { schema_url: "https://unused.example/x", sha256: "0".repeat(64) },
+  const source = await resolveSchemaSource("request", {
+    lock: lockPointingAt("request", "https://unused.example/x", "0".repeat(64)),
     schemaPathOverride: schemaPath,
   });
   console.warn = originalWarn;
@@ -537,8 +636,32 @@ test("resolveSchemaSource local path override skips the pin check", async (t) =>
   assert.ok(warnings.some((message) => message.includes("skipping sha256 pin check")));
 });
 
+test("resolveSchemaSource overrides for one artifact do not affect the other", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "metergraph-contract-override-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const requestPath = join(dir, "draft-request.schema.json");
+  writeFileSync(requestPath, JSON.stringify(EXAMPLE_REQUEST_SCHEMA));
+  const responseContent = Buffer.from(JSON.stringify(EXAMPLE_RESPONSE_SCHEMA));
+  const responseDigest = sha256(responseContent);
+  const server = await serveBytes(responseContent);
+  t.after(async () => new Promise((resolve) => server.close(resolve)));
+  const cacheDir = mkdtempSync(join(tmpdir(), "metergraph-contract-cache-"));
+  t.after(() => rmSync(cacheDir, { recursive: true, force: true }));
+  const lock = {
+    request: { schema_url: "https://unused.example/request", sha256: "0".repeat(64) },
+    response: { schema_url: `http://127.0.0.1:${server.address().port}/schema.json`, sha256: responseDigest },
+  };
+
+  const requestSource = await resolveSchemaSource("request", { lock, schemaPathOverride: requestPath });
+  const responseSource = await resolveSchemaSource("response", { lock, cacheDir });
+
+  assert.equal(requestSource.pinned, false);
+  assert.equal(responseSource.pinned, true);
+  assert.equal(responseSource.sha256, responseDigest);
+});
+
 test("validateInstance passes for a conforming request", () => {
-  validateInstance(EXAMPLE_SCHEMA, "request", {
+  validateInstance(EXAMPLE_REQUEST_SCHEMA, {
     protocol_version: 2,
     repository: "owner/repo",
     sdk_version: "0.4.0",
@@ -547,12 +670,24 @@ test("validateInstance passes for a conforming request", () => {
 
 test("validateInstance rejects a malformed request", () => {
   assert.throws(() =>
-    validateInstance(EXAMPLE_SCHEMA, "request", {
+    validateInstance(EXAMPLE_REQUEST_SCHEMA, {
       protocol_version: 1,
       repository: "owner/repo",
       sdk_version: "0.4.0",
     }),
   );
+});
+
+test("validateInstance passes for a conforming response", () => {
+  validateInstance(EXAMPLE_RESPONSE_SCHEMA, {
+    session_token: "mgs_example",
+    expires_at: "2026-08-08T12:34:56+00:00",
+    repository_id: "repo_example",
+  }); // does not throw
+});
+
+test("validateInstance rejects a malformed response", () => {
+  assert.throws(() => validateInstance(EXAMPLE_RESPONSE_SCHEMA, { session_token: "mgs_example" }));
 });
 ```
 
@@ -566,21 +701,25 @@ Expected: FAIL -- `Cannot find module '../scripts/verify-ingest-contract.mjs'`
 ```js
 #!/usr/bin/env node
 // typescript/scripts/verify-ingest-contract.mjs
-// Fetch, pin-check, and validate the canonical ingest-session-v2 contract.
+// Fetch, pin-check, and validate the two canonical ingest-session-v2
+// contract artifacts (request schema, response schema).
 //
-// Canonical source of truth: metergraph-internal publishes the immutable
-// schema at the URL in contracts/ingest-session-v2.lock.json, plus a
+// Canonical source of truth: metergraph-internal publishes both immutable
+// schemas at the URLs in contracts/ingest-session-v2.lock.json, plus a
 // manifest/index at https://metergraph.dev/contracts/index.json. This repo
-// never stores an independent copy of the schema body -- only a pinned
-// (URL, sha256) pointer to it in that lock file.
+// never stores an independent copy of either schema body -- only a pinned
+// (URL, sha256) pointer to each in that lock file.
 //
 // Usage:
 //   node typescript/scripts/verify-ingest-contract.mjs
 //
 // Override for coordinated development before metergraph-internal deploys a
-// schema revision (skips the sha256 pin check, still validates shape):
-//   METERGRAPH_CONTRACT_SCHEMA_PATH=/path/to/draft.schema.json node ...
-//   METERGRAPH_CONTRACT_SCHEMA_URL=https://staging.metergraph.dev/... node ...
+// schema revision (skips that artifact's sha256 pin check, still validates
+// shape). Each artifact has its own independent override pair:
+//   METERGRAPH_CONTRACT_REQUEST_SCHEMA_PATH=/path/to/draft-request.schema.json node ...
+//   METERGRAPH_CONTRACT_REQUEST_SCHEMA_URL=https://staging.metergraph.dev/... node ...
+//   METERGRAPH_CONTRACT_RESPONSE_SCHEMA_PATH=/path/to/draft-response.schema.json node ...
+//   METERGRAPH_CONTRACT_RESPONSE_SCHEMA_URL=https://staging.metergraph.dev/... node ...
 
 import Ajv from "ajv";
 import addFormats from "ajv-formats";
@@ -594,6 +733,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..", "..");
 const LOCK_PATH = join(REPO_ROOT, "contracts", "ingest-session-v2.lock.json");
 const FETCH_TIMEOUT_MS = 10_000;
+const ARTIFACT_KINDS = ["request", "response"];
 
 function sha256(content) {
   return createHash("sha256").update(content).digest("hex");
@@ -609,18 +749,23 @@ function readLock() {
   return JSON.parse(readFileSync(LOCK_PATH, "utf8"));
 }
 
-export async function resolveSchemaSource(options = {}) {
+export async function resolveSchemaSource(kind, options = {}) {
+  if (!ARTIFACT_KINDS.includes(kind)) {
+    throw new Error(`kind must be one of ${ARTIFACT_KINDS.join(", ")}, got ${kind}`);
+  }
   const lock = options.lock ?? readLock();
-  const pathOverride = options.schemaPathOverride ?? process.env.METERGRAPH_CONTRACT_SCHEMA_PATH;
-  const urlOverride = options.schemaUrlOverride ?? process.env.METERGRAPH_CONTRACT_SCHEMA_URL;
+  const entry = lock[kind];
+  const envPrefix = `METERGRAPH_CONTRACT_${kind.toUpperCase()}_SCHEMA`;
+  const pathOverride = options.schemaPathOverride ?? process.env[`${envPrefix}_PATH`];
+  const urlOverride = options.schemaUrlOverride ?? process.env[`${envPrefix}_URL`];
 
   if (pathOverride) {
     const content = readFileSync(pathOverride);
-    console.warn(`WARNING: using local override schema ${pathOverride}; skipping sha256 pin check`);
+    console.warn(`WARNING: using local override ${kind} schema ${pathOverride}; skipping sha256 pin check`);
     return { content, sha256: sha256(content), origin: pathOverride, pinned: false };
   }
 
-  const url = urlOverride ?? lock.schema_url;
+  const url = urlOverride ?? entry.schema_url;
   const response = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
   if (!response.ok) throw new Error(`fetching ${url} failed with HTTP ${response.status}`);
   const content = Buffer.from(await response.arrayBuffer());
@@ -630,15 +775,16 @@ export async function resolveSchemaSource(options = {}) {
   if (!existsSync(cachePath)) writeFileSync(cachePath, content);
 
   if (urlOverride) {
-    console.warn(`WARNING: using override schema URL ${url}; skipping sha256 pin check`);
+    console.warn(`WARNING: using override ${kind} schema URL ${url}; skipping sha256 pin check`);
     return { content, sha256: digest, origin: url, pinned: false };
   }
 
-  if (digest !== lock.sha256) {
+  if (digest !== entry.sha256) {
     throw new Error(
-      `canonical schema at ${url} has sha256 ${digest}, but ${LOCK_PATH} pins ` +
-      `${lock.sha256}. If this is an intentional contract revision, update the ` +
-      "lock file's sha256 after reviewing the change; otherwise this is drift or tampering.",
+      `canonical ${kind} schema at ${url} has sha256 ${digest}, but ${LOCK_PATH} pins ` +
+      `${entry.sha256} for ${kind}. If this is an intentional contract revision, update ` +
+      "the lock file's sha256 for this artifact after reviewing the change; otherwise " +
+      "this is drift or tampering.",
     );
   }
   return { content, sha256: digest, origin: url, pinned: true };
@@ -648,10 +794,10 @@ export function loadSchemaDocument(source) {
   return JSON.parse(source.content.toString("utf8"));
 }
 
-export function validateInstance(document, definition, instance) {
+export function validateInstance(document, instance) {
   const ajv = new Ajv({ allErrors: true });
   addFormats(ajv);
-  const validate = ajv.compile(document.$defs[definition]);
+  const validate = ajv.compile(document);
   if (!validate(instance)) {
     throw new Error(`schema validation failed: ${ajv.errorsText(validate.errors)}`);
   }
@@ -659,10 +805,14 @@ export function validateInstance(document, definition, instance) {
 
 export async function main() {
   try {
-    const source = await resolveSchemaSource();
-    loadSchemaDocument(source);
-    const pinState = source.pinned ? "pinned" : "override (unpinned)";
-    console.log(`verify-ingest-contract: OK -- ${source.origin} (${pinState}, sha256=${source.sha256})`);
+    const requestSource = await resolveSchemaSource("request");
+    const responseSource = await resolveSchemaSource("response");
+    loadSchemaDocument(requestSource);
+    loadSchemaDocument(responseSource);
+    for (const [kind, source] of [["request", requestSource], ["response", responseSource]]) {
+      const pinState = source.pinned ? "pinned" : "override (unpinned)";
+      console.log(`verify-ingest-contract: OK -- ${kind} ${source.origin} (${pinState}, sha256=${source.sha256})`);
+    }
     return 0;
   } catch (error) {
     console.error(`verify-ingest-contract: ${error instanceof Error ? error.message : String(error)}`);
@@ -744,7 +894,7 @@ Add a new job:
         working-directory: typescript
 ```
 
-This job runs the *canonical* check (no override env vars set) against the real `https://metergraph.dev/contracts/ingest-session-v2.schema.json`. Until metergraph-internal deploys that endpoint, this job is expected to fail -- that is a known, external, out-of-this-repo's-control bootstrap gap, not a defect in this tooling. Do not add it as a required branch-protection status check until it has gone green at least once; it remains a real, always-invokable named job (`contract-verification`) and command (`python python/scripts/verify_ingest_contract.py`, `npm run verify:contract` in `typescript/`) from the moment this task lands, satisfying "named CI job/command" without gating unrelated SDK PRs on an endpoint this repo doesn't own or control the deploy timing of.
+This job runs the *canonical* check (no override env vars set) against both real endpoints, `https://metergraph.dev/contracts/ingest-session-request.v2.schema.json` and `https://metergraph.dev/contracts/ingest-session-response.v2.schema.json` -- each command (`verify_ingest_contract.py` / `verify:contract`) fetches and validates both artifacts in one run. Until metergraph-internal deploys those endpoints, this job is expected to fail -- that is a known, external, out-of-this-repo's-control bootstrap gap, not a defect in this tooling. Do not add it as a required branch-protection status check until it has gone green at least once; it remains a real, always-invokable named job (`contract-verification`) and command (`python python/scripts/verify_ingest_contract.py`, `npm run verify:contract` in `typescript/`) from the moment this task lands, satisfying "named CI job/command" without gating unrelated SDK PRs on endpoints this repo doesn't own or control the deploy timing of.
 
 - [ ] **Step 11: Commit the TypeScript side and CI wiring**
 
@@ -1550,16 +1700,19 @@ Expected: PASS
 
 - [ ] **Step 5: Write the failing test tying the verifier to the real SDK**
 
-Now that `metergraph._session` exists, extend the contract-verification tests from Task 1 to prove the real request/response handling -- not just a literal example -- conforms to the schema. This still runs fully offline via the local-path override.
+Now that `metergraph._session` exists, extend the contract-verification tests from Task 1 to prove the real request/response handling -- not just a literal example -- conforms to both schemas. This still runs fully offline via the local-path overrides, one per artifact.
 
 ```python
 # append to python/tests/test_ingest_contract_verification.py
 def test_verify_ingest_contract_validates_the_real_python_sdk_request_and_response(
     monkeypatch, tmp_path
 ):
-    schema_path = tmp_path / "draft.schema.json"
-    schema_path.write_text(json.dumps(EXAMPLE_SCHEMA))
-    monkeypatch.setenv("METERGRAPH_CONTRACT_SCHEMA_PATH", str(schema_path))
+    request_schema_path = tmp_path / "draft-request.schema.json"
+    request_schema_path.write_text(json.dumps(EXAMPLE_REQUEST_SCHEMA))
+    response_schema_path = tmp_path / "draft-response.schema.json"
+    response_schema_path.write_text(json.dumps(EXAMPLE_RESPONSE_SCHEMA))
+    monkeypatch.setenv("METERGRAPH_CONTRACT_REQUEST_SCHEMA_PATH", str(request_schema_path))
+    monkeypatch.setenv("METERGRAPH_CONTRACT_RESPONSE_SCHEMA_PATH", str(response_schema_path))
 
     exit_code = vic.main()
 
@@ -1569,14 +1722,16 @@ def test_verify_ingest_contract_validates_the_real_python_sdk_request_and_respon
 - [ ] **Step 6: Run test to verify it fails**
 
 Run: `cd python && python -m pytest tests/test_ingest_contract_verification.py -v -k real_python_sdk`
-Expected: FAIL -- `main()` currently only fetches and parses the schema; it never imports or validates against `metergraph._session`, so this test either errors or passes vacuously without exercising the real SDK. Confirm it fails (or add a temporary `assert False` marker check) before proceeding -- the point of this step is to prove Step 7 is necessary, not to skip straight to it.
+Expected: FAIL -- `main()` currently only fetches and parses both schemas; it never imports or validates against `metergraph._session`, so this test either errors or passes vacuously without exercising the real SDK. Confirm it fails (or add a temporary `assert False` marker check) before proceeding -- the point of this step is to prove Step 7 is necessary, not to skip straight to it.
 
 - [ ] **Step 7: Wire the verifier to the real SDK**
 
-Edit `python/scripts/verify_ingest_contract.py`. Add a function that imports and exercises the real SDK, and call it from `main()`:
+Edit `python/scripts/verify_ingest_contract.py`. Add a function that imports and exercises the real SDK against both documents, and call it from `main()`:
 
 ```python
-def _validate_sdk_examples(document: dict[str, Any]) -> None:
+def _validate_sdk_examples(
+    request_document: dict[str, Any], response_document: dict[str, Any]
+) -> None:
     """Validate the real Python SDK's request/response handling, not just a
     literal example -- imported lazily so this module is still usable
     (fetch/hash/cache/override logic) before metergraph._session exists."""
@@ -1584,34 +1739,37 @@ def _validate_sdk_examples(document: dict[str, Any]) -> None:
     from metergraph._version import SDK_VERSION
 
     request_body = build_exchange_request_body("owner/repository", SDK_VERSION)
-    validate_instance(document, "request", request_body)
+    validate_instance(request_document, request_body)
 
     example_response = {
         "session_token": "mgs_example_session_token",
         "expires_at": "2026-08-08T12:34:56+00:00",
         "repository_id": "repo_example",
     }
-    validate_instance(document, "response", example_response)
+    validate_instance(response_document, example_response)
     token, _ttl, _repo_id = parse_session_response(example_response)
     assert token == example_response["session_token"]
 ```
 
-Update `main()` to call it:
+Update `main()` to call it with both loaded documents:
 
 ```python
 def main() -> int:
     try:
-        source = resolve_schema_source()
-        document = load_schema_document(source)
-        _validate_sdk_examples(document)
+        request_source = resolve_schema_source("request")
+        response_source = resolve_schema_source("response")
+        request_document = load_schema_document(request_source)
+        response_document = load_schema_document(response_source)
+        _validate_sdk_examples(request_document, response_document)
     except ContractVerificationError as exc:
         print(f"verify-ingest-contract: {exc}", file=sys.stderr)
         return 1
     except Exception as exc:
         print(f"verify-ingest-contract: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
-    pin_state = "pinned" if source.pinned else "override (unpinned)"
-    print(f"verify-ingest-contract: OK -- {source.origin} ({pin_state}, sha256={source.sha256})")
+    for kind, source in (("request", request_source), ("response", response_source)):
+        pin_state = "pinned" if source.pinned else "override (unpinned)"
+        print(f"verify-ingest-contract: OK -- {kind} {source.origin} ({pin_state}, sha256={source.sha256})")
     return 0
 ```
 
@@ -3209,7 +3367,7 @@ Expected: PASS
 
 - [ ] **Step 5: Write the failing test tying the verifier to the real SDK**
 
-Now that `typescript/dist/session.js` exists, extend the contract-verification tests from Task 1 to prove the real request/response handling -- not just a literal example -- conforms to the schema. This still runs fully offline via the local-path override.
+Now that `typescript/dist/session.js` exists, extend the contract-verification tests from Task 1 to prove the real request/response handling -- not just a literal example -- conforms to both schemas. This still runs fully offline via the local-path overrides, one per artifact.
 
 ```js
 // append to typescript/test/ingest-contract-verification.test.mjs
@@ -3218,11 +3376,15 @@ import { main } from "../scripts/verify-ingest-contract.mjs";
 test("verify-ingest-contract validates the real TypeScript SDK request and response", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "metergraph-contract-sdk-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const schemaPath = join(dir, "draft.schema.json");
-  writeFileSync(schemaPath, JSON.stringify(EXAMPLE_SCHEMA));
-  process.env.METERGRAPH_CONTRACT_SCHEMA_PATH = schemaPath;
+  const requestSchemaPath = join(dir, "draft-request.schema.json");
+  writeFileSync(requestSchemaPath, JSON.stringify(EXAMPLE_REQUEST_SCHEMA));
+  const responseSchemaPath = join(dir, "draft-response.schema.json");
+  writeFileSync(responseSchemaPath, JSON.stringify(EXAMPLE_RESPONSE_SCHEMA));
+  process.env.METERGRAPH_CONTRACT_REQUEST_SCHEMA_PATH = requestSchemaPath;
+  process.env.METERGRAPH_CONTRACT_RESPONSE_SCHEMA_PATH = responseSchemaPath;
   t.after(() => {
-    delete process.env.METERGRAPH_CONTRACT_SCHEMA_PATH;
+    delete process.env.METERGRAPH_CONTRACT_REQUEST_SCHEMA_PATH;
+    delete process.env.METERGRAPH_CONTRACT_RESPONSE_SCHEMA_PATH;
   });
 
   const exitCode = await main();
@@ -3234,28 +3396,28 @@ test("verify-ingest-contract validates the real TypeScript SDK request and respo
 - [ ] **Step 6: Run test to verify it fails**
 
 Run: `cd typescript && npm run build && node --test test/ingest-contract-verification.test.mjs`
-Expected: FAIL -- `main()` currently only fetches and parses the schema; it never imports or validates against `typescript/dist/session.js`. Confirm this fails before proceeding -- the point of this step is to prove Step 7 is necessary, not to skip straight to it.
+Expected: FAIL -- `main()` currently only fetches and parses both schemas; it never imports or validates against `typescript/dist/session.js`. Confirm this fails before proceeding -- the point of this step is to prove Step 7 is necessary, not to skip straight to it.
 
 - [ ] **Step 7: Wire the verifier to the real SDK**
 
-Edit `typescript/scripts/verify-ingest-contract.mjs`. Add a function that imports and exercises the real SDK, and call it from `main()`:
+Edit `typescript/scripts/verify-ingest-contract.mjs`. Add a function that imports and exercises the real SDK against both documents, and call it from `main()`:
 
 ```js
-async function validateSdkExamples(document) {
+async function validateSdkExamples(requestDocument, responseDocument) {
   const { buildExchangeRequestBody, parseSessionResponse } = await import(
     join(REPO_ROOT, "typescript", "dist", "session.js")
   );
   const { SDK_VERSION } = await import(join(REPO_ROOT, "typescript", "dist", "version.js"));
 
   const requestBody = buildExchangeRequestBody("owner/repository", SDK_VERSION);
-  validateInstance(document, "request", requestBody);
+  validateInstance(requestDocument, requestBody);
 
   const exampleResponse = {
     session_token: "mgs_example_session_token",
     expires_at: "2026-08-08T12:34:56+00:00",
     repository_id: "repo_example",
   };
-  validateInstance(document, "response", exampleResponse);
+  validateInstance(responseDocument, exampleResponse);
   const parsed = parseSessionResponse(exampleResponse);
   if (parsed.sessionToken !== exampleResponse.session_token) {
     throw new Error("parseSessionResponse did not round-trip session_token");
@@ -3263,16 +3425,20 @@ async function validateSdkExamples(document) {
 }
 ```
 
-Update `main()` to call it:
+Update `main()` to call it with both loaded documents:
 
 ```js
 export async function main() {
   try {
-    const source = await resolveSchemaSource();
-    const document = loadSchemaDocument(source);
-    await validateSdkExamples(document);
-    const pinState = source.pinned ? "pinned" : "override (unpinned)";
-    console.log(`verify-ingest-contract: OK -- ${source.origin} (${pinState}, sha256=${source.sha256})`);
+    const requestSource = await resolveSchemaSource("request");
+    const responseSource = await resolveSchemaSource("response");
+    const requestDocument = loadSchemaDocument(requestSource);
+    const responseDocument = loadSchemaDocument(responseSource);
+    await validateSdkExamples(requestDocument, responseDocument);
+    for (const [kind, source] of [["request", requestSource], ["response", responseSource]]) {
+      const pinState = source.pinned ? "pinned" : "override (unpinned)";
+      console.log(`verify-ingest-contract: OK -- ${kind} ${source.origin} (${pinState}, sha256=${source.sha256})`);
+    }
     return 0;
   } catch (error) {
     console.error(`verify-ingest-contract: ${error instanceof Error ? error.message : String(error)}`);
@@ -4276,10 +4442,10 @@ git commit -m "Document repository-aware ingest protocol v2 and SDK 0.4 setup"
 
 ## Final self-review checklist (run once, after Task 20)
 
-- [ ] **Spec coverage.** Re-read the design doc's §3 (registration + session exchange), §4 (v1/v2 coexistence), and §8's frame-capture paragraph, plus the single-versioned-artifact requirement this amendment closes. Confirm: Task 1 establishes the one canonical, metergraph-internal-owned schema artifact plus a pinned `(url, sha256)` lock file, with a local/URL override for coordinated pre-deployment development, and a separately named `contract-verification` CI job/command that is the only network-touching piece; Task 2/11 cover non-secret config write with SDK import/runtime never writing (Tasks 3/12, 8/17 assert read-only discovery); Task 4/13 cover the exact `POST /v1/ingest/sessions` shape with `sdk_version` as the real package version, and extend Task 1's verifier to validate the real SDK's request/response functions (offline, via override) rather than a literal fixture; Task 6/15 cover "app token never sent on a normal trace call"; Task 5/14 cover the two-tier refresh; Task 9/18 cover redaction; Task 7/16 cover the additive repo-relative frame path; Task 10/19/20 cover the 0.4 release.
-- [ ] **No independent schema copy.** Confirm `contracts/ingest-session-v2.lock.json` holds only `(schema_url, sha256, manifest_url, contract_id)` -- never a copy of the schema body -- and that no file in this repo (a test fixture, a doc, a script) claims to be an independent or manually-synchronized source of truth for the contract shape. Test-only literal examples (e.g. `EXAMPLE_SCHEMA` in the verifier test files, or the inline response bodies in Task 4/13's SessionManager tests) are fine; they're synthetic test data feeding a local/override path, not a second persisted "real" copy.
+- [ ] **Spec coverage.** Re-read the design doc's §3 (registration + session exchange), §4 (v1/v2 coexistence), and §8's frame-capture paragraph, plus the two-artifact canonical-contract requirement this amendment closes. Confirm: Task 1 establishes the two canonical, metergraph-internal-owned schema artifacts (`ingest-session-request.v2.schema.json`, `ingest-session-response.v2.schema.json`) plus one lock file pinning `(url, sha256)` per artifact, with independent local/URL overrides per artifact for coordinated pre-deployment development, and a separately named `contract-verification` CI job/command that fetches and validates both artifacts and is the only network-touching piece; Task 2/11 cover non-secret config write with SDK import/runtime never writing (Tasks 3/12, 8/17 assert read-only discovery); Task 4/13 cover the exact `POST /v1/ingest/sessions` shape with `sdk_version` as the real package version, and extend Task 1's verifier to validate the real SDK's request builder against the request document and its response parser against the response document (offline, via override) rather than a literal fixture; Task 6/15 cover "app token never sent on a normal trace call"; Task 5/14 cover the two-tier refresh; Task 9/18 cover redaction; Task 7/16 cover the additive repo-relative frame path; Task 10/19/20 cover the 0.4 release.
+- [ ] **No independent schema copy, and no stale combined-URL references.** Confirm `contracts/ingest-session-v2.lock.json` holds exactly two entries, `request` and `response`, each only `(schema_url, sha256)`, plus top-level `contract_id`/`manifest_url` -- never a copy of either schema body -- and that no file in this repo (a test fixture, a doc, a script) claims to be an independent or manually-synchronized source of truth for either contract shape. Test-only literal examples (e.g. `EXAMPLE_REQUEST_SCHEMA`/`EXAMPLE_RESPONSE_SCHEMA` in the verifier test files, or the inline response bodies in Task 4/13's SessionManager tests) are fine; they're synthetic test data feeding a local/override path, not a second persisted "real" copy. Also grep the whole plan for `ingest-session-v2.schema.json` (the retired combined-artifact name, distinct from `ingest-session-v2.lock.json` which is correct and should remain) -- zero matches expected.
 - [ ] **Placeholder scan.** Grep the finished plan for `TBD`, `TODO`, `FIXME`, `...`, and "similar to Task" -- none should appear in a place standing in for real content (only inside literal example strings/URLs, if any).
-- [ ] **Type consistency.** `SessionManager.get_token()`/`getToken()` and `.invalidate()` are the only two methods `Writer`/`Transport` call on a session object in every task (4/6/8/9 for Python, 13/15/17/18 for TS) -- confirm no task drifted to a different method name. `RepoConfig.repository`/`.repo_root` (Python) and `.repository`/`.repoRoot` (TS) are used identically in Tasks 3/8 and 12/17. `build_exchange_request_body`/`parse_session_response` (Python) and `buildExchangeRequestBody`/`parseSessionResponse` (TS), introduced in Task 4/13, are the only functions `_session.py`/`session.ts` and `verify_ingest_contract.py`/`verify-ingest-contract.mjs` share -- confirm no task drifted to inlining the request/response shape again instead of reusing them.
+- [ ] **Type consistency.** `SessionManager.get_token()`/`getToken()` and `.invalidate()` are the only two methods `Writer`/`Transport` call on a session object in every task (4/6/8/9 for Python, 13/15/17/18 for TS) -- confirm no task drifted to a different method name. `RepoConfig.repository`/`.repo_root` (Python) and `.repository`/`.repoRoot` (TS) are used identically in Tasks 3/8 and 12/17. `build_exchange_request_body`/`parse_session_response` (Python) and `buildExchangeRequestBody`/`parseSessionResponse` (TS), introduced in Task 4/13, are the only functions `_session.py`/`session.ts` and `verify_ingest_contract.py`/`verify-ingest-contract.mjs` share -- confirm no task drifted to inlining the request/response shape again instead of reusing them. `resolve_schema_source`/`resolveSchemaSource` take a `kind` (`"request"` | `"response"`) as their first argument everywhere they're called (Task 1, and Task 4/13's extended `main()`); `validate_instance`/`validateInstance` take `(document, instance)` with no `definition`/`kind` parameter anywhere, since each document is now a standalone schema -- confirm no call site still passes a `"request"`/`"response"` string into `validate_instance`/`validateInstance`.
 - [ ] **`git diff --check`** across the whole branch before considering the plan executed.
 
 Report the plan's final commit hash and total task count (20) back to whoever requested this plan once all tasks and the self-review checklist are complete.
