@@ -9,8 +9,11 @@ import {
   type RouteOptions,
   type TraceOptions,
 } from "./context.js";
+import { ensureRepoConfig } from "./repo-config.js";
+import { SessionManager } from "./session.js";
 import { track } from "./track.js";
 import { Transport, type TransportMode, type WaitUntil } from "./transport.js";
+import { SDK_VERSION } from "./version.js";
 import { setCaptureRuntime, wrap as wrapProvider } from "./wrap.js";
 import {
   createVercelAISDKMiddleware,
@@ -60,6 +63,7 @@ let initialized = false;
 let warnedNoToken = false;
 let transport: Transport | undefined;
 let config: ConfigPoller | undefined;
+let sessionManager: SessionManager | undefined;
 export const DEFAULT_INGEST_URL = "https://d2xus7mp8zdv6t.cloudfront.net";
 
 function env(name: string): string | undefined {
@@ -91,16 +95,23 @@ export function init(options: MetergraphOptions = {}): void {
   }
   initialized = true;
   try {
+    const appRoot = options.appRoot ?? (typeof process === "undefined" ? "" : process.cwd());
+    const repoConfig = ensureRepoConfig(appRoot);
+    sessionManager = repoConfig
+      ? new SessionManager(token, ingestUrl, repoConfig.repository, SDK_VERSION)
+      : undefined;
     transport = new Transport(token, ingestUrl, {
       queueSize: options.queueSize ?? Number(env("METERGRAPH_QUEUE_SIZE") ?? 2_000),
       batchSize: options.batchSize ?? Number(env("METERGRAPH_BATCH_SIZE") ?? 100),
       flushMs: options.flushMs ?? Number(env("METERGRAPH_FLUSH_MS") ?? 5_000),
       mode: options.transport ?? "auto",
+      session: sessionManager,
     });
     setCaptureRuntime(new CaptureRuntime(transport, {
       captureText: options.captureText ?? envBool("METERGRAPH_CAPTURE_TEXT", true),
       redact: options.redact,
-      appRoot: options.appRoot ?? (typeof process === "undefined" ? "" : process.cwd()),
+      appRoot,
+      repoRoot: repoConfig?.repoRoot,
       skipFrames: options.skipFrames ?? [],
       environment: options.environment ?? env("METERGRAPH_ENV"),
       textMaxBytes: Math.min(
@@ -117,6 +128,7 @@ export function init(options: MetergraphOptions = {}): void {
   } catch {
     transport = undefined;
     config = undefined;
+    sessionManager = undefined;
     setCaptureRuntime();
     console.warn("Metergraph initialization failed; application is running uninstrumented");
   }
@@ -185,6 +197,8 @@ export async function shutdown(): Promise<void> {
   config = undefined;
   await transport?.shutdown();
   transport = undefined;
+  sessionManager?.stop();
+  sessionManager = undefined;
   setCaptureRuntime();
 }
 

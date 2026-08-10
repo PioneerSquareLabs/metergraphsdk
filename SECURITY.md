@@ -28,7 +28,7 @@ disclosure timeline.
 sends nothing — capture is off by default until explicitly configured. Once
 configured, every wrapped call produces one row of usage metadata (tokens,
 latency, model, route/session/tag labels, a structural template hash) sent to
-`METERGRAPH_INGEST_URL`. In SDK 0.3, configured clients include a scrubbed
+`METERGRAPH_INGEST_URL`. In SDK 0.4, configured clients include a scrubbed
 provider request and normalized response by default. Applications can opt out
 globally with `METERGRAPH_CAPTURE_TEXT=0`, at initialization, or around an
 individual route or trace. Request and response are independently limited to

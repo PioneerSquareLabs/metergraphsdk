@@ -9,6 +9,7 @@ export interface RuntimeOptions {
   captureText: boolean;
   redact?: (text: string, kind: "request" | "response") => string;
   appRoot: string;
+  repoRoot?: string;
   skipFrames: string[];
   environment?: string;
   textMaxBytes: number;
@@ -18,6 +19,7 @@ interface Frame {
   m: string;
   f: string;
   l: number;
+  p?: string;
 }
 
 export interface CallState {
@@ -460,7 +462,7 @@ const SDK_DIR = (() => {
   }
 })();
 
-function frames(stack: string | undefined, appRoot: string, skip: string[]): Frame[] {
+function frames(stack: string | undefined, appRoot: string, skip: string[], repoRoot?: string): Frame[] {
   if (!stack) return [];
   const result: Frame[] = [];
   for (const line of stack.split("\n").slice(1)) {
@@ -469,11 +471,17 @@ function frames(stack: string | undefined, appRoot: string, skip: string[]): Fra
     const [, fn = "<anonymous>", file, lineNo] = match;
     if (!file || !lineNo || !file.includes(appRoot)) continue;
     if (["node_modules", "node:internal", SDK_DIR, ...skip].some((value) => file.includes(value))) continue;
-    result.push({
+    const entry: Frame = {
       m: file.slice(file.indexOf(appRoot) + appRoot.length).replace(/^\//, ""),
       f: fn,
       l: Number(lineNo),
-    });
+    };
+    const normalizedFile = file.replaceAll("\\", "/").replace(/^file:\/\//, "");
+    const normalizedRepoRoot = repoRoot?.replaceAll("\\", "/").replace(/\/$/, "");
+    if (normalizedRepoRoot && normalizedFile.startsWith(`${normalizedRepoRoot}/`)) {
+      entry.p = normalizedFile.slice(normalizedRepoRoot.length + 1);
+    }
+    result.push(entry);
     if (result.length === 5) break;
   }
   return result;
@@ -499,7 +507,7 @@ export class CaptureRuntime {
       context,
       started: performance.now(),
       ts: new Date().toISOString(),
-      frames: frames(stack, this.options.appRoot, this.options.skipFrames),
+      frames: frames(stack, this.options.appRoot, this.options.skipFrames, this.options.repoRoot),
       traceId: context.traceId ?? randomBytes(16).toString("hex"),
       spanId: randomBytes(8).toString("hex"),
       parentSpanId: context.parentSpanId,

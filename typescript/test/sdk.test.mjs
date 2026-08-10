@@ -67,6 +67,18 @@ test("wrap captures usage/context and config assignment is sticky", async (t) =>
       }));
       return;
     }
+    if (request.url === "/v1/ingest/sessions") {
+      // Runs deterministically whether or not this checkout has repo-aware
+      // config auto-detected (real git origin present or not): respond with
+      // a valid session so /v1/ingest still receives the batch either way.
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        session_token: "session-fixture",
+        expires_at: new Date(Date.now() + 300_000).toISOString(),
+        repository_id: "repo_fixture",
+      }));
+      return;
+    }
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     let body = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
@@ -432,7 +444,7 @@ test("wrap captures gemini usage from non-stream and cumulative stream responses
     status: "requested",
     idempotency: "non_idempotent",
   });
-  assert.equal(row.sdk_version, "0.3.2");
+  assert.equal(row.sdk_version, "0.4.0");
   assert.equal(streamed.provider, "google");
   assert.equal(streamed.endpoint, "models.generate_content.stream");
   assert.equal(streamed.stream, true);

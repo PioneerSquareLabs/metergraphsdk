@@ -14,6 +14,8 @@ from ._capture import Options, Runtime, set_runtime
 from ._capture import wrap as _wrap
 from ._config import ConfigPoller
 from ._context import route, set_session, set_tags, snapshot, trace, wrap_executor
+from ._repo_config import ensure_repo_config
+from ._session import SessionManager
 from ._track import track
 from ._transport import Writer
 from ._version import SDK_VERSION
@@ -24,6 +26,7 @@ DEFAULT_INGEST_URL = "https://d2xus7mp8zdv6t.cloudfront.net"
 log = logging.getLogger("metergraph")
 _writer: Writer | None = None
 _config: ConfigPoller | None = None
+_session_manager: SessionManager | None = None
 _initialized = False
 _warned_no_token = False
 
@@ -47,7 +50,7 @@ def init(
     disabled: bool | None = None,
 ) -> None:
     """Initialize capture. This function is idempotent and never raises."""
-    global _initialized, _warned_no_token, _writer, _config
+    global _initialized, _warned_no_token, _writer, _config, _session_manager
     if _initialized:
         return
     if os.getenv("METERGRAPH_DISABLED") == "1" or disabled:
@@ -65,9 +68,23 @@ def init(
         return
     _initialized = True
     try:
+        app_root_resolved = os.path.realpath(app_root or os.getcwd())
+        repo_config = ensure_repo_config(app_root_resolved)
+        session = (
+            SessionManager(
+                token,
+                ingest_url,
+                repository=repo_config.repository,
+                sdk_version=SDK_VERSION,
+            )
+            if repo_config is not None
+            else None
+        )
+        _session_manager = session
         _writer = Writer(
             token,
             ingest_url,
+            session=session,
             queue_size=int(os.getenv("METERGRAPH_QUEUE_SIZE", "2000")),
             batch_size=int(os.getenv("METERGRAPH_BATCH_SIZE", "100")),
             flush_seconds=float(os.getenv("METERGRAPH_FLUSH_SECONDS", "5")),
@@ -79,7 +96,8 @@ def init(
                 else capture_text
             ),
             redact=redact,
-            app_root=os.path.realpath(app_root or os.getcwd()),
+            app_root=app_root_resolved,
+            repo_root=repo_config.repo_root if repo_config is not None else None,
             skip_frames=tuple(skip_frames or ()),
             environment=environment or os.getenv("METERGRAPH_ENV"),
             text_max_bytes=min(
@@ -110,6 +128,7 @@ def init(
             _writer.shutdown()
         _writer = None
         _config = None
+        _session_manager = None
         log.warning(
             "Metergraph initialization failed; application is running uninstrumented"
         )
@@ -214,13 +233,16 @@ def flush(timeout: float = 3.0) -> bool:
 
 
 def shutdown() -> None:
-    global _writer, _config
+    global _writer, _config, _session_manager
     if _config:
         _config.stop()
         _config = None
     if _writer:
         _writer.shutdown()
         _writer = None
+    if _session_manager:
+        _session_manager.stop()
+        _session_manager = None
     set_runtime(None)
 
 

@@ -556,10 +556,11 @@ def _tool_events(
 
 
 def _capture_frames(
-    app_root: str, skip_frames: tuple[str, ...]
+    app_root: str, skip_frames: tuple[str, ...], repo_root: str | None = None
 ) -> tuple[str | None, str | None, list[dict]]:
     frames: list[dict] = []
     root = os.path.realpath(app_root)
+    repo_root_real = os.path.realpath(repo_root) if repo_root else None
     frame = sys._getframe(2)
     while frame is not None and len(frames) < 5:
         filename = os.path.realpath(frame.f_code.co_filename)
@@ -569,7 +570,19 @@ def _capture_frames(
             relative = os.path.relpath(filename, root)
             module = str(Path(relative).with_suffix("")).replace(os.sep, ".")
             qualname = getattr(frame.f_code, "co_qualname", frame.f_code.co_name)
-            frames.append({"m": module, "f": qualname, "l": frame.f_lineno})
+            entry = {"m": module, "f": qualname, "l": frame.f_lineno}
+            try:
+                inside_repo = bool(
+                    repo_root_real
+                    and os.path.commonpath((filename, repo_root_real)) == repo_root_real
+                )
+            except ValueError:
+                inside_repo = False
+            if inside_repo:
+                entry["p"] = os.path.relpath(filename, repo_root_real).replace(
+                    os.sep, "/"
+                )
+            frames.append(entry)
         frame = frame.f_back
     if not frames:
         return None, None, []
@@ -581,6 +594,7 @@ class Options:
     capture_text: bool = True
     redact: Callable[[str, str], str] | None = None
     app_root: str = os.getcwd()
+    repo_root: str | None = None
     skip_frames: tuple[str, ...] = ()
     environment: str | None = None
     text_max_bytes: int = 100 * 1024
@@ -609,6 +623,7 @@ class Runtime:
                 "threading.py",
                 *self.options.skip_frames,
             ),
+            self.options.repo_root,
         )
         return CallState(
             runtime=self,
