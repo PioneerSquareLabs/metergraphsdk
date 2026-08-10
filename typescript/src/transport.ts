@@ -1,4 +1,5 @@
 import { FailureLogger } from "./failure-log.js";
+import type { SessionManager } from "./session.js";
 
 export type TransportMode = "auto" | "background" | "buffered";
 export type WaitUntil = (promise: Promise<unknown>) => void;
@@ -9,6 +10,7 @@ export interface TransportOptions {
   batchSize?: number;
   flushMs?: number;
   mode?: TransportMode;
+  session?: SessionManager;
 }
 
 function detectedMode(): Exclude<TransportMode, "auto"> {
@@ -40,12 +42,14 @@ export class Transport {
   private retryAt = 0;
   private backoffMs = 1_000;
   private readonly failureLog = new FailureLogger();
+  private readonly session?: SessionManager;
 
   constructor(
     private readonly token: string,
     private readonly baseUrl: string,
     options: TransportOptions = {},
   ) {
+    this.session = options.session;
     this.queueSize = Math.max(1, options.queueSize ?? 2_000);
     this.batchSize = Math.max(1, Math.min(1_000, options.batchSize ?? 100));
     this.mode = options.mode === "auto" || !options.mode ? detectedMode() : options.mode;
@@ -113,6 +117,11 @@ export class Transport {
       this.dropped += rows.length;
       return;
     }
+    const token = this.session ? await this.session.getToken() : this.token;
+    if (token === undefined) {
+      this.dropped += rows.length;
+      return;
+    }
     const encoded = new TextEncoder().encode(JSON.stringify({
       schema_version: 1,
       rows,
@@ -137,7 +146,7 @@ export class Transport {
       const response = await fetch(`${this.baseUrl.replace(/\/$/, "")}/v1/ingest`, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${this.token}`,
+          Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
           ...(compressed && body !== raw ? { "Content-Encoding": "gzip" } : {}),
         },
@@ -145,6 +154,11 @@ export class Transport {
         keepalive: this.mode === "buffered" && body.byteLength <= 64 * 1024,
       });
       if (response.status === 401 || response.status === 403) {
+        if (this.session) {
+          this.session.invalidate();
+          this.dropped += rows.length;
+          return;
+        }
         this.fatal = true;
         console.warn("Metergraph authentication failed; capture disabled for this process");
         return;

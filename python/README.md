@@ -64,10 +64,18 @@ Configuration:
 - `METERGRAPH_DISABLED=1` — process kill switch
 - `METERGRAPH_QUEUE_SIZE`, `METERGRAPH_BATCH_SIZE`, `METERGRAPH_FLUSH_SECONDS`
 
+SDK 0.4 associates traces with their GitHub repository automatically. On the
+first `init()` in a Git checkout, it reads the `origin` remote and creates
+`.metergraph/config.json` at the repository root if that file is absent.
+Commit this non-secret file so production can use repository-aware ingest
+without Git metadata. An existing file is authoritative and is never changed
+by the SDK. If discovery or creation is unavailable, ingest remains compatible
+with protocol v1.
+
 Delivery is bounded and off the request path. Queue overflow or a collector
 outage drops capture and increments internal counters; it never changes the
 provider call. Each wire batch is bounded to 512 KiB after optional gzip.
-SDK 0.3 captures the scrubbed provider request and a normalized response
+SDK 0.4 captures the scrubbed provider request and a normalized response
 envelope, including assistant content and tool calls, by default. Provider
 credentials and transport headers are removed. Request and response are each
 limited to 100 KiB of UTF-8 with an explicit truncation marker.
@@ -112,7 +120,7 @@ and AI_GATEWAY_API_KEY / VERCEL_OIDC_TOKEN configuration unchanged.
 wrap() returns the same client and initializes itself from the environment:
 METERGRAPH_APP_TOKEN is required (capture is silently off without it) and
 METERGRAPH_INGEST_URL is only for self-hosted servers. Add both to
-.env.example, and never commit a real token. SDK 0.3 captures scrubbed provider
+.env.example, and never commit a real token. SDK 0.4 captures scrubbed provider
 requests and normalized responses by default for the hosted dashboard; use
 METERGRAPH_CAPTURE_TEXT=0 or capture_text=False around sensitive operations.
 Provider credentials and transport headers must never be captured. Capture is

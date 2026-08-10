@@ -27,11 +27,13 @@ class Writer:
         token: str,
         base_url: str,
         *,
+        session: Any | None = None,
         queue_size: int = 2000,
         batch_size: int = 100,
         flush_seconds: float = 5.0,
     ) -> None:
         self._token = token
+        self._session = session
         self._url = f"{base_url.rstrip('/')}/v1/ingest"
         self._queue_size = max(1, queue_size)
         self._batch_size = max(1, min(batch_size, 1000))
@@ -109,13 +111,17 @@ class Writer:
         if self._fatal or time.monotonic() < self._retry_at:
             self._dropped += len(rows)
             return False
+        token = self._session.get_token() if self._session is not None else self._token
+        if token is None:
+            self._dropped += len(rows)
+            return False
         meta = {"dropped": self._dropped, "transport_errors": self._errors}
         body = json.dumps(
             {"schema_version": 1, "rows": rows, "meta": meta},
             separators=(",", ":"),
         ).encode()
         headers = {
-            "Authorization": f"Bearer {self._token}",
+            "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             "User-Agent": f"metergraph-python/{SDK_VERSION}",
         }
@@ -142,6 +148,10 @@ class Writer:
             return True
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403):
+                if self._session is not None:
+                    self._session.invalidate()
+                    self._dropped += len(rows)
+                    return False
                 self._fatal = True
                 log.warning(
                     "Metergraph authentication failed; capture disabled for this process"
