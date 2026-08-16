@@ -14,12 +14,12 @@ from ._capture import Options, Runtime, set_runtime
 from ._capture import wrap as _wrap
 from ._config import ConfigPoller
 from ._context import route, set_session, set_tags, snapshot, trace, wrap_executor
-from ._deferred import (
-    DeferredIneligibleError,
-    DeferredMetadata,
-    DeferredResult,
+from ._batch_first import (
+    BatchFirstIneligibleError,
+    BatchFirstMetadata,
+    BatchFirstResult,
     LateBatchInfo,
-    deferred,
+    batch_first,
 )
 from ._repo_config import ensure_repo_config
 from ._session import SessionManager
@@ -255,11 +255,11 @@ def shutdown() -> None:
 
 __all__ = [
     "DEFAULT_INGEST_URL",
-    "DeferredIneligibleError",
-    "DeferredMetadata",
-    "DeferredResult",
+    "BatchFirstIneligibleError",
+    "BatchFirstMetadata",
+    "BatchFirstResult",
     "LateBatchInfo",
-    "deferred",
+    "batch_first",
     "flush",
     "init",
     "model_for",

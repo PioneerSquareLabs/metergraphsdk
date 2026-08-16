@@ -1,5 +1,5 @@
 /**
- * The narrow adapter boundary deferred() drives, plus a worker-only OpenAI
+ * The narrow adapter boundary batchFirst() drives, plus a worker-only OpenAI
  * Batch API implementation. Deliberately duck-typed against the openai
  * package's shape (see OpenAIBatchCapableClient) rather than importing it —
  * `openai` is an optional peer dependency of this package, and structural
@@ -16,14 +16,14 @@
 /** A caller's own provider request body (e.g. an OpenAI Responses payload).
  * Only `stream` and `tools` are inspected by this module; every other
  * field passes through untouched. */
-export type DeferredRequest = Record<string, unknown> & {
+export type BatchFirstRequest = Record<string, unknown> & {
   stream?: boolean;
   tools?: unknown[];
 };
 
 export interface BatchHandle {
   /** The provider's own batch identifier — never returned to a caller of
-   * deferred() or logged; adapters use it only to poll/read their own
+   * batchFirst() or logged; adapters use it only to poll/read their own
    * batch. */
   providerBatchId: string;
 }
@@ -48,17 +48,17 @@ export interface ProviderBatchEligibility {
 }
 
 /**
- * The seam deferred() is written against. An adapter submits exactly one
+ * The seam batchFirst() is written against. An adapter submits exactly one
  * request per batch and knows how to poll it, read its terminal result,
  * and run the same request directly (bypassing batch entirely) as a
  * fallback.
  */
 export interface ProviderBatchAdapter<TResult = unknown> {
-  eligibility(request: DeferredRequest): ProviderBatchEligibility;
-  submitOne(request: DeferredRequest): Promise<BatchHandle>;
+  eligibility(request: BatchFirstRequest): ProviderBatchEligibility;
+  submitOne(request: BatchFirstRequest): Promise<BatchHandle>;
   poll(handle: BatchHandle): Promise<BatchPollResult>;
   readResult(handle: BatchHandle): Promise<ProviderBatchResult<TResult>>;
-  direct(request: DeferredRequest): Promise<ProviderBatchResult<TResult>>;
+  direct(request: BatchFirstRequest): Promise<ProviderBatchResult<TResult>>;
 }
 
 // ---------- OpenAI ----------
@@ -111,7 +111,7 @@ function hasFunctionCall(body: unknown): boolean {
 
 function randomCustomId(): string {
   if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
-  return `deferred-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `batch-first-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 export class ProviderBatchError extends Error {}

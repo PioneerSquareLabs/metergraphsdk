@@ -1,10 +1,11 @@
 /**
- * Explicit, opt-in deferred execution: submit one request through a
+ * Explicit, opt-in batch-first execution: submit one request through a
  * provider's Batch API, wait a caller-selected deadline, and fall back to
  * a single direct call if the batch hasn't finished in time. Never enabled
  * by wrap()/capture defaults or by an environment variable — a caller
- * reaches this only by importing and calling deferred() directly, and only
- * after explicitly acknowledging the duplicate-execution semantic below.
+ * reaches this only by importing and calling batchFirst() directly, and
+ * only after explicitly acknowledging the duplicate-execution semantic
+ * below.
  *
  * On a missed deadline, the request may execute twice against the
  * provider (once via batch, once via direct) — an accepted, deliberate
@@ -18,40 +19,40 @@ import {
   createGoogleBatchAdapter,
   createOpenAIBatchAdapter,
   type AnthropicBatchCapableClient,
-  type DeferredRequest,
+  type BatchFirstRequest,
   type GoogleBatchCapableClient,
   type OpenAIBatchCapableClient,
   type ProviderBatchAdapter,
 } from "./provider-batch.js";
 
-export type { DeferredRequest } from "./provider-batch.js";
+export type { BatchFirstRequest } from "./provider-batch.js";
 
 /** An injectable time source. Real timers by default; tests can supply a
  * fake to drive the deadline deterministically, with no real waiting. */
-export interface DeferredClock {
+export interface BatchFirstClock {
   setTimeout(handler: () => void, ms: number): unknown;
   clearTimeout(handle: unknown): void;
 }
 
-function realClock(): DeferredClock {
+function realClock(): BatchFirstClock {
   return {
     setTimeout: (handler, ms) => setTimeout(handler, ms),
     clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
   };
 }
 
-/** Reported asynchronously, after deferred() has already returned via the
+/** Reported asynchronously, after batchFirst() has already returned via the
  * direct fallback, if the losing batch eventually reaches a terminal
  * state. Its actual result content is never included here and never
- * returned from deferred() — only whether it happened to contain a
+ * returned from batchFirst() — only whether it happened to contain a
  * tool-call plan, which may differ from the one the direct fallback
- * produced (see allowDuplicateToolCallPlans on DeferredPolicy). */
+ * produced (see allowDuplicateToolCallPlans on BatchFirstPolicy). */
 export interface LateBatchInfo {
   outcome: "completed" | "failed" | "expired";
   containedToolCallPlan: boolean;
 }
 
-export interface DeferredPolicy {
+export interface BatchFirstPolicy {
   /** How long to wait for the batch before issuing the one direct
    * fallback. Required — there is no default deadline. */
   deadlineMs: number;
@@ -73,76 +74,76 @@ export interface DeferredPolicy {
    */
   allowDuplicateToolCallPlans?: boolean;
   /** Fired once, later, only when the losing batch eventually settles.
-   * Never blocks deferred()'s own return. */
+   * Never blocks batchFirst()'s own return. */
   onLateBatchSettled?: (info: LateBatchInfo) => void;
 }
 
-/** Non-public knobs for driving runDeferred()'s poll interval and time
- * source from tests — deliberately kept off DeferredPolicy so a real
- * caller of deferred() has no way to set them. */
-interface RunDeferredTestControls {
+/** Non-public knobs for driving runBatchFirst()'s poll interval and time
+ * source from tests — deliberately kept off BatchFirstPolicy so a real
+ * caller of batchFirst() has no way to set them. */
+interface RunBatchFirstTestControls {
   /** How often to re-check batch status while waiting. Default 2000ms. */
   pollIntervalMs?: number;
-  /** Injectable time source — see DeferredClock. */
-  clock?: DeferredClock;
+  /** Injectable time source — see BatchFirstClock. */
+  clock?: BatchFirstClock;
 }
 
-export type DeferredSource = "batch" | "direct";
+export type BatchFirstSource = "batch" | "direct";
 
-export interface DeferredMetadata {
-  execution_mode: "deferred";
+export interface BatchFirstMetadata {
+  execution_mode: "batch_first";
   deadline_ms: number;
   /** Wall-clock time from submission to the canonical result settling. */
   batch_wait_ms: number;
-  /** The batch's own status as of when deferred() returned — not its
+  /** The batch's own status as of when batchFirst() returned — not its
    * eventual status if that differs (see onLateBatchSettled). */
   batch_outcome: "completed" | "failed" | "expired" | "pending_at_deadline";
-  canonical_result: DeferredSource;
+  canonical_result: BatchFirstSource;
   duplicate_provider_execution: boolean;
   /** Always false when canonical_result is "batch" (no lateness is
    * possible — the batch IS the canonical result). When
    * canonical_result is "direct", this reflects what was known AT THE
-   * MOMENT deferred() returned, which is always false: a completion
+   * MOMENT batchFirst() returned, which is always false: a completion
    * confirmed later only reaches the caller through
    * onLateBatchSettled, never by mutating this object. */
   late_batch_completed: boolean;
   late_batch_contained_tool_call_plan: boolean;
 }
 
-export interface DeferredResult<TResult = unknown> {
-  source: DeferredSource;
+export interface BatchFirstResult<TResult = unknown> {
+  source: BatchFirstSource;
   result: TResult;
-  metadata: DeferredMetadata;
+  metadata: BatchFirstMetadata;
 }
 
 /** Thrown before any provider call when a request/policy combination is
- * not eligible for deferred execution — streaming, tools without
+ * not eligible for batch-first execution — streaming, tools without
  * acknowledgement, a missing/false acceptDuplicateProviderExecution, or
  * an adapter-specific ineligibility. */
-export class DeferredIneligibleError extends Error {}
+export class BatchFirstIneligibleError extends Error {}
 
-function hasTools(request: DeferredRequest): boolean {
+function hasTools(request: BatchFirstRequest): boolean {
   return Array.isArray(request.tools) && request.tools.length > 0;
 }
 
-function validate(request: DeferredRequest, policy: DeferredPolicy): void {
+function validate(request: BatchFirstRequest, policy: BatchFirstPolicy): void {
   if (policy.acceptDuplicateProviderExecution !== true) {
-    throw new DeferredIneligibleError(
-      "deferred() requires policy.acceptDuplicateProviderExecution: true — "
+    throw new BatchFirstIneligibleError(
+      "batchFirst() requires policy.acceptDuplicateProviderExecution: true — "
         + "a missed deadline can execute the request twice against the provider",
     );
   }
   if (!Number.isFinite(policy.deadlineMs) || policy.deadlineMs <= 0) {
-    throw new DeferredIneligibleError("deferred() requires a positive policy.deadlineMs");
+    throw new BatchFirstIneligibleError("batchFirst() requires a positive policy.deadlineMs");
   }
   if (request.stream === true) {
-    throw new DeferredIneligibleError(
-      "deferred() does not support streaming requests — streaming is direct-only",
+    throw new BatchFirstIneligibleError(
+      "batchFirst() does not support streaming requests — streaming is direct-only",
     );
   }
   if (hasTools(request) && policy.allowDuplicateToolCallPlans !== true) {
-    throw new DeferredIneligibleError(
-      "deferred() requires policy.allowDuplicateToolCallPlans: true for requests with "
+    throw new BatchFirstIneligibleError(
+      "batchFirst() requires policy.allowDuplicateToolCallPlans: true for requests with "
         + "tools — the batch result and the direct fallback are independent provider "
         + "executions and may each choose a different tool call plan",
     );
@@ -158,19 +159,19 @@ type RaceOutcome =
 /**
  * The adapter-injected core state machine — exported so fake-adapter,
  * fake-clock tests can drive it directly, and used internally by the
- * public, provider-explicit deferred() below.
+ * public, provider-explicit batchFirst() below.
  */
-export async function runDeferred<TResult>(
+export async function runBatchFirst<TResult>(
   adapter: ProviderBatchAdapter<TResult>,
-  request: DeferredRequest,
-  policy: DeferredPolicy,
-  testControls?: RunDeferredTestControls,
-): Promise<DeferredResult<TResult>> {
+  request: BatchFirstRequest,
+  policy: BatchFirstPolicy,
+  testControls?: RunBatchFirstTestControls,
+): Promise<BatchFirstResult<TResult>> {
   validate(request, policy);
   const eligibility = adapter.eligibility(request);
   if (!eligibility.eligible) {
-    throw new DeferredIneligibleError(
-      `request is not eligible for deferred execution: ${eligibility.reason ?? "unsupported by this adapter"}`,
+    throw new BatchFirstIneligibleError(
+      `request is not eligible for batch-first execution: ${eligibility.reason ?? "unsupported by this adapter"}`,
     );
   }
 
@@ -222,10 +223,10 @@ export async function runDeferred<TResult>(
   // A batch reported "completed" but whose result cannot be read (a
   // missing output file, an item-level provider error, a malformed or
   // missing matching line, a transient read failure) is neither a valid
-  // canonical batch result nor grounds to throw out of deferred() instead
-  // of the promised fallback — it is treated exactly like a batch that
-  // reported "failed": exactly one direct fallback, never a second read
-  // attempt, never surfaced as a rejection.
+  // canonical batch result nor grounds to throw out of batchFirst()
+  // instead of the promised fallback — it is treated exactly like a batch
+  // that reported "failed": exactly one direct fallback, never a second
+  // read attempt, never surfaced as a rejection.
   let unreadableCompletedBatch = false;
 
   if (winner.kind === "batch" && winner.status === "completed") {
@@ -236,7 +237,7 @@ export async function runDeferred<TResult>(
         source: "batch",
         result,
         metadata: {
-          execution_mode: "deferred",
+          execution_mode: "batch_first",
           deadline_ms: policy.deadlineMs,
           batch_wait_ms: Date.now() - startedAt,
           batch_outcome: "completed",
@@ -295,7 +296,7 @@ export async function runDeferred<TResult>(
     source: "direct",
     result,
     metadata: {
-      execution_mode: "deferred",
+      execution_mode: "batch_first",
       deadline_ms: policy.deadlineMs,
       batch_wait_ms: Date.now() - startedAt,
       batch_outcome: batchOutcomeAtFallback,
@@ -307,11 +308,11 @@ export async function runDeferred<TResult>(
   };
 }
 
-export type DeferredProvider = "openai" | "anthropic" | "google";
+export type BatchFirstProvider = "openai" | "anthropic" | "google";
 
 function resolveAdapter(
   client: unknown,
-  provider: DeferredProvider,
+  provider: BatchFirstProvider,
 ): ProviderBatchAdapter {
   if (provider === "openai") {
     return createOpenAIBatchAdapter(client as OpenAIBatchCapableClient);
@@ -322,20 +323,20 @@ function resolveAdapter(
   if (provider === "google") {
     return createGoogleBatchAdapter(client as GoogleBatchCapableClient);
   }
-  throw new DeferredIneligibleError(`deferred() has no adapter for provider "${provider}" yet`);
+  throw new BatchFirstIneligibleError(`batchFirst() has no adapter for provider "${provider}" yet`);
 }
 
 /**
- * Explicit, provider-specific deferred execution. Never inferred from the
- * client instance — the caller states the provider, matching wrap()'s own
- * explicit-provider option.
+ * Explicit, provider-specific batch-first execution. Never inferred from
+ * the client instance — the caller states the provider, matching wrap()'s
+ * own explicit-provider option.
  */
-export async function deferred<TResult = unknown>(
+export async function batchFirst<TResult = unknown>(
   client: unknown,
-  provider: DeferredProvider,
-  request: DeferredRequest,
-  policy: DeferredPolicy,
-): Promise<DeferredResult<TResult>> {
+  provider: BatchFirstProvider,
+  request: BatchFirstRequest,
+  policy: BatchFirstPolicy,
+): Promise<BatchFirstResult<TResult>> {
   const adapter = resolveAdapter(client, provider) as ProviderBatchAdapter<TResult>;
-  return runDeferred(adapter, request, policy);
+  return runBatchFirst(adapter, request, policy);
 }

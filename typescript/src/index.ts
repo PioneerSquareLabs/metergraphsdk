@@ -10,16 +10,16 @@ import {
   type TraceOptions,
 } from "./context.js";
 import {
-  DeferredIneligibleError,
-  deferred,
-  type DeferredMetadata,
-  type DeferredPolicy,
-  type DeferredProvider,
-  type DeferredRequest,
-  type DeferredResult,
-  type DeferredSource,
+  BatchFirstIneligibleError,
+  batchFirst,
+  type BatchFirstMetadata,
+  type BatchFirstPolicy,
+  type BatchFirstProvider,
+  type BatchFirstRequest,
+  type BatchFirstResult,
+  type BatchFirstSource,
   type LateBatchInfo,
-} from "./deferred.js";
+} from "./batch-first.js";
 import { ensureRepoConfig } from "./repo-config.js";
 import { SessionManager } from "./session.js";
 import { track } from "./track.js";
@@ -271,19 +271,19 @@ export type {
 };
 
 /**
- * Explicit, opt-in deferred execution over a provider's Batch API — never
- * enabled by wrap()/capture defaults or by an environment variable. See
- * DeferredPolicy for the required, explicit acknowledgements
+ * Explicit, opt-in batch-first execution over a provider's Batch API —
+ * never enabled by wrap()/capture defaults or by an environment variable.
+ * See BatchFirstPolicy for the required, explicit acknowledgements
  * (acceptDuplicateProviderExecution, and allowDuplicateToolCallPlans for
  * requests that include tools).
  */
-export { deferred, DeferredIneligibleError };
+export { batchFirst, BatchFirstIneligibleError };
 export type {
-  DeferredMetadata,
-  DeferredPolicy,
-  DeferredProvider,
-  DeferredRequest,
-  DeferredResult,
-  DeferredSource,
+  BatchFirstMetadata,
+  BatchFirstPolicy,
+  BatchFirstProvider,
+  BatchFirstRequest,
+  BatchFirstResult,
+  BatchFirstSource,
   LateBatchInfo,
 };

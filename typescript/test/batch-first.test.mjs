@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { DeferredIneligibleError, deferred, runDeferred } from "../dist/deferred.js";
+import { BatchFirstIneligibleError, batchFirst, runBatchFirst } from "../dist/batch-first.js";
 import * as PublicApi from "../dist/index.js";
 
 function delay(ms) {
@@ -78,7 +78,7 @@ function fakeAdapter({
 test("returns the batch result when it arrives before the deadline", async () => {
   const { adapter, batchResult } = fakeAdapter({ batchCompletesAfterMs: 60 });
 
-  const outcome = await runDeferred(adapter, REQUEST, basePolicy({ deadlineMs: 300 }), baseControls());
+  const outcome = await runBatchFirst(adapter, REQUEST, basePolicy({ deadlineMs: 300 }), baseControls());
 
   assert.equal(outcome.source, "batch");
   assert.equal(outcome.result, batchResult);
@@ -91,10 +91,10 @@ test("returns the batch result when it arrives before the deadline", async () =>
 test("sends exactly one direct fallback and never returns a late batch result", async () => {
   // Keep the whole fixture (not a destructured directCallCount) — it's a
   // getter, and destructuring it here would freeze it at its value before
-  // runDeferred() ever calls direct(), always reading back 0.
+  // runBatchFirst() ever calls direct(), always reading back 0.
   const fixture = fakeAdapter({ batchCompletesAfterMs: 300, directDelayMs: 20 });
 
-  const outcome = await runDeferred(fixture.adapter, REQUEST, basePolicy({ deadlineMs: 200 }), baseControls());
+  const outcome = await runBatchFirst(fixture.adapter, REQUEST, basePolicy({ deadlineMs: 200 }), baseControls());
 
   assert.equal(outcome.source, "direct");
   assert.equal(outcome.result, fixture.directResult);
@@ -102,7 +102,7 @@ test("sends exactly one direct fallback and never returns a late batch result", 
   assert.equal(fixture.directCallCount, 1);
   assert.equal(outcome.metadata.canonical_result, "direct");
   assert.equal(outcome.metadata.duplicate_provider_execution, true);
-  // At the moment deferred() returns, the batch (completing at ~300ms) has
+  // At the moment batchFirst() returns, the batch (completing at ~300ms) has
   // not settled yet — accurate as-of-return, not a claim about the future.
   assert.equal(outcome.metadata.late_batch_completed, false);
 
@@ -121,7 +121,7 @@ test("onLateBatchSettled reports the late outcome without ever returning its con
   });
   let lateInfo;
 
-  const outcome = await runDeferred(adapter, REQUEST, basePolicy({
+  const outcome = await runBatchFirst(adapter, REQUEST, basePolicy({
     deadlineMs: 10, // fires long before the fake batch's 60ms completion
     onLateBatchSettled: (info) => { lateInfo = info; },
   }), baseControls());
@@ -135,7 +135,7 @@ test("a failed batch before the deadline falls back to direct immediately, not a
   const { adapter } = fakeAdapter({ batchCompletesAfterMs: 20, batchOutcome: "failed" });
   const startedAt = Date.now();
 
-  const outcome = await runDeferred(adapter, REQUEST, basePolicy({ deadlineMs: 5_000 }), baseControls());
+  const outcome = await runBatchFirst(adapter, REQUEST, basePolicy({ deadlineMs: 5_000 }), baseControls());
 
   assert.equal(outcome.source, "direct");
   assert.equal(outcome.metadata.batch_outcome, "failed");
@@ -166,7 +166,7 @@ test("a completed batch whose result cannot be read falls back to direct exactly
     },
   };
 
-  const outcome = await runDeferred(adapter, REQUEST, basePolicy({
+  const outcome = await runBatchFirst(adapter, REQUEST, basePolicy({
     deadlineMs: 5_000, // large on purpose — must not matter; the batch resolves on the first poll
     onLateBatchSettled: () => { lateCalls += 1; },
   }));
@@ -200,7 +200,7 @@ test("a submitOne failure — no batch ever existed — is still thrown, never t
   };
 
   await assert.rejects(
-    () => runDeferred(adapter, REQUEST, basePolicy()),
+    () => runBatchFirst(adapter, REQUEST, basePolicy()),
     /network error creating batch/,
   );
   assert.equal(directCalls, 0);
@@ -209,8 +209,8 @@ test("a submitOne failure — no batch ever existed — is still thrown, never t
 test("rejects a streaming request before any provider call", async () => {
   const { adapter, directCallCount } = fakeAdapter();
   await assert.rejects(
-    () => runDeferred(adapter, { ...REQUEST, stream: true }, basePolicy()),
-    DeferredIneligibleError,
+    () => runBatchFirst(adapter, { ...REQUEST, stream: true }, basePolicy()),
+    BatchFirstIneligibleError,
   );
   assert.equal(directCallCount, 0);
 });
@@ -220,12 +220,12 @@ test("rejects a request with tools unless allowDuplicateToolCallPlans is explici
   const withTools = { ...REQUEST, tools: [{ type: "function", function: { name: "lookup" } }] };
 
   await assert.rejects(
-    () => runDeferred(adapter, withTools, basePolicy()),
-    DeferredIneligibleError,
+    () => runBatchFirst(adapter, withTools, basePolicy()),
+    BatchFirstIneligibleError,
   );
 
   const { adapter: adapter2, directResult } = fakeAdapter({ batchCompletesAfterMs: 400 });
-  const outcome = await runDeferred(adapter2, withTools, basePolicy({
+  const outcome = await runBatchFirst(adapter2, withTools, basePolicy({
     deadlineMs: 30,
     allowDuplicateToolCallPlans: true,
   }));
@@ -235,12 +235,12 @@ test("rejects a request with tools unless allowDuplicateToolCallPlans is explici
 test("rejects when acceptDuplicateProviderExecution is not exactly true", async () => {
   const { adapter } = fakeAdapter();
   await assert.rejects(
-    () => runDeferred(adapter, REQUEST, { deadlineMs: 200 }),
-    DeferredIneligibleError,
+    () => runBatchFirst(adapter, REQUEST, { deadlineMs: 200 }),
+    BatchFirstIneligibleError,
   );
   await assert.rejects(
-    () => runDeferred(adapter, REQUEST, { deadlineMs: 200, acceptDuplicateProviderExecution: false }),
-    DeferredIneligibleError,
+    () => runBatchFirst(adapter, REQUEST, { deadlineMs: 200, acceptDuplicateProviderExecution: false }),
+    BatchFirstIneligibleError,
   );
 });
 
@@ -248,7 +248,7 @@ test("rejects when the adapter itself reports the request ineligible", async () 
   const { adapter } = fakeAdapter();
   adapter.eligibility = () => ({ eligible: false, reason: "unsupported endpoint shape" });
   await assert.rejects(
-    () => runDeferred(adapter, REQUEST, basePolicy()),
+    () => runBatchFirst(adapter, REQUEST, basePolicy()),
     /unsupported endpoint shape/,
   );
 });
@@ -278,7 +278,7 @@ test("an injected fake clock drives the deadline deterministically, with no real
     },
   };
 
-  const pending = runDeferred(adapter, REQUEST, basePolicy({
+  const pending = runBatchFirst(adapter, REQUEST, basePolicy({
     deadlineMs: 999_999,
   }), baseControls({
     pollIntervalMs: 500_000,
@@ -297,7 +297,7 @@ test("an injected fake clock drives the deadline deterministically, with no real
   assert.equal(outcome.source, "direct");
 });
 
-test("deferred() resolves the OpenAI adapter from a duck-typed client and runs the same state machine", async () => {
+test("batchFirst() resolves the OpenAI adapter from a duck-typed client and runs the same state machine", async () => {
   // Stateful fake: echoes back whatever custom_id the adapter itself put in
   // the uploaded JSONL line, exactly as a real Batch API round trip would —
   // the adapter's custom_id is internal, so the test must not guess it.
@@ -329,23 +329,23 @@ test("deferred() resolves the OpenAI adapter from a duck-typed client and runs t
     },
   };
 
-  const outcome = await deferred(fakeClient, "openai", REQUEST, basePolicy({ deadlineMs: 2_000 }));
+  const outcome = await batchFirst(fakeClient, "openai", REQUEST, basePolicy({ deadlineMs: 2_000 }));
   assert.equal(outcome.source, "batch");
   assert.equal(outcome.result.id, "resp_1");
 });
 
-test("deferred and DeferredIneligibleError are reachable from the package's public entry point", () => {
+test("batchFirst and BatchFirstIneligibleError are reachable from the package's public entry point", () => {
   // The package.json "exports" field whitelists only ".", so anything not
   // re-exported from index.ts is unreachable by real consumers regardless
   // of what the internal modules export — this is the actual contract
-  // surface, not an implementation detail. runDeferred and the adapter
+  // surface, not an implementation detail. runBatchFirst and the adapter
   // factories are internal-module exports only (see
-  // deferred-public-surface.test.mjs for the full root-export contract).
-  assert.equal(typeof PublicApi.deferred, "function");
-  assert.equal(PublicApi.DeferredIneligibleError, DeferredIneligibleError);
+  // batch-first-public-surface.test.mjs for the full root-export contract).
+  assert.equal(typeof PublicApi.batchFirst, "function");
+  assert.equal(PublicApi.BatchFirstIneligibleError, BatchFirstIneligibleError);
 });
 
-test("deferred() resolves the Anthropic adapter from a duck-typed client and runs the same state machine", async () => {
+test("batchFirst() resolves the Anthropic adapter from a duck-typed client and runs the same state machine", async () => {
   let submittedCustomId;
   const fakeClient = {
     messages: {
@@ -372,7 +372,7 @@ test("deferred() resolves the Anthropic adapter from a duck-typed client and run
     },
   };
 
-  const outcome = await deferred(fakeClient, "anthropic", REQUEST, basePolicy({ deadlineMs: 2_000 }));
+  const outcome = await batchFirst(fakeClient, "anthropic", REQUEST, basePolicy({ deadlineMs: 2_000 }));
   assert.equal(outcome.source, "batch");
   assert.equal(outcome.result.id, "msg_1");
 });
@@ -408,7 +408,7 @@ test("Anthropic: an item-level batch error falls back to direct exactly once and
     },
   };
 
-  const outcome = await deferred(fakeClient, "anthropic", REQUEST, basePolicy({ deadlineMs: 2_000 }));
+  const outcome = await batchFirst(fakeClient, "anthropic", REQUEST, basePolicy({ deadlineMs: 2_000 }));
   assert.equal(outcome.source, "direct");
   assert.equal(directCalls, 1);
   assert.equal(outcome.metadata.batch_outcome, "failed");
@@ -434,13 +434,13 @@ test("Anthropic: a completed batch missing our custom_id in results() falls back
     },
   };
 
-  const outcome = await deferred(fakeClient, "anthropic", REQUEST, basePolicy({ deadlineMs: 2_000 }));
+  const outcome = await batchFirst(fakeClient, "anthropic", REQUEST, basePolicy({ deadlineMs: 2_000 }));
   assert.equal(outcome.source, "direct");
   assert.equal(directCalls, 1);
   assert.equal(outcome.metadata.batch_outcome, "failed");
 });
 
-test("deferred() resolves the Google adapter from a duck-typed client and runs the same state machine", async () => {
+test("batchFirst() resolves the Google adapter from a duck-typed client and runs the same state machine", async () => {
   const GOOGLE_REQUEST = { model: "gemini-2.5-flash", contents: [{ role: "user", parts: [{ text: "hello" }] }] };
   const fakeClient = {
     models: {
@@ -458,7 +458,7 @@ test("deferred() resolves the Google adapter from a duck-typed client and runs t
     },
   };
 
-  const outcome = await deferred(fakeClient, "google", GOOGLE_REQUEST, basePolicy({ deadlineMs: 2_000 }));
+  const outcome = await batchFirst(fakeClient, "google", GOOGLE_REQUEST, basePolicy({ deadlineMs: 2_000 }));
   assert.equal(outcome.source, "batch");
   assert.deepEqual(outcome.result, { candidates: [] });
 });
@@ -485,7 +485,7 @@ test("Google: an item-level batch error falls back to direct exactly once and ne
     },
   };
 
-  const outcome = await deferred(fakeClient, "google", GOOGLE_REQUEST, basePolicy({ deadlineMs: 2_000 }));
+  const outcome = await batchFirst(fakeClient, "google", GOOGLE_REQUEST, basePolicy({ deadlineMs: 2_000 }));
   assert.equal(outcome.source, "direct");
   assert.equal(directCalls, 1);
   assert.equal(outcome.metadata.batch_outcome, "failed");
@@ -509,7 +509,7 @@ test("Google: a completed batch with no inlined responses falls back to direct e
     },
   };
 
-  const outcome = await deferred(fakeClient, "google", GOOGLE_REQUEST, basePolicy({ deadlineMs: 2_000 }));
+  const outcome = await batchFirst(fakeClient, "google", GOOGLE_REQUEST, basePolicy({ deadlineMs: 2_000 }));
   assert.equal(outcome.source, "direct");
   assert.equal(directCalls, 1);
   assert.equal(outcome.metadata.batch_outcome, "failed");

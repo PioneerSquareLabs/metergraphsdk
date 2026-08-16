@@ -1,8 +1,8 @@
-"""Explicit, opt-in deferred execution: submit one request through a
+"""Explicit, opt-in batch-first execution: submit one request through a
 provider's Batch API, wait a caller-selected deadline, and fall back to a
 single direct call if the batch hasn't finished in time. Never enabled by
 wrap()/capture defaults or an environment variable — a caller reaches this
-only by importing and calling deferred() directly, and only after
+only by importing and calling batch_first() directly, and only after
 explicitly acknowledging the duplicate-execution semantic below.
 
 On a missed deadline, the request may execute twice against the provider
@@ -15,8 +15,8 @@ an already-returned result.
 This module's own concurrency (background late-batch polling after a
 deadline-triggered fallback) uses a daemon threading.Thread/Event, matching
 the rest of this SDK's background work (see _transport.Writer,
-_config.ConfigPoller) rather than asyncio — deferred()/run_deferred() are
-synchronous, blocking calls, and the adapters in _provider_batch call
+_config.ConfigPoller) rather than asyncio — batch_first()/run_batch_first()
+are synchronous, blocking calls, and the adapters in _provider_batch call
 their client's methods directly (synchronously). Async provider clients
 (AsyncOpenAI, AsyncAnthropic, google-genai's `.aio` namespace) are not
 supported by this milestone's adapters — see the package's batch-adapter
@@ -39,16 +39,16 @@ from ._provider_batch import (
 )
 
 
-class DeferredIneligibleError(Exception):
+class BatchFirstIneligibleError(Exception):
     """Raised before any provider call when a request/policy combination is
-    not eligible for deferred execution — streaming, tools without
+    not eligible for batch-first execution — streaming, tools without
     acknowledgement, a missing/false accept_duplicate_provider_execution,
     a non-positive deadline, or an adapter-specific ineligibility."""
 
 
 @dataclass(frozen=True)
 class LateBatchInfo:
-    """Reported asynchronously, after run_deferred()/deferred() have
+    """Reported asynchronously, after run_batch_first()/batch_first() have
     already returned via the direct fallback, if the losing batch
     eventually reaches a terminal state. Its actual result content is
     never included here and never returned — only whether it happened to
@@ -60,13 +60,14 @@ class LateBatchInfo:
 
 
 @dataclass(frozen=True)
-class DeferredMetadata:
+class BatchFirstMetadata:
     execution_mode: str
     deadline_seconds: float
     # Wall-clock time from submission to the canonical result settling.
     batch_wait_seconds: float
-    # The batch's own status as of when run_deferred()/deferred() returned
-    # — not its eventual status if that differs (see LateBatchInfo).
+    # The batch's own status as of when run_batch_first()/batch_first()
+    # returned — not its eventual status if that differs (see
+    # LateBatchInfo).
     batch_outcome: str  # "completed" | "failed" | "expired" | "pending_at_deadline"
     canonical_result: str  # "batch" | "direct"
     duplicate_provider_execution: bool
@@ -81,17 +82,17 @@ class DeferredMetadata:
 
 
 @dataclass(frozen=True)
-class DeferredResult:
+class BatchFirstResult:
     source: str  # "batch" | "direct"
     result: Any
-    metadata: DeferredMetadata
+    metadata: BatchFirstMetadata
 
 
-class DeferredClock:
+class BatchFirstClock:
     """Injectable wait primitive. Real time.monotonic()/threading.Event.wait
     by default; tests can substitute a fake for deterministic control, with
     no real waiting — the same purpose as the TypeScript SDK's injectable
-    DeferredClock, shaped around this SDK's own concurrency primitive
+    BatchFirstClock, shaped around this SDK's own concurrency primitive
     (threading.Event) rather than setTimeout/clearTimeout."""
 
     def monotonic(self) -> float:
@@ -114,19 +115,19 @@ def _validate(
     deadline_seconds: float,
 ) -> None:
     if accept_duplicate_provider_execution is not True:
-        raise DeferredIneligibleError(
-            "deferred() requires accept_duplicate_provider_execution=True — a missed "
+        raise BatchFirstIneligibleError(
+            "batch_first() requires accept_duplicate_provider_execution=True — a missed "
             "deadline can execute the request twice against the provider"
         )
     if not isinstance(deadline_seconds, (int, float)) or isinstance(deadline_seconds, bool) or deadline_seconds <= 0:
-        raise DeferredIneligibleError("deferred() requires a positive deadline_seconds")
+        raise BatchFirstIneligibleError("batch_first() requires a positive deadline_seconds")
     if request.get("stream") is True:
-        raise DeferredIneligibleError(
-            "deferred() does not support streaming requests — streaming is direct-only"
+        raise BatchFirstIneligibleError(
+            "batch_first() does not support streaming requests — streaming is direct-only"
         )
     if _has_tools(request) and allow_duplicate_tool_call_plans is not True:
-        raise DeferredIneligibleError(
-            "deferred() requires allow_duplicate_tool_call_plans=True for requests with "
+        raise BatchFirstIneligibleError(
+            "batch_first() requires allow_duplicate_tool_call_plans=True for requests with "
             "tools — the batch result and the direct fallback are independent provider "
             "executions and may each choose a different tool call plan"
         )
@@ -136,7 +137,7 @@ _DEFAULT_POLL_INTERVAL_SECONDS = 2.0
 _TERMINAL_STATUSES = ("completed", "failed", "expired")
 
 
-def run_deferred(
+def run_batch_first(
     adapter: ProviderBatchAdapter,
     request: Mapping[str, Any],
     *,
@@ -144,12 +145,12 @@ def run_deferred(
     accept_duplicate_provider_execution: bool,
     allow_duplicate_tool_call_plans: bool = False,
     poll_interval_seconds: float = _DEFAULT_POLL_INTERVAL_SECONDS,
-    clock: DeferredClock | None = None,
+    clock: BatchFirstClock | None = None,
     on_late_batch_settled: Callable[[LateBatchInfo], None] | None = None,
-) -> DeferredResult:
+) -> BatchFirstResult:
     """The adapter-injected core state machine — importable directly so
     fake-adapter, fake-clock tests can drive it, and used internally by the
-    public, provider-explicit deferred() below."""
+    public, provider-explicit batch_first() below."""
     _validate(
         request,
         accept_duplicate_provider_execution=accept_duplicate_provider_execution,
@@ -158,12 +159,12 @@ def run_deferred(
     )
     eligibility = adapter.eligibility(request)
     if not eligibility.eligible:
-        raise DeferredIneligibleError(
-            "request is not eligible for deferred execution: "
+        raise BatchFirstIneligibleError(
+            "request is not eligible for batch-first execution: "
             f"{eligibility.reason or 'unsupported by this adapter'}"
         )
 
-    clock = clock or DeferredClock()
+    clock = clock or BatchFirstClock()
     started_at = clock.monotonic()
 
     # Not wrapped: a submission failure means no batch was ever created,
@@ -198,7 +199,7 @@ def run_deferred(
     # A batch reported "completed" but whose result cannot be read (a
     # missing output file, an item-level provider error, a malformed or
     # missing matching line, a transient read failure) is neither a valid
-    # canonical batch result nor grounds to raise out of run_deferred()
+    # canonical batch result nor grounds to raise out of run_batch_first()
     # instead of the promised fallback — it is treated exactly like a
     # batch that reported "failed": exactly one direct fallback, never a
     # second read attempt, never surfaced as an exception.
@@ -208,11 +209,11 @@ def run_deferred(
         stop_polling.set()
         try:
             batch_result = adapter.read_result(handle)
-            return DeferredResult(
+            return BatchFirstResult(
                 source="batch",
                 result=batch_result.result,
-                metadata=DeferredMetadata(
-                    execution_mode="deferred",
+                metadata=BatchFirstMetadata(
+                    execution_mode="batch_first",
                     deadline_seconds=deadline_seconds,
                     batch_wait_seconds=clock.monotonic() - started_at,
                     batch_outcome="completed",
@@ -270,11 +271,11 @@ def run_deferred(
         threading.Thread(target=late_watcher, daemon=True).start()
 
     direct_result = adapter.direct(request)
-    return DeferredResult(
+    return BatchFirstResult(
         source="direct",
         result=direct_result.result,
-        metadata=DeferredMetadata(
-            execution_mode="deferred",
+        metadata=BatchFirstMetadata(
+            execution_mode="batch_first",
             deadline_seconds=deadline_seconds,
             batch_wait_seconds=clock.monotonic() - started_at,
             batch_outcome=batch_outcome_at_fallback,
@@ -296,11 +297,11 @@ _PROVIDER_FACTORIES: dict[str, Callable[[Any], ProviderBatchAdapter]] = {
 def _resolve_adapter(client: Any, provider: str) -> ProviderBatchAdapter:
     factory = _PROVIDER_FACTORIES.get(provider)
     if factory is None:
-        raise DeferredIneligibleError(f'deferred() has no adapter for provider "{provider}" yet')
+        raise BatchFirstIneligibleError(f'batch_first() has no adapter for provider "{provider}" yet')
     return factory(client)
 
 
-def deferred(
+def batch_first(
     client: Any,
     provider: str,
     request: Mapping[str, Any],
@@ -309,13 +310,13 @@ def deferred(
     accept_duplicate_provider_execution: bool,
     allow_duplicate_tool_call_plans: bool = False,
     on_late_batch_settled: Callable[[LateBatchInfo], None] | None = None,
-) -> DeferredResult:
-    """Explicit, provider-specific deferred execution. Never inferred from
-    the client instance — the caller states the provider, matching wrap()'s
-    own explicit-provider option. Polling interval and time source are
-    test-only controls on run_deferred(), not public here."""
+) -> BatchFirstResult:
+    """Explicit, provider-specific batch-first execution. Never inferred
+    from the client instance — the caller states the provider, matching
+    wrap()'s own explicit-provider option. Polling interval and time
+    source are test-only controls on run_batch_first(), not public here."""
     adapter = _resolve_adapter(client, provider)
-    return run_deferred(
+    return run_batch_first(
         adapter,
         request,
         deadline_seconds=deadline_seconds,

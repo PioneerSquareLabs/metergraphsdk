@@ -1,23 +1,23 @@
 // Type-only surface test: the package root must export exactly the
-// customer-facing deferred types, and must not re-export internal
+// customer-facing batch-first types, and must not re-export internal
 // batch-adapter types. No runtime assertions here — `tsc --noEmit` is the
 // test runner.
 import type {
-  DeferredMetadata,
-  DeferredPolicy,
-  DeferredProvider,
-  DeferredRequest,
-  DeferredResult,
-  DeferredSource,
+  BatchFirstMetadata,
+  BatchFirstPolicy,
+  BatchFirstProvider,
+  BatchFirstRequest,
+  BatchFirstResult,
+  BatchFirstSource,
   LateBatchInfo,
 } from "../dist/index.js";
 
-declare const policy: DeferredPolicy;
-declare const result: DeferredResult;
-declare const metadata: DeferredMetadata;
-declare const source: DeferredSource;
-declare const provider: DeferredProvider;
-declare const request: DeferredRequest;
+declare const policy: BatchFirstPolicy;
+declare const result: BatchFirstResult;
+declare const metadata: BatchFirstMetadata;
+declare const source: BatchFirstSource;
+declare const provider: BatchFirstProvider;
+declare const request: BatchFirstRequest;
 declare const lateBatchInfo: LateBatchInfo;
 void policy;
 void result;
@@ -27,8 +27,8 @@ void provider;
 void request;
 void lateBatchInfo;
 
-// @ts-expect-error DeferredClock must not be exported from the package root.
-import type { DeferredClock } from "../dist/index.js";
+// @ts-expect-error BatchFirstClock must not be exported from the package root.
+import type { BatchFirstClock } from "../dist/index.js";
 // @ts-expect-error BatchHandle must not be exported from the package root.
 import type { BatchHandle } from "../dist/index.js";
 // @ts-expect-error BatchPollResult must not be exported from the package root.
@@ -49,24 +49,24 @@ import type { AnthropicBatchCapableClient } from "../dist/index.js";
 import type { GoogleBatchCapableClient } from "../dist/index.js";
 
 // A public caller must not be able to set polling or test-clock mechanics
-// on DeferredPolicy — only onLateBatchSettled is a caller-facing hook.
-const withPollInterval: DeferredPolicy = {
+// on BatchFirstPolicy — only onLateBatchSettled is a caller-facing hook.
+const withPollInterval: BatchFirstPolicy = {
   deadlineMs: 1000,
   acceptDuplicateProviderExecution: true,
-  // @ts-expect-error DeferredPolicy must not accept a caller-supplied pollIntervalMs.
+  // @ts-expect-error BatchFirstPolicy must not accept a caller-supplied pollIntervalMs.
   pollIntervalMs: 10,
 };
 void withPollInterval;
 
-const withClock: DeferredPolicy = {
+const withClock: BatchFirstPolicy = {
   deadlineMs: 1000,
   acceptDuplicateProviderExecution: true,
-  // @ts-expect-error DeferredPolicy must not accept a caller-supplied clock.
+  // @ts-expect-error BatchFirstPolicy must not accept a caller-supplied clock.
   clock: { setTimeout: () => 0, clearTimeout: () => {} },
 };
 void withClock;
 
-const withOnLateBatchSettled: DeferredPolicy = {
+const withOnLateBatchSettled: BatchFirstPolicy = {
   deadlineMs: 1000,
   acceptDuplicateProviderExecution: true,
   onLateBatchSettled: () => {},

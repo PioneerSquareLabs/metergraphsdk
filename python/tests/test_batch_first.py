@@ -7,12 +7,12 @@ import time
 import pytest
 
 import metergraph
-from metergraph._deferred import (
-    DeferredClock,
-    DeferredIneligibleError,
+from metergraph._batch_first import (
+    BatchFirstClock,
+    BatchFirstIneligibleError,
     LateBatchInfo,
-    deferred,
-    run_deferred,
+    batch_first,
+    run_batch_first,
 )
 from metergraph._provider_batch import (
     BatchHandle,
@@ -96,7 +96,7 @@ class FakeAdapter(ProviderBatchAdapter):
 def test_returns_batch_result_when_it_arrives_before_the_deadline():
     adapter = FakeAdapter(batch_completes_after_seconds=0.05)
 
-    outcome = run_deferred(adapter, REQUEST, **base_policy(deadline_seconds=0.3))
+    outcome = run_batch_first(adapter, REQUEST, **base_policy(deadline_seconds=0.3))
 
     assert outcome.source == "batch"
     assert outcome.result == adapter.batch_result
@@ -109,7 +109,7 @@ def test_returns_batch_result_when_it_arrives_before_the_deadline():
 def test_sends_exactly_one_direct_fallback_and_never_returns_a_late_batch_result():
     adapter = FakeAdapter(batch_completes_after_seconds=0.3, direct_delay_seconds=0.02)
 
-    outcome = run_deferred(adapter, REQUEST, **base_policy(deadline_seconds=0.15))
+    outcome = run_batch_first(adapter, REQUEST, **base_policy(deadline_seconds=0.15))
 
     assert outcome.source == "direct"
     assert outcome.result == adapter.direct_result
@@ -117,7 +117,7 @@ def test_sends_exactly_one_direct_fallback_and_never_returns_a_late_batch_result
     assert adapter.direct_call_count == 1
     assert outcome.metadata.canonical_result == "direct"
     assert outcome.metadata.duplicate_provider_execution is True
-    # At the moment run_deferred() returns, the batch (completing at
+    # At the moment run_batch_first() returns, the batch (completing at
     # ~300ms) has not settled yet — accurate as-of-return, not a claim
     # about the future.
     assert outcome.metadata.late_batch_completed is False
@@ -139,7 +139,7 @@ def test_on_late_batch_settled_reports_the_late_outcome_without_returning_its_co
     def on_late(info: LateBatchInfo) -> None:
         late_info["value"] = info
 
-    outcome = run_deferred(
+    outcome = run_batch_first(
         adapter,
         REQUEST,
         **base_policy(deadline_seconds=0.01, on_late_batch_settled=on_late),  # fires long before the 50ms batch
@@ -154,7 +154,7 @@ def test_a_failed_batch_before_the_deadline_falls_back_to_direct_immediately():
     adapter = FakeAdapter(batch_completes_after_seconds=0.02, batch_outcome="failed")
     started_at = time.monotonic()
 
-    outcome = run_deferred(adapter, REQUEST, **base_policy(deadline_seconds=5.0))
+    outcome = run_batch_first(adapter, REQUEST, **base_policy(deadline_seconds=5.0))
 
     assert outcome.source == "direct"
     assert outcome.metadata.batch_outcome == "failed"
@@ -196,7 +196,7 @@ def test_a_completed_batch_whose_result_cannot_be_read_falls_back_once_never_rai
         nonlocal late_calls
         late_calls += 1
 
-    outcome = run_deferred(
+    outcome = run_batch_first(
         UnreadableAdapter(),
         REQUEST,
         # Large on purpose — must not matter; the batch resolves on the
@@ -241,14 +241,14 @@ def test_a_submit_one_failure_is_still_raised_never_treated_as_a_fallback_trigge
             return ProviderBatchResult(result={}, contained_tool_call_plan=False)
 
     with pytest.raises(RuntimeError, match="network error creating batch"):
-        run_deferred(FailingSubmitAdapter(), REQUEST, **base_policy())
+        run_batch_first(FailingSubmitAdapter(), REQUEST, **base_policy())
     assert direct_calls == 0
 
 
 def test_rejects_a_streaming_request_before_any_provider_call():
     adapter = FakeAdapter()
-    with pytest.raises(DeferredIneligibleError):
-        run_deferred(adapter, {**REQUEST, "stream": True}, **base_policy())
+    with pytest.raises(BatchFirstIneligibleError):
+        run_batch_first(adapter, {**REQUEST, "stream": True}, **base_policy())
     assert adapter.direct_call_count == 0
 
 
@@ -256,11 +256,11 @@ def test_rejects_a_request_with_tools_unless_allow_duplicate_tool_call_plans_is_
     adapter = FakeAdapter()
     with_tools = {**REQUEST, "tools": [{"type": "function", "function": {"name": "lookup"}}]}
 
-    with pytest.raises(DeferredIneligibleError):
-        run_deferred(adapter, with_tools, **base_policy())
+    with pytest.raises(BatchFirstIneligibleError):
+        run_batch_first(adapter, with_tools, **base_policy())
 
     adapter2 = FakeAdapter(batch_completes_after_seconds=0.4)
-    outcome = run_deferred(
+    outcome = run_batch_first(
         adapter2,
         with_tools,
         **base_policy(deadline_seconds=0.03, allow_duplicate_tool_call_plans=True),
@@ -270,30 +270,30 @@ def test_rejects_a_request_with_tools_unless_allow_duplicate_tool_call_plans_is_
 
 def test_rejects_when_accept_duplicate_provider_execution_is_not_exactly_true():
     adapter = FakeAdapter()
-    with pytest.raises(DeferredIneligibleError):
-        run_deferred(adapter, REQUEST, deadline_seconds=0.2, accept_duplicate_provider_execution=False)
-    with pytest.raises(DeferredIneligibleError):
-        run_deferred(adapter, REQUEST, deadline_seconds=0.2, accept_duplicate_provider_execution=None)
+    with pytest.raises(BatchFirstIneligibleError):
+        run_batch_first(adapter, REQUEST, deadline_seconds=0.2, accept_duplicate_provider_execution=False)
+    with pytest.raises(BatchFirstIneligibleError):
+        run_batch_first(adapter, REQUEST, deadline_seconds=0.2, accept_duplicate_provider_execution=None)
 
 
 def test_rejects_a_non_positive_deadline():
     adapter = FakeAdapter()
-    with pytest.raises(DeferredIneligibleError):
-        run_deferred(adapter, REQUEST, deadline_seconds=0, accept_duplicate_provider_execution=True)
-    with pytest.raises(DeferredIneligibleError):
-        run_deferred(adapter, REQUEST, deadline_seconds=-1, accept_duplicate_provider_execution=True)
+    with pytest.raises(BatchFirstIneligibleError):
+        run_batch_first(adapter, REQUEST, deadline_seconds=0, accept_duplicate_provider_execution=True)
+    with pytest.raises(BatchFirstIneligibleError):
+        run_batch_first(adapter, REQUEST, deadline_seconds=-1, accept_duplicate_provider_execution=True)
 
 
 def test_rejects_when_the_adapter_itself_reports_the_request_ineligible():
     adapter = FakeAdapter(eligible=False)
-    with pytest.raises(DeferredIneligibleError):
-        run_deferred(adapter, REQUEST, **base_policy())
+    with pytest.raises(BatchFirstIneligibleError):
+        run_batch_first(adapter, REQUEST, **base_policy())
 
 
 def test_background_polling_stops_calling_poll_once_a_batch_result_is_returned():
     adapter = FakeAdapter(batch_completes_after_seconds=0.02)
 
-    run_deferred(adapter, REQUEST, **base_policy(deadline_seconds=0.3, poll_interval_seconds=0.01))
+    run_batch_first(adapter, REQUEST, **base_policy(deadline_seconds=0.3, poll_interval_seconds=0.01))
     count_at_return = adapter.poll_count
 
     time.sleep(0.1)
@@ -301,7 +301,7 @@ def test_background_polling_stops_calling_poll_once_a_batch_result_is_returned()
 
 
 def test_an_injected_fake_clock_drives_the_deadline_deterministically_with_no_real_waiting():
-    # Proves run_deferred() only ever waits through the injected clock: a
+    # Proves run_batch_first() only ever waits through the injected clock: a
     # huge deadline_seconds is passed through untouched, but the fake
     # resolves its own wait() call instantly instead of really blocking —
     # matching this seam's purpose exactly (deterministic control, no real
@@ -309,7 +309,7 @@ def test_an_injected_fake_clock_drives_the_deadline_deterministically_with_no_re
     # setTimeout/clearTimeout.
     waits = []
 
-    class InstantDeadlineClock(DeferredClock):
+    class InstantDeadlineClock(BatchFirstClock):
         def monotonic(self):
             return 0.0
 
@@ -351,7 +351,7 @@ def test_an_injected_fake_clock_drives_the_deadline_deterministically_with_no_re
     result_box = {}
 
     def run():
-        result_box["outcome"] = run_deferred(
+        result_box["outcome"] = run_batch_first(
             BlockedAdapter(),
             REQUEST,
             deadline_seconds=999_999,
@@ -371,7 +371,7 @@ def test_an_injected_fake_clock_drives_the_deadline_deterministically_with_no_re
     assert 999_999 in waits
 
 
-# ---------- OpenAI/Anthropic/Google end-to-end via deferred() ----------
+# ---------- OpenAI/Anthropic/Google end-to-end via batch_first() ----------
 
 
 class _FakeOpenAIFiles:
@@ -414,8 +414,8 @@ class _FakeOpenAIClient:
         self.responses = _FakeOpenAIResponses()
 
 
-def test_deferred_resolves_the_openai_adapter_from_a_duck_typed_client():
-    outcome = deferred(
+def test_batch_first_resolves_the_openai_adapter_from_a_duck_typed_client():
+    outcome = batch_first(
         _FakeOpenAIClient(), "openai", REQUEST, deadline_seconds=2.0, accept_duplicate_provider_execution=True
     )
     assert outcome.source == "batch"
@@ -456,11 +456,11 @@ class _FakeAnthropicBatches:
         return iter([item])
 
 
-def test_deferred_resolves_the_anthropic_adapter_from_a_duck_typed_client():
+def test_batch_first_resolves_the_anthropic_adapter_from_a_duck_typed_client():
     batches = _FakeAnthropicBatches()
     client = type("Client", (), {"messages": _FakeAnthropicMessages(batches)})()
 
-    outcome = deferred(
+    outcome = batch_first(
         client, "anthropic", REQUEST, deadline_seconds=2.0, accept_duplicate_provider_execution=True
     )
     assert outcome.source == "batch"
@@ -484,7 +484,7 @@ def test_anthropic_item_level_batch_error_falls_back_to_direct_once_never_raises
     messages.create = failing_create
     client = type("Client", (), {"messages": messages})()
 
-    outcome = deferred(
+    outcome = batch_first(
         client, "anthropic", REQUEST, deadline_seconds=2.0, accept_duplicate_provider_execution=True
     )
     assert outcome.source == "direct"
@@ -505,7 +505,7 @@ def test_anthropic_missing_custom_id_in_results_falls_back_to_direct_once_never_
     messages.create = create
     client = type("Client", (), {"messages": messages})()
 
-    outcome = deferred(
+    outcome = batch_first(
         client, "anthropic", REQUEST, deadline_seconds=2.0, accept_duplicate_provider_execution=True
     )
     assert outcome.source == "direct"
@@ -537,10 +537,10 @@ class _FakeGoogleBatches:
         return job
 
 
-def test_deferred_resolves_the_google_adapter_from_a_duck_typed_client():
+def test_batch_first_resolves_the_google_adapter_from_a_duck_typed_client():
     client = type("Client", (), {"models": _FakeGoogleModels(), "batches": _FakeGoogleBatches()})()
 
-    outcome = deferred(
+    outcome = batch_first(
         client, "google", GOOGLE_REQUEST, deadline_seconds=2.0, accept_duplicate_provider_execution=True
     )
     assert outcome.source == "batch"
@@ -559,7 +559,7 @@ def test_google_item_level_batch_error_falls_back_to_direct_once_never_raises():
     batches = _FakeGoogleBatches(inlined_responses=[{"error": {"code": 400, "message": "leak-me-not"}}])
     client = type("Client", (), {"models": Models(), "batches": batches})()
 
-    outcome = deferred(
+    outcome = batch_first(
         client, "google", GOOGLE_REQUEST, deadline_seconds=2.0, accept_duplicate_provider_execution=True
     )
     assert outcome.source == "direct"
@@ -579,7 +579,7 @@ def test_google_no_inlined_responses_falls_back_to_direct_once_never_raises():
     batches = _FakeGoogleBatches(omit_dest=True)
     client = type("Client", (), {"models": Models(), "batches": batches})()
 
-    outcome = deferred(
+    outcome = batch_first(
         client, "google", GOOGLE_REQUEST, deadline_seconds=2.0, accept_duplicate_provider_execution=True
     )
     assert outcome.source == "direct"
@@ -588,8 +588,8 @@ def test_google_no_inlined_responses_falls_back_to_direct_once_never_raises():
 
 
 def test_public_api_exports():
-    # run_deferred and the adapter factories are internal-module imports
+    # run_batch_first and the adapter factories are internal-module imports
     # only — see test_public_api_surface.py for the full root-export
     # contract.
-    assert callable(metergraph.deferred)
-    assert metergraph.DeferredIneligibleError is DeferredIneligibleError
+    assert callable(metergraph.batch_first)
+    assert metergraph.BatchFirstIneligibleError is BatchFirstIneligibleError

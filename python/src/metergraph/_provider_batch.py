@@ -1,4 +1,4 @@
-"""Structural provider Batch API adapters that deferred() drives.
+"""Structural provider Batch API adapters that batch_first() drives.
 
 Deliberately duck-typed against each provider's real Python SDK shape (see
 create_openai_batch_adapter / create_anthropic_batch_adapter /
@@ -37,7 +37,7 @@ class ProviderBatchError(Exception):
 @dataclass(frozen=True)
 class BatchHandle:
     """The provider's own batch identifier — never returned to a caller of
-    deferred() or logged; adapters use it only to poll/read their own
+    batch_first() or logged; adapters use it only to poll/read their own
     batch."""
 
     provider_batch_id: str
@@ -63,7 +63,7 @@ class ProviderBatchEligibility:
 
 
 class ProviderBatchAdapter:
-    """The seam run_deferred()/deferred() drive. An adapter submits exactly
+    """The seam run_batch_first()/batch_first() drive. An adapter submits exactly
     one request per batch and knows how to poll it, read its terminal
     result, and run the same request directly (bypassing batch entirely)
     as a fallback.
@@ -90,7 +90,7 @@ class ProviderBatchAdapter:
 
 
 def _random_custom_id() -> str:
-    return f"deferred-{uuid.uuid4().hex}"
+    return f"batch-first-{uuid.uuid4().hex}"
 
 
 def _is_streaming(request: Mapping[str, Any]) -> bool:
@@ -345,7 +345,7 @@ class _GoogleBatchAdapter(ProviderBatchAdapter):
         model = request.get("model")
         if not isinstance(model, str) or not model.strip():
             # Bounded and raised before any provider call — submit_one is
-            # never wrapped by run_deferred, so this propagates exactly
+            # never wrapped by run_batch_first, so this propagates exactly
             # like any other "no batch was ever created" failure.
             raise ProviderBatchError(
                 "google batch requests require a non-blank request['model']"
