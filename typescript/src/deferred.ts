@@ -208,34 +208,52 @@ export async function runDeferred<TResult>(
 
   clock.clearTimeout(deadlineTimer);
 
+  // A batch reported "completed" but whose result cannot be read (a
+  // missing output file, an item-level provider error, a malformed or
+  // missing matching line, a transient read failure) is neither a valid
+  // canonical batch result nor grounds to throw out of deferred() instead
+  // of the promised fallback — it is treated exactly like a batch that
+  // reported "failed": exactly one direct fallback, never a second read
+  // attempt, never surfaced as a rejection.
+  let unreadableCompletedBatch = false;
+
   if (winner.kind === "batch" && winner.status === "completed") {
     stopPolling = true;
-    const { result } = await adapter.readResult(handle);
-    return {
-      source: "batch",
-      result,
-      metadata: {
-        execution_mode: "deferred",
-        deadline_ms: policy.deadlineMs,
-        batch_wait_ms: Date.now() - startedAt,
-        batch_outcome: "completed",
-        canonical_result: "batch",
-        duplicate_provider_execution: false,
-        late_batch_completed: false,
-        late_batch_contained_tool_call_plan: false,
-      },
-    };
+    try {
+      const { result } = await adapter.readResult(handle);
+      return {
+        source: "batch",
+        result,
+        metadata: {
+          execution_mode: "deferred",
+          deadline_ms: policy.deadlineMs,
+          batch_wait_ms: Date.now() - startedAt,
+          batch_outcome: "completed",
+          canonical_result: "batch",
+          duplicate_provider_execution: false,
+          late_batch_completed: false,
+          late_batch_contained_tool_call_plan: false,
+        },
+      };
+    } catch {
+      unreadableCompletedBatch = true;
+    }
   }
 
-  // Either the deadline fired first, or the batch reached a non-completed
-  // terminal status before the deadline — either way, issue exactly one
-  // direct fallback now, and never wait further on the batch for the
-  // canonical result. Only stop the poll loop when the batch itself
-  // already produced that terminal status (it has nothing left to do, so
-  // this is a no-op) — when the DEADLINE won, deliberately leave polling
-  // running in the background: "keep polling only to write terminal
-  // telemetry" requires the loop to keep going, not stop here.
-  const batchOutcomeAtFallback = winner.kind === "batch" ? winner.status : "pending_at_deadline";
+  // Either the deadline fired first, the batch reached a non-completed
+  // terminal status before the deadline, or the batch completed but its
+  // result could not be read — either way, issue exactly one direct
+  // fallback now, and never wait further (or retry a read) on the batch
+  // for the canonical result. Only stop the poll loop when the batch
+  // itself already produced a terminal status (it has nothing left to do,
+  // so this is a no-op) — when the DEADLINE won, deliberately leave
+  // polling running in the background: "keep polling only to write
+  // terminal telemetry" requires the loop to keep going, not stop here.
+  const batchOutcomeAtFallback = unreadableCompletedBatch
+    ? "failed"
+    : winner.kind === "batch"
+      ? winner.status
+      : "pending_at_deadline";
   if (winner.kind === "batch") stopPolling = true;
 
   const directResultPromise = adapter.direct(request);

@@ -136,6 +136,70 @@ test("a failed batch before the deadline falls back to direct immediately, not a
   assert.ok(Date.now() - startedAt < 1_000, "must not wait out the full 5s deadline after an early batch failure");
 });
 
+test("a completed batch whose result cannot be read falls back to direct exactly once, never rejects, and never fires the late-batch callback", async () => {
+  let readResultCalls = 0;
+  let directCalls = 0;
+  let lateCalls = 0;
+  const adapter = {
+    eligibility: () => ({ eligible: true }),
+    async submitOne() { return { providerBatchId: "b1" }; },
+    // Reports completed on the very first check — this is the PRIMARY
+    // race outcome, not a late one.
+    async poll() { return { status: "completed" }; },
+    async readResult() {
+      readResultCalls += 1;
+      // Stands in for: missing output file, an item-level provider error,
+      // a malformed/missing matching line, or a transient read failure —
+      // all collapse to the same "can't produce a canonical batch
+      // result" outcome.
+      throw new Error("missing output file");
+    },
+    async direct() {
+      directCalls += 1;
+      return { result: { via: "direct" }, containedToolCallPlan: false };
+    },
+  };
+
+  const outcome = await runDeferred(adapter, REQUEST, basePolicy({
+    deadlineMs: 5_000, // large on purpose — must not matter; the batch resolves on the first poll
+    onLateBatchSettled: () => { lateCalls += 1; },
+  }));
+
+  assert.equal(outcome.source, "direct");
+  assert.equal(outcome.result.via, "direct");
+  assert.equal(directCalls, 1);
+  assert.equal(readResultCalls, 1); // never retried
+  assert.equal(outcome.metadata.batch_outcome, "failed");
+  assert.equal(outcome.metadata.canonical_result, "direct");
+  assert.equal(outcome.metadata.duplicate_provider_execution, true);
+
+  // Give any stray background task a moment, then confirm the late-batch
+  // callback was never invoked — an unreadable *completed* batch is the
+  // immediate resolution, not something observed asynchronously later.
+  await delay(50);
+  assert.equal(lateCalls, 0);
+});
+
+test("a submitOne failure — no batch ever existed — is still thrown, never treated as a fallback trigger", async () => {
+  let directCalls = 0;
+  const adapter = {
+    eligibility: () => ({ eligible: true }),
+    async submitOne() { throw new Error("network error creating batch"); },
+    async poll() { return { status: "pending" }; },
+    async readResult() { throw new Error("must not be called: no batch was ever created"); },
+    async direct() {
+      directCalls += 1;
+      return { result: {}, containedToolCallPlan: false };
+    },
+  };
+
+  await assert.rejects(
+    () => runDeferred(adapter, REQUEST, basePolicy()),
+    /network error creating batch/,
+  );
+  assert.equal(directCalls, 0);
+});
+
 test("rejects a streaming request before any provider call", async () => {
   const { adapter, directCallCount } = fakeAdapter();
   await assert.rejects(
