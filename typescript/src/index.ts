@@ -9,7 +9,30 @@ import {
   type RouteOptions,
   type TraceOptions,
 } from "./context.js";
+import {
+  DeferredIneligibleError,
+  deferred,
+  runDeferred,
+  type DeferredClock,
+  type DeferredMetadata,
+  type DeferredPolicy,
+  type DeferredProvider,
+  type DeferredResult,
+  type DeferredSource,
+  type LateBatchInfo,
+} from "./deferred.js";
 import { ensureRepoConfig } from "./repo-config.js";
+import {
+  createOpenAIBatchAdapter,
+  type BatchHandle,
+  type BatchPollResult,
+  type BatchPollStatus,
+  type DeferredRequest,
+  type OpenAIBatchCapableClient,
+  type ProviderBatchAdapter,
+  type ProviderBatchEligibility,
+  type ProviderBatchResult,
+} from "./provider-batch.js";
 import { SessionManager } from "./session.js";
 import { track } from "./track.js";
 import { Transport, type TransportMode, type WaitUntil } from "./transport.js";
@@ -257,4 +280,30 @@ export type {
   VercelAISDKMiddleware,
   VercelAISDKMiddlewareOptions,
   VercelAISDKSpecificationVersion,
+};
+
+/**
+ * Explicit, opt-in deferred execution over a provider's Batch API — never
+ * enabled by wrap()/capture defaults or by an environment variable. See
+ * DeferredPolicy for the required, explicit acknowledgements
+ * (acceptDuplicateProviderExecution, and allowDuplicateToolCallPlans for
+ * requests that include tools).
+ */
+export { deferred, runDeferred, DeferredIneligibleError, createOpenAIBatchAdapter };
+export type {
+  DeferredClock,
+  DeferredMetadata,
+  DeferredPolicy,
+  DeferredProvider,
+  DeferredRequest,
+  DeferredResult,
+  DeferredSource,
+  LateBatchInfo,
+  BatchHandle,
+  BatchPollResult,
+  BatchPollStatus,
+  OpenAIBatchCapableClient,
+  ProviderBatchAdapter,
+  ProviderBatchEligibility,
+  ProviderBatchResult,
 };
