@@ -215,6 +215,18 @@ Point `METERGRAPH_INGEST_URL` at a [self-hosted Metergraph server](https://githu
 
 See [`examples/`](examples) for runnable per-provider examples, including an offline fake-provider demo that needs no API keys.
 
+## Batch-first execution (opt-in, not part of default capture)
+
+Both SDKs also expose an explicit, separately opt-in `batchFirst()` / `batch_first()` API: submit one request through a provider's Batch API, wait up to a caller-chosen deadline, and fall back to exactly one direct call if the batch hasn't finished in time. This is a distinct code path from `wrap()`/capture — never enabled by `wrap()`, by default configuration, or by any environment variable — and it carries real cost and behavioral consequences a caller must accept explicitly before any provider call is made:
+
+- **Duplicate execution and cost on a missed deadline.** The batch request is always submitted first; if it hasn't reached a terminal state by the deadline, `batchFirst()` also issues a direct call while the batch keeps running — the same prompt can be billed and executed twice. Both SDKs require an explicit, non-defaulted acknowledgement of this (`acceptDuplicateProviderExecution: true` in TypeScript, `accept_duplicate_provider_execution=True` in Python).
+- **Streaming is not supported.** A request with `stream: true` / `stream=True` is rejected before any provider call.
+- **Tool calls need a separate acknowledgement.** The batch result and the direct fallback are independent provider executions of the same prompt and may each choose a *different* tool-call plan. A request carrying `tools` is rejected unless the caller also sets `allowDuplicateToolCallPlans: true` / `allow_duplicate_tool_call_plans=True` — a caller whose tools have side effects must not assume the two plans agree. Neither path executes a tool call automatically; the caller receives the tool-call plan in the returned result and remains responsible for executing it, exactly as with a normal (non-batch-first) provider response.
+- **Exactly one canonical result, ever.** Whichever result — batch or direct — settles first is the only one ever returned or executed; a batch result that arrives after a direct fallback already won is never returned, never executed, and never mutates the already-returned result. A losing batch's eventual outcome is observable only through an async, best-effort `onLateBatchSettled` / `on_late_batch_settled` callback, and only as whether it happened to contain a tool-call plan — never its content.
+- **Long-lived-process assumptions differ by language, and neither is fully solved yet.** In TypeScript, the background poll that watches a losing batch for late telemetry uses an ordinary (non-unref'd) timer, so it keeps a Node process alive until the batch reaches a terminal state — which can take up to 24 hours. In Python, the equivalent background poll runs on a daemon thread, which does *not* keep the process alive — a short-lived script may exit before `on_late_batch_settled` ever fires, silently dropping that signal. Both are consequences of this feature only having been designed against a long-running-server assumption so far, not yet against short-lived scripts or serverless invocations.
+
+Adapters exist for OpenAI, Anthropic, and Google Gemini in both SDKs, built against each provider's documented/introspected current Batch API shape and covered by fake-client contract tests — but **none of the three has been exercised against a live provider Batch API from either SDK**. Treat this as a beta-quality, code-reviewed-but-not-live-verified surface. See [`typescript/README.md`](typescript/README.md) and [`python/README.md`](python/README.md) for exact API shapes and examples.
+
 ## License
 
 [Apache-2.0](LICENSE)

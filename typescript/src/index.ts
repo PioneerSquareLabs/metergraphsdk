@@ -9,6 +9,17 @@ import {
   type RouteOptions,
   type TraceOptions,
 } from "./context.js";
+import {
+  BatchFirstIneligibleError,
+  batchFirst,
+  type BatchFirstMetadata,
+  type BatchFirstPolicy,
+  type BatchFirstProvider,
+  type BatchFirstRequest,
+  type BatchFirstResult,
+  type BatchFirstSource,
+  type LateBatchInfo,
+} from "./batch-first.js";
 import { ensureRepoConfig } from "./repo-config.js";
 import { SessionManager } from "./session.js";
 import { track } from "./track.js";
@@ -257,4 +268,22 @@ export type {
   VercelAISDKMiddleware,
   VercelAISDKMiddlewareOptions,
   VercelAISDKSpecificationVersion,
+};
+
+/**
+ * Explicit, opt-in batch-first execution over a provider's Batch API —
+ * never enabled by wrap()/capture defaults or by an environment variable.
+ * See BatchFirstPolicy for the required, explicit acknowledgements
+ * (acceptDuplicateProviderExecution, and allowDuplicateToolCallPlans for
+ * requests that include tools).
+ */
+export { batchFirst, BatchFirstIneligibleError };
+export type {
+  BatchFirstMetadata,
+  BatchFirstPolicy,
+  BatchFirstProvider,
+  BatchFirstRequest,
+  BatchFirstResult,
+  BatchFirstSource,
+  LateBatchInfo,
 };

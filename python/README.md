@@ -104,6 +104,35 @@ message batches are captured per inference while iterating a wrapped
 rows carry real per-result usage and the batch pricing flag; job-management
 polls themselves are not miscounted as model calls.
 
+## Batch-first execution (opt-in)
+
+`metergraph.batch_first()` is a separate, explicitly opt-in code path from `wrap()`/capture: submit one request through a provider's Batch API, wait up to a caller-chosen deadline, and fall back to exactly one direct call if the batch hasn't finished in time. It is synchronous/blocking, matching this SDK's own background-work model — a daemon thread, not asyncio.
+
+```python
+import metergraph
+from openai import OpenAI
+
+client = OpenAI()  # unwrapped — batch_first() drives it directly, not through wrap()
+
+outcome = metergraph.batch_first(
+    client, "openai",
+    {"model": "gpt-5-mini", "input": "Summarize this document."},
+    deadline_seconds=60,
+    accept_duplicate_provider_execution=True,  # required: a missed deadline can execute the request twice
+    on_late_batch_settled=lambda info: None,   # fires later, in the background, only for a losing batch
+)
+
+outcome.source                  # "batch" | "direct"
+outcome.result                  # the provider response
+outcome.metadata.batch_outcome  # "completed" | "failed" | "expired" | "pending_at_deadline"
+```
+
+`provider` is `"openai" | "anthropic" | "google"`, matching `wrap()`'s own explicit-provider option — never inferred from the client instance. A request with `stream=True` is rejected before any provider call. A request carrying `tools` is rejected unless `allow_duplicate_tool_call_plans=True` is also set, acknowledging that the batch result and the direct fallback are independent provider executions that may each choose a different tool-call plan. `accept_duplicate_provider_execution` must be exactly `True` — there is no default and no environment-variable override, and a missed deadline can execute (and bill) the same request twice. Neither the batch nor the direct path executes a tool call automatically; the caller receives the tool-call plan in `outcome.result` and is responsible for executing it, exactly as with a normal (non-batch-first) provider response.
+
+`batch_first()` is not integrated with `wrap()`'s capture/telemetry pipeline; its result and metadata are returned directly to the caller, never enqueued for delivery. The background poll that watches a losing batch for late telemetry runs on a daemon thread, which does not keep the process alive — a short-lived script may exit before `on_late_batch_settled` ever fires, silently dropping that signal. This milestone's adapters call their provider client's methods synchronously; `AsyncOpenAI`, `AsyncAnthropic`, and google-genai's `.aio` namespace are not supported.
+
+OpenAI, Anthropic, and Google Gemini all have adapters (`create_openai_batch_adapter`, `create_anthropic_batch_adapter`, `create_google_batch_adapter`), built against each provider's real SDK method signatures — verified by inspecting `openai`, `anthropic`, and `google-genai` as installed from this package's own dev extras, not by a live call — but **none has been exercised against a live provider Batch API from this SDK**. Treat this as a beta-quality, code-reviewed-but-not-live-verified surface.
+
 ## Set up with an AI coding agent
 
 Paste this into Claude Code, Codex, Cursor, or any coding agent inside the
