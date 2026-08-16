@@ -14,8 +14,12 @@
  * executed, and never mutates an already-resolved result.
  */
 import {
+  createAnthropicBatchAdapter,
+  createGoogleBatchAdapter,
   createOpenAIBatchAdapter,
+  type AnthropicBatchCapableClient,
   type DeferredRequest,
+  type GoogleBatchCapableClient,
   type OpenAIBatchCapableClient,
   type ProviderBatchAdapter,
 } from "./provider-batch.js";
@@ -296,7 +300,7 @@ export async function runDeferred<TResult>(
   };
 }
 
-export type DeferredProvider = "openai";
+export type DeferredProvider = "openai" | "anthropic" | "google";
 
 function resolveAdapter(
   client: unknown,
@@ -304,6 +308,12 @@ function resolveAdapter(
 ): ProviderBatchAdapter {
   if (provider === "openai") {
     return createOpenAIBatchAdapter(client as OpenAIBatchCapableClient);
+  }
+  if (provider === "anthropic") {
+    return createAnthropicBatchAdapter(client as AnthropicBatchCapableClient);
+  }
+  if (provider === "google") {
+    return createGoogleBatchAdapter(client as GoogleBatchCapableClient);
   }
   throw new DeferredIneligibleError(`deferred() has no adapter for provider "${provider}" yet`);
 }

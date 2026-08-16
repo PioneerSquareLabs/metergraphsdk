@@ -194,3 +194,198 @@ export function createOpenAIBatchAdapter(
     },
   };
 }
+
+// ---------- Anthropic ----------
+
+/** The minimal slice of the `@anthropic-ai/sdk` package's client shape this
+ * adapter calls. A real `Anthropic` client instance satisfies this
+ * structurally — see `patchAnthropicBatchResults` in wrap.ts, which
+ * confirms `messages.batches.results()` returns an async iterable of
+ * `{custom_id, result: {type, message}}` items against the real SDK. */
+export interface AnthropicBatchCapableClient {
+  messages: {
+    create(request: Record<string, unknown>): Promise<Record<string, unknown>>;
+    batches: {
+      create(params: {
+        requests: Array<{ custom_id: string; params: Record<string, unknown> }>;
+      }): Promise<{ id: string; processing_status?: string }>;
+      retrieve(batchId: string): Promise<{
+        id: string;
+        processing_status?: string;
+        request_counts?: Record<string, number>;
+      }>;
+      results(batchId: string): AsyncIterable<unknown>;
+    };
+  };
+}
+
+interface AnthropicBatchHandle extends BatchHandle {
+  customId: string;
+}
+
+function hasToolUse(message: unknown): boolean {
+  const content = get(message, "content");
+  if (!Array.isArray(content)) return false;
+  return content.some((block) => get(block, "type") === "tool_use");
+}
+
+export function createAnthropicBatchAdapter(
+  client: AnthropicBatchCapableClient,
+): ProviderBatchAdapter {
+  return {
+    eligibility(request) {
+      if (request.stream === true) {
+        return { eligible: false, reason: "streaming requests are direct-only" };
+      }
+      return { eligible: true };
+    },
+
+    async submitOne(request) {
+      const customId = randomCustomId();
+      const batch = await client.messages.batches.create({
+        requests: [{ custom_id: customId, params: request }],
+      });
+      const handle: AnthropicBatchHandle = { providerBatchId: batch.id, customId };
+      return handle;
+    },
+
+    async poll(handle) {
+      const batch = await client.messages.batches.retrieve(handle.providerBatchId);
+      if (batch.processing_status !== "ended") return { status: "pending" };
+      // "ended" is itself a terminal signal — there is no un-ending it, so
+      // any bucket shape we don't recognize is bounded to "failed" rather
+      // than left pending forever.
+      const counts = batch.request_counts ?? {};
+      if ((counts.succeeded ?? 0) > 0) return { status: "completed" };
+      if ((counts.expired ?? 0) > 0) return { status: "expired" };
+      return { status: "failed" };
+    },
+
+    async readResult(handle) {
+      const anthropicHandle = handle as AnthropicBatchHandle;
+      for await (const item of client.messages.batches.results(handle.providerBatchId)) {
+        if (get(item, "custom_id") !== anthropicHandle.customId) continue;
+        const result = get(item, "result");
+        if (get(result, "type") !== "succeeded") {
+          // Never surface the provider's own error text — only that this
+          // one item failed.
+          throw new ProviderBatchError("anthropic batch item did not succeed");
+        }
+        const message = get(result, "message");
+        return { result: message as unknown, containedToolCallPlan: hasToolUse(message) };
+      }
+      throw new ProviderBatchError("anthropic batch results did not contain our submitted item");
+    },
+
+    async direct(request) {
+      const response = await client.messages.create(request);
+      return { result: response, containedToolCallPlan: hasToolUse(response) };
+    },
+  };
+}
+
+// ---------- Google ----------
+
+/** The minimal slice of the `@google/genai` package's client shape this
+ * adapter calls. A real Google GenAI client instance satisfies this
+ * structurally. The exact batch job/response wire shape below (`state` vs
+ * `metadata.state`, `dest.inlinedResponses`) is our best-effort reading of
+ * the current Gemini Batch API and needs live/gated verification before
+ * production use — see this module's caller-facing report for specifics. */
+export interface GoogleBatchCapableClient {
+  models: {
+    generateContent(request: Record<string, unknown>): Promise<Record<string, unknown>>;
+  };
+  batches: {
+    create(params: {
+      model: string;
+      src: { inlinedRequests: Array<Record<string, unknown>> };
+    }): Promise<{ name: string; state?: string; metadata?: { state?: string } }>;
+    get(params: { name: string }): Promise<{
+      name: string;
+      state?: string;
+      metadata?: { state?: string };
+      dest?: {
+        inlinedResponses?: Array<{
+          response?: Record<string, unknown>;
+          error?: Record<string, unknown>;
+        }>;
+      };
+    }>;
+  };
+}
+
+const GOOGLE_TERMINAL_STATUS: Record<string, BatchPollStatus> = {
+  JOB_STATE_SUCCEEDED: "completed",
+  JOB_STATE_FAILED: "failed",
+  JOB_STATE_CANCELLED: "failed",
+  JOB_STATE_EXPIRED: "expired",
+};
+
+function hasFunctionCallPart(response: unknown): boolean {
+  const candidates = get(response, "candidates");
+  if (!Array.isArray(candidates)) return false;
+  return candidates.some((candidate) => {
+    const parts = get(get(candidate, "content"), "parts");
+    if (!Array.isArray(parts)) return false;
+    return parts.some((part) => get(part, "functionCall") != null || get(part, "function_call") != null);
+  });
+}
+
+export function createGoogleBatchAdapter(
+  client: GoogleBatchCapableClient,
+): ProviderBatchAdapter {
+  return {
+    eligibility(request) {
+      if (request.stream === true) {
+        return { eligible: false, reason: "streaming requests are direct-only" };
+      }
+      return { eligible: true };
+    },
+
+    async submitOne(request) {
+      const { model, ...inlineRequest } = request as Record<string, unknown> & { model?: unknown };
+      if (typeof model !== "string" || model.trim().length === 0) {
+        throw new ProviderBatchError("google batch requests require a non-blank request.model");
+      }
+      const job = await client.batches.create({
+        model,
+        src: { inlinedRequests: [inlineRequest] },
+      });
+      const handle: BatchHandle = { providerBatchId: job.name };
+      return handle;
+    },
+
+    async poll(handle) {
+      const job = await client.batches.get({ name: handle.providerBatchId });
+      const state = job.state ?? job.metadata?.state ?? "";
+      return { status: GOOGLE_TERMINAL_STATUS[state] ?? "pending" };
+    },
+
+    async readResult(handle) {
+      const job = await client.batches.get({ name: handle.providerBatchId });
+      const entries = job.dest?.inlinedResponses;
+      // A single-item batch is unambiguous by construction: index 0 is
+      // "our" item, the same way a custom_id would be for the other
+      // providers — there is no cross-item confusion possible here.
+      const entry = entries?.[0];
+      if (!entry) {
+        throw new ProviderBatchError("google batch produced no inline response");
+      }
+      if (entry.error != null) {
+        // Never surface the provider's own error text — only that this
+        // one item failed.
+        throw new ProviderBatchError("google batch item returned an error response");
+      }
+      if (!entry.response) {
+        throw new ProviderBatchError("google batch item had no response body");
+      }
+      return { result: entry.response, containedToolCallPlan: hasFunctionCallPart(entry.response) };
+    },
+
+    async direct(request) {
+      const response = await client.models.generateContent(request);
+      return { result: response, containedToolCallPlan: hasFunctionCallPart(response) };
+    },
+  };
+}

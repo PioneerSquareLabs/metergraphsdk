@@ -23,11 +23,15 @@ import {
 } from "./deferred.js";
 import { ensureRepoConfig } from "./repo-config.js";
 import {
+  createAnthropicBatchAdapter,
+  createGoogleBatchAdapter,
   createOpenAIBatchAdapter,
+  type AnthropicBatchCapableClient,
   type BatchHandle,
   type BatchPollResult,
   type BatchPollStatus,
   type DeferredRequest,
+  type GoogleBatchCapableClient,
   type OpenAIBatchCapableClient,
   type ProviderBatchAdapter,
   type ProviderBatchEligibility,
@@ -289,7 +293,14 @@ export type {
  * (acceptDuplicateProviderExecution, and allowDuplicateToolCallPlans for
  * requests that include tools).
  */
-export { deferred, runDeferred, DeferredIneligibleError, createOpenAIBatchAdapter };
+export {
+  deferred,
+  runDeferred,
+  DeferredIneligibleError,
+  createOpenAIBatchAdapter,
+  createAnthropicBatchAdapter,
+  createGoogleBatchAdapter,
+};
 export type {
   DeferredClock,
   DeferredMetadata,
@@ -303,6 +314,8 @@ export type {
   BatchPollResult,
   BatchPollStatus,
   OpenAIBatchCapableClient,
+  AnthropicBatchCapableClient,
+  GoogleBatchCapableClient,
   ProviderBatchAdapter,
   ProviderBatchEligibility,
   ProviderBatchResult,

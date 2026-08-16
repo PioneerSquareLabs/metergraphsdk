@@ -337,3 +337,178 @@ test("deferred, runDeferred, DeferredIneligibleError, and createOpenAIBatchAdapt
   assert.equal(typeof PublicApi.createOpenAIBatchAdapter, "function");
   assert.equal(PublicApi.DeferredIneligibleError, DeferredIneligibleError);
 });
+
+test("deferred() resolves the Anthropic adapter from a duck-typed client and runs the same state machine", async () => {
+  let submittedCustomId;
+  const fakeClient = {
+    messages: {
+      async create() { throw new Error("direct must not be called when the batch completes in time"); },
+      batches: {
+        async create(params) {
+          submittedCustomId = params.requests[0].custom_id;
+          return { id: "batch_1", processing_status: "in_progress" };
+        },
+        async retrieve() {
+          return { id: "batch_1", processing_status: "ended", request_counts: { succeeded: 1 } };
+        },
+        results() {
+          return {
+            async *[Symbol.asyncIterator]() {
+              yield {
+                custom_id: submittedCustomId,
+                result: { type: "succeeded", message: { id: "msg_1", role: "assistant", content: [] } },
+              };
+            },
+          };
+        },
+      },
+    },
+  };
+
+  const outcome = await deferred(fakeClient, "anthropic", REQUEST, basePolicy({ deadlineMs: 2_000 }));
+  assert.equal(outcome.source, "batch");
+  assert.equal(outcome.result.id, "msg_1");
+});
+
+test("Anthropic: an item-level batch error falls back to direct exactly once and never rejects", async () => {
+  let directCalls = 0;
+  let submittedCustomId;
+  const fakeClient = {
+    messages: {
+      async create() {
+        directCalls += 1;
+        return { id: "msg_direct_1", role: "assistant", content: [] };
+      },
+      batches: {
+        async create(params) {
+          submittedCustomId = params.requests[0].custom_id;
+          return { id: "batch_1", processing_status: "in_progress" };
+        },
+        async retrieve() {
+          return { id: "batch_1", processing_status: "ended", request_counts: { errored: 1 } };
+        },
+        results() {
+          return {
+            async *[Symbol.asyncIterator]() {
+              yield {
+                custom_id: submittedCustomId,
+                result: { type: "errored", error: { type: "invalid_request", message: "leak-me-not" } },
+              };
+            },
+          };
+        },
+      },
+    },
+  };
+
+  const outcome = await deferred(fakeClient, "anthropic", REQUEST, basePolicy({ deadlineMs: 2_000 }));
+  assert.equal(outcome.source, "direct");
+  assert.equal(directCalls, 1);
+  assert.equal(outcome.metadata.batch_outcome, "failed");
+});
+
+test("Anthropic: a completed batch missing our custom_id in results() falls back to direct exactly once and never rejects", async () => {
+  let directCalls = 0;
+  const fakeClient = {
+    messages: {
+      async create() {
+        directCalls += 1;
+        return { id: "msg_direct_1", role: "assistant", content: [] };
+      },
+      batches: {
+        async create() { return { id: "batch_1", processing_status: "in_progress" }; },
+        async retrieve() {
+          return { id: "batch_1", processing_status: "ended", request_counts: { succeeded: 1 } };
+        },
+        results() {
+          return { async *[Symbol.asyncIterator]() { /* no matching item */ } };
+        },
+      },
+    },
+  };
+
+  const outcome = await deferred(fakeClient, "anthropic", REQUEST, basePolicy({ deadlineMs: 2_000 }));
+  assert.equal(outcome.source, "direct");
+  assert.equal(directCalls, 1);
+  assert.equal(outcome.metadata.batch_outcome, "failed");
+});
+
+test("deferred() resolves the Google adapter from a duck-typed client and runs the same state machine", async () => {
+  const GOOGLE_REQUEST = { model: "gemini-2.5-flash", contents: [{ role: "user", parts: [{ text: "hello" }] }] };
+  const fakeClient = {
+    models: {
+      async generateContent() { throw new Error("direct must not be called when the batch completes in time"); },
+    },
+    batches: {
+      async create() { return { name: "batches/batch_1", state: "JOB_STATE_PENDING" }; },
+      async get() {
+        return {
+          name: "batches/batch_1",
+          state: "JOB_STATE_SUCCEEDED",
+          dest: { inlinedResponses: [{ response: { candidates: [] } }] },
+        };
+      },
+    },
+  };
+
+  const outcome = await deferred(fakeClient, "google", GOOGLE_REQUEST, basePolicy({ deadlineMs: 2_000 }));
+  assert.equal(outcome.source, "batch");
+  assert.deepEqual(outcome.result, { candidates: [] });
+});
+
+test("Google: an item-level batch error falls back to direct exactly once and never rejects", async () => {
+  const GOOGLE_REQUEST = { model: "gemini-2.5-flash", contents: [{ role: "user", parts: [{ text: "hello" }] }] };
+  let directCalls = 0;
+  const fakeClient = {
+    models: {
+      async generateContent() {
+        directCalls += 1;
+        return { candidates: [] };
+      },
+    },
+    batches: {
+      async create() { return { name: "batches/batch_1", state: "JOB_STATE_PENDING" }; },
+      async get() {
+        return {
+          name: "batches/batch_1",
+          state: "JOB_STATE_SUCCEEDED",
+          dest: { inlinedResponses: [{ error: { code: 400, message: "leak-me-not" } }] },
+        };
+      },
+    },
+  };
+
+  const outcome = await deferred(fakeClient, "google", GOOGLE_REQUEST, basePolicy({ deadlineMs: 2_000 }));
+  assert.equal(outcome.source, "direct");
+  assert.equal(directCalls, 1);
+  assert.equal(outcome.metadata.batch_outcome, "failed");
+});
+
+test("Google: a completed batch with no inlined responses falls back to direct exactly once and never rejects", async () => {
+  const GOOGLE_REQUEST = { model: "gemini-2.5-flash", contents: [{ role: "user", parts: [{ text: "hello" }] }] };
+  let directCalls = 0;
+  const fakeClient = {
+    models: {
+      async generateContent() {
+        directCalls += 1;
+        return { candidates: [] };
+      },
+    },
+    batches: {
+      async create() { return { name: "batches/batch_1", state: "JOB_STATE_PENDING" }; },
+      async get() {
+        return { name: "batches/batch_1", state: "JOB_STATE_SUCCEEDED" };
+      },
+    },
+  };
+
+  const outcome = await deferred(fakeClient, "google", GOOGLE_REQUEST, basePolicy({ deadlineMs: 2_000 }));
+  assert.equal(outcome.source, "direct");
+  assert.equal(directCalls, 1);
+  assert.equal(outcome.metadata.batch_outcome, "failed");
+});
+
+test("createAnthropicBatchAdapter and createGoogleBatchAdapter are reachable from the package's public entry point", () => {
+  assert.equal(typeof PublicApi.createAnthropicBatchAdapter, "function");
+  assert.equal(typeof PublicApi.createGoogleBatchAdapter, "function");
+});
