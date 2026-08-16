@@ -8,4 +8,4 @@ import importlib.metadata
 try:
     SDK_VERSION = importlib.metadata.version("metergraph")
 except Exception:
-    SDK_VERSION = "0.4.0"
+    SDK_VERSION = "0.5.0"
