@@ -14,6 +14,26 @@ from ._capture import Options, Runtime, set_runtime
 from ._capture import wrap as _wrap
 from ._config import ConfigPoller
 from ._context import route, set_session, set_tags, snapshot, trace, wrap_executor
+from ._deferred import (
+    DeferredClock,
+    DeferredIneligibleError,
+    DeferredMetadata,
+    DeferredResult,
+    LateBatchInfo,
+    deferred,
+    run_deferred,
+)
+from ._provider_batch import (
+    BatchHandle,
+    BatchPollResult,
+    ProviderBatchAdapter,
+    ProviderBatchEligibility,
+    ProviderBatchError,
+    ProviderBatchResult,
+    create_anthropic_batch_adapter,
+    create_google_batch_adapter,
+    create_openai_batch_adapter,
+)
 from ._repo_config import ensure_repo_config
 from ._session import SessionManager
 from ._track import track
@@ -247,12 +267,28 @@ def shutdown() -> None:
 
 
 __all__ = [
+    "BatchHandle",
+    "BatchPollResult",
     "DEFAULT_INGEST_URL",
+    "DeferredClock",
+    "DeferredIneligibleError",
+    "DeferredMetadata",
+    "DeferredResult",
+    "LateBatchInfo",
+    "ProviderBatchAdapter",
+    "ProviderBatchEligibility",
+    "ProviderBatchError",
+    "ProviderBatchResult",
+    "create_anthropic_batch_adapter",
+    "create_google_batch_adapter",
+    "create_openai_batch_adapter",
+    "deferred",
     "flush",
     "init",
     "model_for",
     "record_outcome",
     "route",
+    "run_deferred",
     "set_session",
     "set_tags",
     "shutdown",
