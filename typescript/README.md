@@ -125,6 +125,43 @@ inference while iterating a wrapped `client.messages.batches.results()` result.
 Consume results inside `route()` so the asynchronous batch retains its product
 route. Job-management polls are deliberately not counted as model calls.
 
+## Deferred batch execution (opt-in)
+
+`deferred()` is a separate, explicitly opt-in code path from `wrap()`/capture: submit one request through a provider's Batch API, wait up to a caller-chosen deadline, and fall back to exactly one direct call if the batch hasn't finished in time.
+
+```ts
+import { deferred } from "metergraph";
+import OpenAI from "openai";
+
+const client = new OpenAI(); // unwrapped — deferred() drives it directly, not through wrap()
+
+const outcome = await deferred(
+  client,
+  "openai",
+  { model: "gpt-5-mini", input: "Summarize this document." },
+  {
+    deadlineMs: 60_000,
+    acceptDuplicateProviderExecution: true, // required: a missed deadline can execute the request twice
+    onLateBatchSettled: (info) => {
+      // Fires later, asynchronously, only if a losing batch eventually
+      // settles. Never blocks deferred()'s own return, and never exposes
+      // the late result's content — only whether it contained a
+      // tool-call plan.
+    },
+  },
+);
+
+outcome.source;                 // "batch" | "direct"
+outcome.result;                 // the provider response
+outcome.metadata.batch_outcome; // "completed" | "failed" | "expired" | "pending_at_deadline"
+```
+
+`provider` is `"openai" | "anthropic" | "google"`, matching `wrap()`'s own explicit-provider option — never inferred from the client instance. A request with `stream: true` is rejected before any provider call. A request carrying `tools` is rejected unless `allowDuplicateToolCallPlans: true` is also set, acknowledging that the batch result and the direct fallback are independent provider executions that may each choose a different tool-call plan. `acceptDuplicateProviderExecution` must be exactly `true` — there is no default and no environment-variable override, and a missed deadline can execute (and bill) the same request twice. Neither the batch nor the direct path executes a tool call automatically; the caller receives the tool-call plan in `outcome.result` and is responsible for executing it, exactly as with a normal (non-deferred) provider response.
+
+`deferred()` is not integrated with `wrap()`'s capture/telemetry pipeline; its result and metadata are returned directly to the caller, never enqueued for delivery. The background poll that watches a losing batch for late telemetry uses an ordinary `setTimeout`, not an unref'd one — after a deadline-triggered direct fallback it keeps the Node process alive until the batch reaches a terminal state, which can take up to 24 hours; this is currently unmitigated, so a short-lived script or CLI process should not assume it exits promptly after a fallback.
+
+OpenAI, Anthropic, and Google Gemini all have adapters (`createOpenAIBatchAdapter`, `createAnthropicBatchAdapter`, `createGoogleBatchAdapter`), built against each provider's documented Batch API shape and covered by fake-client contract tests, but **none has been exercised against a live provider Batch API from this SDK** — treat this as a beta-quality, code-reviewed-but-not-live-verified surface.
+
 ## Set up with an AI coding agent
 
 Paste this into Claude Code, Codex, Cursor, or any coding agent inside the
