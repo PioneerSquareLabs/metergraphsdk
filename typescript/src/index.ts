@@ -12,31 +12,15 @@ import {
 import {
   DeferredIneligibleError,
   deferred,
-  runDeferred,
-  type DeferredClock,
   type DeferredMetadata,
   type DeferredPolicy,
   type DeferredProvider,
+  type DeferredRequest,
   type DeferredResult,
   type DeferredSource,
   type LateBatchInfo,
 } from "./deferred.js";
 import { ensureRepoConfig } from "./repo-config.js";
-import {
-  createAnthropicBatchAdapter,
-  createGoogleBatchAdapter,
-  createOpenAIBatchAdapter,
-  type AnthropicBatchCapableClient,
-  type BatchHandle,
-  type BatchPollResult,
-  type BatchPollStatus,
-  type DeferredRequest,
-  type GoogleBatchCapableClient,
-  type OpenAIBatchCapableClient,
-  type ProviderBatchAdapter,
-  type ProviderBatchEligibility,
-  type ProviderBatchResult,
-} from "./provider-batch.js";
 import { SessionManager } from "./session.js";
 import { track } from "./track.js";
 import { Transport, type TransportMode, type WaitUntil } from "./transport.js";
@@ -293,16 +277,8 @@ export type {
  * (acceptDuplicateProviderExecution, and allowDuplicateToolCallPlans for
  * requests that include tools).
  */
-export {
-  deferred,
-  runDeferred,
-  DeferredIneligibleError,
-  createOpenAIBatchAdapter,
-  createAnthropicBatchAdapter,
-  createGoogleBatchAdapter,
-};
+export { deferred, DeferredIneligibleError };
 export type {
-  DeferredClock,
   DeferredMetadata,
   DeferredPolicy,
   DeferredProvider,
@@ -310,13 +286,4 @@ export type {
   DeferredResult,
   DeferredSource,
   LateBatchInfo,
-  BatchHandle,
-  BatchPollResult,
-  BatchPollStatus,
-  OpenAIBatchCapableClient,
-  AnthropicBatchCapableClient,
-  GoogleBatchCapableClient,
-  ProviderBatchAdapter,
-  ProviderBatchEligibility,
-  ProviderBatchResult,
 };

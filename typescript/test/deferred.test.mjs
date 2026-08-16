@@ -14,6 +14,12 @@ function basePolicy(overrides = {}) {
   return {
     deadlineMs: 200,
     acceptDuplicateProviderExecution: true,
+    ...overrides,
+  };
+}
+
+function baseControls(overrides = {}) {
+  return {
     pollIntervalMs: 10,
     ...overrides,
   };
@@ -72,7 +78,7 @@ function fakeAdapter({
 test("returns the batch result when it arrives before the deadline", async () => {
   const { adapter, batchResult } = fakeAdapter({ batchCompletesAfterMs: 60 });
 
-  const outcome = await runDeferred(adapter, REQUEST, basePolicy({ deadlineMs: 300 }));
+  const outcome = await runDeferred(adapter, REQUEST, basePolicy({ deadlineMs: 300 }), baseControls());
 
   assert.equal(outcome.source, "batch");
   assert.equal(outcome.result, batchResult);
@@ -88,7 +94,7 @@ test("sends exactly one direct fallback and never returns a late batch result", 
   // runDeferred() ever calls direct(), always reading back 0.
   const fixture = fakeAdapter({ batchCompletesAfterMs: 300, directDelayMs: 20 });
 
-  const outcome = await runDeferred(fixture.adapter, REQUEST, basePolicy({ deadlineMs: 200 }));
+  const outcome = await runDeferred(fixture.adapter, REQUEST, basePolicy({ deadlineMs: 200 }), baseControls());
 
   assert.equal(outcome.source, "direct");
   assert.equal(outcome.result, fixture.directResult);
@@ -118,7 +124,7 @@ test("onLateBatchSettled reports the late outcome without ever returning its con
   const outcome = await runDeferred(adapter, REQUEST, basePolicy({
     deadlineMs: 10, // fires long before the fake batch's 60ms completion
     onLateBatchSettled: (info) => { lateInfo = info; },
-  }));
+  }), baseControls());
 
   assert.equal(outcome.source, "direct");
   await delay(120); // give the background poll time to observe completion
@@ -129,7 +135,7 @@ test("a failed batch before the deadline falls back to direct immediately, not a
   const { adapter } = fakeAdapter({ batchCompletesAfterMs: 20, batchOutcome: "failed" });
   const startedAt = Date.now();
 
-  const outcome = await runDeferred(adapter, REQUEST, basePolicy({ deadlineMs: 5_000 }));
+  const outcome = await runDeferred(adapter, REQUEST, basePolicy({ deadlineMs: 5_000 }), baseControls());
 
   assert.equal(outcome.source, "direct");
   assert.equal(outcome.metadata.batch_outcome, "failed");
@@ -274,6 +280,7 @@ test("an injected fake clock drives the deadline deterministically, with no real
 
   const pending = runDeferred(adapter, REQUEST, basePolicy({
     deadlineMs: 999_999,
+  }), baseControls({
     pollIntervalMs: 500_000,
     clock,
   }));
@@ -327,14 +334,14 @@ test("deferred() resolves the OpenAI adapter from a duck-typed client and runs t
   assert.equal(outcome.result.id, "resp_1");
 });
 
-test("deferred, runDeferred, DeferredIneligibleError, and createOpenAIBatchAdapter are all reachable from the package's public entry point", () => {
+test("deferred and DeferredIneligibleError are reachable from the package's public entry point", () => {
   // The package.json "exports" field whitelists only ".", so anything not
   // re-exported from index.ts is unreachable by real consumers regardless
   // of what the internal modules export — this is the actual contract
-  // surface, not an implementation detail.
+  // surface, not an implementation detail. runDeferred and the adapter
+  // factories are internal-module exports only (see
+  // deferred-public-surface.test.mjs for the full root-export contract).
   assert.equal(typeof PublicApi.deferred, "function");
-  assert.equal(typeof PublicApi.runDeferred, "function");
-  assert.equal(typeof PublicApi.createOpenAIBatchAdapter, "function");
   assert.equal(PublicApi.DeferredIneligibleError, DeferredIneligibleError);
 });
 
@@ -506,9 +513,4 @@ test("Google: a completed batch with no inlined responses falls back to direct e
   assert.equal(outcome.source, "direct");
   assert.equal(directCalls, 1);
   assert.equal(outcome.metadata.batch_outcome, "failed");
-});
-
-test("createAnthropicBatchAdapter and createGoogleBatchAdapter are reachable from the package's public entry point", () => {
-  assert.equal(typeof PublicApi.createAnthropicBatchAdapter, "function");
-  assert.equal(typeof PublicApi.createGoogleBatchAdapter, "function");
 });

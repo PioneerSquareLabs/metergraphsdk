@@ -72,13 +72,19 @@ export interface DeferredPolicy {
    * before any provider call is made.
    */
   allowDuplicateToolCallPlans?: boolean;
+  /** Fired once, later, only when the losing batch eventually settles.
+   * Never blocks deferred()'s own return. */
+  onLateBatchSettled?: (info: LateBatchInfo) => void;
+}
+
+/** Non-public knobs for driving runDeferred()'s poll interval and time
+ * source from tests — deliberately kept off DeferredPolicy so a real
+ * caller of deferred() has no way to set them. */
+interface RunDeferredTestControls {
   /** How often to re-check batch status while waiting. Default 2000ms. */
   pollIntervalMs?: number;
   /** Injectable time source — see DeferredClock. */
   clock?: DeferredClock;
-  /** Fired once, later, only when the losing batch eventually settles.
-   * Never blocks deferred()'s own return. */
-  onLateBatchSettled?: (info: LateBatchInfo) => void;
 }
 
 export type DeferredSource = "batch" | "direct";
@@ -158,6 +164,7 @@ export async function runDeferred<TResult>(
   adapter: ProviderBatchAdapter<TResult>,
   request: DeferredRequest,
   policy: DeferredPolicy,
+  testControls?: RunDeferredTestControls,
 ): Promise<DeferredResult<TResult>> {
   validate(request, policy);
   const eligibility = adapter.eligibility(request);
@@ -167,8 +174,8 @@ export async function runDeferred<TResult>(
     );
   }
 
-  const clock = policy.clock ?? realClock();
-  const pollIntervalMs = policy.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+  const clock = testControls?.clock ?? realClock();
+  const pollIntervalMs = testControls?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const startedAt = Date.now();
 
   const handle = await adapter.submitOne(request);

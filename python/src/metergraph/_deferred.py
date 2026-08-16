@@ -308,13 +308,12 @@ def deferred(
     deadline_seconds: float,
     accept_duplicate_provider_execution: bool,
     allow_duplicate_tool_call_plans: bool = False,
-    poll_interval_seconds: float = _DEFAULT_POLL_INTERVAL_SECONDS,
-    clock: DeferredClock | None = None,
     on_late_batch_settled: Callable[[LateBatchInfo], None] | None = None,
 ) -> DeferredResult:
     """Explicit, provider-specific deferred execution. Never inferred from
     the client instance — the caller states the provider, matching wrap()'s
-    own explicit-provider option."""
+    own explicit-provider option. Polling interval and time source are
+    test-only controls on run_deferred(), not public here."""
     adapter = _resolve_adapter(client, provider)
     return run_deferred(
         adapter,
@@ -322,7 +321,5 @@ def deferred(
         deadline_seconds=deadline_seconds,
         accept_duplicate_provider_execution=accept_duplicate_provider_execution,
         allow_duplicate_tool_call_plans=allow_duplicate_tool_call_plans,
-        poll_interval_seconds=poll_interval_seconds,
-        clock=clock,
         on_late_batch_settled=on_late_batch_settled,
     )

@@ -588,9 +588,8 @@ def test_google_no_inlined_responses_falls_back_to_direct_once_never_raises():
 
 
 def test_public_api_exports():
+    # run_deferred and the adapter factories are internal-module imports
+    # only — see test_public_api_surface.py for the full root-export
+    # contract.
     assert callable(metergraph.deferred)
-    assert callable(metergraph.run_deferred)
-    assert callable(metergraph.create_openai_batch_adapter)
-    assert callable(metergraph.create_anthropic_batch_adapter)
-    assert callable(metergraph.create_google_batch_adapter)
     assert metergraph.DeferredIneligibleError is DeferredIneligibleError
