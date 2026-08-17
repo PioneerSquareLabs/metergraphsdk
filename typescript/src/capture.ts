@@ -455,11 +455,9 @@ function responseEnvelope(
 }
 
 const SDK_DIR = (() => {
-  try {
-    return new URL(".", import.meta.url).pathname;
-  } catch {
-    return "metergraph-sdk-dir-unavailable";
-  }
+  const frame = new Error().stack?.split("\n")[1] ?? "";
+  const match = frame.match(/^\s*at\s+(?:.*?\s+\()?(.+?)[/\\][^/\\:]+:\d+:\d+\)?$/);
+  return match?.[1]?.replace(/^file:\/\//, "") ?? "metergraph-sdk-dir-unavailable";
 })();
 
 function frames(stack: string | undefined, appRoot: string, skip: string[], repoRoot?: string): Frame[] {

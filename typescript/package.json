@@ -4,16 +4,19 @@
   "description": "Fire-and-forget LLM spend capture for Metergraph",
   "type": "module",
   "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js",
+      "default": "./dist/index.mjs"
     }
   },
   "files": ["dist", "README.md"],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node scripts/prepare-build.mjs && tsc -p tsconfig.json && node scripts/finish-build.mjs",
     "prepack": "npm run build",
     "test": "npm run build && npm run test:types && node --test test/*.test.mjs",
     "test:types": "tsc --noEmit --strict --skipLibCheck --target ES2022 --module NodeNext --moduleResolution NodeNext test/ai-sdk-current.types.ts"
