@@ -148,7 +148,6 @@ def main() -> None:
             sys.executable,
             "-m",
             "build",
-            "--no-isolation",
             "--outdir",
             str(dist),
             str(PACKAGE_ROOT),
