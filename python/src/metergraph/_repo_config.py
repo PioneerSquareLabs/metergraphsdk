@@ -1,4 +1,4 @@
-"""Repository-aware ingest protocol v2: discover, detect, and write
+"""SDK 0.4+ repository-aware ingestion: discover, detect, and write
 .metergraph/config.json.
 
 Discovery is purely file-based (never shells out to git), so a committed
@@ -7,7 +7,7 @@ Detection + write only ever runs when discovery finds nothing: it shells out
 to git to find the repo's top level and GitHub origin, then writes the config
 there exactly once. An existing file is always authoritative and is never
 overwritten. Every failure mode here is fail-open -- callers get None and
-fall back to legacy protocol v1, never an exception.
+fall back to app-token ingestion, never an exception.
 """
 
 from __future__ import annotations
@@ -145,7 +145,7 @@ def _write_config_atomically(repo_root: str, repository: str) -> RepoConfig | No
 def ensure_repo_config(app_root: str) -> RepoConfig | None:
     """Discover an existing repo config, or detect+write one once at the
     git top level. Fail-open: any detection or write failure returns None
-    (legacy protocol v1), never raises."""
+    (app-token ingestion), never raises."""
     existing = discover_repo_config(app_root)
     if existing is not None:
         return existing
