@@ -1,5 +1,5 @@
 /**
- * Repository-aware ingest protocol v2: discover, detect, and write
+ * SDK 0.4+ repository-aware ingestion: discover, detect, and write
  * .metergraph/config.json.
  *
  * Discovery is purely file-based (never shells out to git), so a committed
@@ -8,7 +8,7 @@
  * out to git to find the repo's top level and GitHub origin, then writes the
  * config there exactly once. An existing file is always authoritative and is
  * never overwritten. Every failure mode here is fail-open -- callers get
- * undefined and fall back to legacy protocol v1, never a thrown error.
+ * undefined and fall back to app-token ingestion, never a thrown error.
  */
 import { closeSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, writeSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -193,7 +193,7 @@ export function writeConfigAtomically(repoRoot: string, repository: string): Rep
 
 /** Discover an existing repo config, or detect+write one once at the git top
  * level. Fail-open: any detection or write failure returns undefined
- * (legacy protocol v1), never throws. */
+ * (app-token ingestion), never throws. */
 export function ensureRepoConfig(appRoot: string): RepoConfig | undefined {
   const existing = discoverRepoConfig(appRoot);
   if (existing) return existing;

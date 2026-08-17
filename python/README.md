@@ -69,8 +69,8 @@ first `init()` in a Git checkout, it reads the `origin` remote and creates
 `.metergraph/config.json` at the repository root if that file is absent.
 Commit this non-secret file so production can use repository-aware ingest
 without Git metadata. An existing file is authoritative and is never changed
-by the SDK. If discovery or creation is unavailable, ingest remains compatible
-with protocol v1.
+by the SDK. If discovery or creation is unavailable, the SDK falls back to
+direct app-token ingestion for compatibility with older collectors.
 
 Delivery is bounded and off the request path. Queue overflow or a collector
 outage drops capture and increments internal counters; it never changes the

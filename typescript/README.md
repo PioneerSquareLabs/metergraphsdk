@@ -91,7 +91,8 @@ first initialization and creates `.metergraph/config.json` at the repository
 root if absent. Commit this non-secret file so production can use
 repository-aware ingest without Git metadata. Existing config is authoritative
 and never overwritten; when discovery or creation is unavailable, the SDK
-continues with protocol v1. SDK 0.4 captures the scrubbed provider request and a
+falls back to direct app-token ingestion for compatibility with older
+collectors. SDK 0.4 captures the scrubbed provider request and a
 normalized response envelope, including assistant content and tool calls, by
 default. Provider credentials and transport headers are removed. Request and
 response are each limited to 100 KiB of UTF-8 with an explicit truncation

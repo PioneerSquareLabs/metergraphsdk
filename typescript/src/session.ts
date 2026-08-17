@@ -1,5 +1,5 @@
 /**
- * Repository-aware ingest protocol v2: app-token -> session-token exchange.
+ * SDK 0.4+ repository-aware ingestion: app-token -> session-token exchange.
  *
  * The app token is sent only on POST /v1/ingest/sessions. The resulting
  * session token is cached in memory and reused until it's within
