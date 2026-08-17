@@ -20,7 +20,7 @@ Repository = "https://github.com/PioneerSquareLabs/metergraphsdk"
 Issues = "https://github.com/PioneerSquareLabs/metergraphsdk/issues"
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "openai>=2.50.0", "anthropic>=0.40", "google-genai>=1"]
+dev = ["build>=1", "pytest>=8", "openai>=2.50.0", "anthropic>=0.40", "google-genai>=1"]
 
 [build-system]
 requires = ["setuptools>=68"]

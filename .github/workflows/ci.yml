@@ -18,6 +18,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: pip install -e "python[dev]"
       - run: pytest python/tests -q
+      - run: python python/tests/package/verify_artifacts.py
 
   typescript:
     runs-on: ubuntu-latest
@@ -32,6 +33,8 @@ jobs:
       - run: npm install
         working-directory: typescript
       - run: npm test
+        working-directory: typescript
+      - run: npm run test:package
         working-directory: typescript
 
   typescript-ai-sdk:

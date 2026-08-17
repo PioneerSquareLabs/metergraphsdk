@@ -17,6 +17,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install build && python -m build python
+      - run: python python/tests/package/verify_artifacts.py --dist python/dist
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: python/dist

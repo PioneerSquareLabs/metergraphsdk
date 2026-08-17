@@ -18,7 +18,9 @@
   "scripts": {
     "build": "node scripts/prepare-build.mjs && tsc -p tsconfig.json && node scripts/finish-build.mjs",
     "prepack": "npm run build",
+    "prepublishOnly": "npm test && npm run test:package",
     "test": "npm run build && npm run test:types && node --test test/*.test.mjs",
+    "test:package": "npm run build && node --test test/package/packed-package.test.mjs",
     "test:types": "tsc --noEmit --strict --skipLibCheck --target ES2022 --module NodeNext --moduleResolution NodeNext test/ai-sdk-current.types.ts"
   },
   "engines": {
