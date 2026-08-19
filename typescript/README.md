@@ -8,6 +8,10 @@ public-package qualification contract.
 Initialize Metergraph once, then wrap each provider client. `init()` reads the
 token and other omitted options from the environment.
 
+Initialization is process-wide. The first `init()` configuration remains
+active; later explicit calls are ignored and produce one generic warning
+without option names, token values, or other secrets.
+
 ```ts
 import { init, wrap, route, trace, modelFor, recordOutcome, setSession } from "metergraph";
 import OpenAI from "openai";
