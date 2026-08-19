@@ -21,7 +21,9 @@ outcome = metergraph.batch_first(
     client,
     "openai",
     request,
-    deadline_seconds=60,
+    deadline_seconds=10 * 60,
+    # Required: after the deadline, the direct fallback and original batch
+    # may both complete and be billed.
     accept_duplicate_provider_execution=True,
 )
 
