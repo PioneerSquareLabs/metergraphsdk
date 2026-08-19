@@ -49,11 +49,9 @@ import { generateText, wrapLanguageModel } from "ai";
 import { openai } from "@ai-sdk/openai";
 import * as mg from "metergraph";
 
-mg.init({ repository: "owner/repository" });
-
 const model = wrapLanguageModel({
   model: openai("gpt-5.6-luna"),
-  middleware: mg.vercelAISDKMiddleware(),
+  middleware: mg.vercelAISDKMiddleware({ repository: "owner/repository" }),
 });
 
 const result = await mg.trace("support-answer", () =>
@@ -70,6 +68,13 @@ such as `anthropic/claude-sonnet-5` are attributed to their upstream provider
 for server-side pricing. Provider options, abort signals, and transport headers
 are never serialized. Calls outside `trace()` remain valid one-span traces;
 wrap a multi-call workflow in `trace()` to group its spans.
+
+`vercelAISDKMiddleware()` initializes Metergraph itself, so the standard
+integration needs only the middleware call. Pass any `init()` options there,
+as shown above, or omit them when configuration comes from environment
+variables. Applications that initialize Metergraph centrally may continue to
+call `init()` first and then create the middleware without initialization
+options.
 
 | Vercel AI SDK | Metergraph middleware | Node.js |
 |---|---|---|

@@ -189,7 +189,7 @@ import { openai } from "@ai-sdk/openai";
 
 const model = wrapLanguageModel({
   model: openai("gpt-5.6-luna"),
-  middleware: mg.vercelAISDKMiddleware(),
+  middleware: mg.vercelAISDKMiddleware({ repository: "owner/repository" }),
 });
 
 await mg.trace("support-answer", () =>
@@ -210,6 +210,8 @@ const model = wrapLanguageModel({
 
 Each provider request in a multi-step AI SDK tool loop becomes its own costed
 span. Provider options and transport headers are excluded from capture.
+The middleware initializes Metergraph itself; pass `init()` options to it as
+shown above, or call `mg.init()` first in applications with centralized setup.
 
 | Vercel AI SDK | Metergraph middleware | Node.js |
 |---|---|---|

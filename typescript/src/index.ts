@@ -30,7 +30,7 @@ import { setCaptureRuntime, wrap as wrapProvider } from "./wrap.js";
 import {
   createVercelAISDKMiddleware,
   type VercelAISDKMiddleware,
-  type VercelAISDKMiddlewareOptions,
+  type VercelAISDKMiddlewareOptions as VercelAISDKCompatibilityOptions,
   type VercelAISDKMiddlewareSpecificationOptions,
   type VercelAISDKMiddlewareVersionOptions,
   type VercelAISDKSpecificationVersion,
@@ -53,6 +53,10 @@ export interface MetergraphOptions {
   configPollMs?: number;
   configHardTtlMs?: number;
 }
+
+export type VercelAISDKMiddlewareOptions<
+  TVersion extends VercelAISDKSpecificationVersion = "v3",
+> = MetergraphOptions & VercelAISDKCompatibilityOptions<TVersion>;
 
 export interface ModelForOptions {
   default: string;
@@ -274,20 +278,21 @@ export const wrapClient = wrap;
 
 /**
  * Capture Vercel AI SDK language-model calls through its middleware API.
- * The returned middleware has no runtime dependency on `ai`.
+ * Initializes Metergraph from these options when no runtime exists. The
+ * returned middleware has no runtime dependency on `ai`.
  */
 export function vercelAISDKMiddleware(
-  options: VercelAISDKMiddlewareVersionOptions,
+  options: MetergraphOptions & VercelAISDKMiddlewareVersionOptions,
 ): VercelAISDKMiddleware<"v2">;
 export function vercelAISDKMiddleware<
   TVersion extends VercelAISDKSpecificationVersion = "v3",
 >(
-  options?: VercelAISDKMiddlewareSpecificationOptions<TVersion>,
+  options?: MetergraphOptions & VercelAISDKMiddlewareSpecificationOptions<TVersion>,
 ): VercelAISDKMiddleware<TVersion>;
 export function vercelAISDKMiddleware(
   options: VercelAISDKMiddlewareOptions<any> = {},
 ): VercelAISDKMiddleware<any> {
-  if (!initialized) init();
+  if (!initialized) init(options);
   return createVercelAISDKMiddleware(options as any);
 }
 
@@ -297,7 +302,6 @@ export type {
   TraceOptions,
   TransportMode,
   VercelAISDKMiddleware,
-  VercelAISDKMiddlewareOptions,
   VercelAISDKSpecificationVersion,
 };
 

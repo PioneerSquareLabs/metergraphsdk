@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { init, shutdown, wrap } from "../dist/index.js";
+import { init, shutdown, vercelAISDKMiddleware, wrap } from "../dist/index.js";
 
 test("repeated explicit init warns once without configuration details", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "metergraph-init-diagnostics-"));
@@ -27,6 +27,7 @@ test("repeated explicit init warns once without configuration details", async (t
   init({ ...initial, token: "secret-conflict", repository: "other/widgets", environment: "prod" });
   init({ ...initial, token: "secret-third", repository: "third/widgets" });
   wrap({ chat: { completions: { create() {} } } }, "openai");
+  vercelAISDKMiddleware();
 
   const repeatedInitWarnings = warnings.filter((message) => message.includes("called more than once"));
   assert.deepEqual(repeatedInitWarnings, [
