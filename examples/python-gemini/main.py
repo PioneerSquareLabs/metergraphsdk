@@ -1,7 +1,7 @@
 import metergraph
 from google import genai
 
-metergraph.init(environment="example")
+metergraph.init(repository="owner/repository", environment="example")
 client = metergraph.wrap(genai.Client())
 
 

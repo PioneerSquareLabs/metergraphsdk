@@ -41,9 +41,10 @@ that made the call. Set METERGRAPH_CAPTURE_TEXT=0 for metadata-only capture.
    is silently off without it), and METERGRAPH_INGEST_URL is only needed when
    self-hosting the server from https://github.com/PioneerSquareLabs/metergraph.
    Add both to .env.example or the deployment config; never commit a real
-   token. On first initialization, SDK 0.4 creates the non-secret
-   `.metergraph/config.json` from the GitHub `origin` when absent. Commit that
-   file so deployed code retains repository identity without `.git` metadata.
+   token. Configure repository identity explicitly in `init({ repository:
+   "owner/repository" })` / `init(repository="owner/repository")`, or set
+   `METERGRAPH_REPOSITORY`. An existing `.metergraph/config.json` is also read,
+   but the SDK never creates or changes it.
 4. Attribution:
    - Python: automatic via stack walk. Optionally decorate key LLM-calling
      functions with @metergraph.track to pin a stable name.
@@ -77,6 +78,8 @@ Setup is one line per client. `wrap()` reads `METERGRAPH_APP_TOKEN` from the env
 ```python
 import metergraph
 
+metergraph.init(repository="owner/repository")
+
 # OpenAI
 from openai import OpenAI
 openai_client = metergraph.wrap(OpenAI())
@@ -97,7 +100,10 @@ prefix for catalog pricing:
 
 ```python
 import os
+import metergraph
 from openai import OpenAI
+
+metergraph.init(repository="owner/repository")
 
 gateway = metergraph.wrap(OpenAI(
     api_key=os.getenv("AI_GATEWAY_API_KEY") or os.getenv("VERCEL_OIDC_TOKEN"),
@@ -140,6 +146,8 @@ The same one-line setup applies; `wrap()` initializes from the environment:
 ```ts
 import * as mg from "metergraph";
 
+mg.init({ repository: "owner/repository" });
+
 // OpenAI
 import OpenAI from "openai";
 const openai = mg.wrap(new OpenAI());
@@ -159,7 +167,7 @@ const summarizeInvoice = mg.track("billing.summarize_invoice", async (invoice) =
 });
 ```
 
-In TypeScript, use `track()` for attribution. It stays reliable across bundlers and minifiers, where stack parsing does not. Provider SDKs and the Vercel AI SDK are optional peer dependencies, and Metergraph itself has no runtime dependencies. To configure in code, call `mg.init({ token, ... })` before the first `wrap()`.
+In TypeScript, use `track()` for attribution. It stays reliable across bundlers and minifiers, where stack parsing does not. Provider SDKs and the Vercel AI SDK are optional peer dependencies, and Metergraph itself has no runtime dependencies. To configure in code, call `mg.init({ repository: "owner/repository", token, ... })` before the first `wrap()`.
 
 Use `await mg.trace("checkout", async () => { ... })` to group multiple calls,
 and pass `{ captureText: false }` for a metadata-only operation.

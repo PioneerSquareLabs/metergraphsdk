@@ -10,6 +10,7 @@ options in code.
 import metergraph
 from openai import OpenAI
 
+metergraph.init(repository="owner/repository")
 # Anthropic() and google-genai's genai.Client() wrap the same way.
 client = metergraph.wrap(OpenAI())
 metergraph.set_session("ticket-123")
@@ -60,17 +61,21 @@ Configuration:
 
 - `METERGRAPH_APP_TOKEN` — required bearer token
 - `METERGRAPH_INGEST_URL` — optional override; defaults to the hosted HTTPS endpoint
+- `METERGRAPH_REPOSITORY` — optional `owner/repository` identity
 - `METERGRAPH_CAPTURE_TEXT=0` — opt out of content capture globally
 - `METERGRAPH_DISABLED=1` — process kill switch
 - `METERGRAPH_QUEUE_SIZE`, `METERGRAPH_BATCH_SIZE`, `METERGRAPH_FLUSH_SECONDS`
 
-SDK 0.4 associates traces with their GitHub repository automatically. On the
-first `init()` in a Git checkout, it reads the `origin` remote and creates
-`.metergraph/config.json` at the repository root if that file is absent.
-Commit this non-secret file so production can use repository-aware ingest
-without Git metadata. An existing file is authoritative and is never changed
-by the SDK. If discovery or creation is unavailable, the SDK falls back to
-direct app-token ingestion for compatibility with older collectors.
+Configure repository identity with
+`metergraph.init(repository="owner/repository")`. Alternatively set
+`METERGRAPH_REPOSITORY`, or manually provide the optional non-secret
+`.metergraph/config.json` containing
+`{"version":2,"repository":"owner/repository"}`. Resolution order is the
+explicit option, environment variable, then existing file. The SDK only reads
+that file; it never creates or changes it. Without repository identity it warns
+once and continues legacy app-token ingestion where supported. Customers
+upgrading from SDK 0.4 or 0.5 who relied on automatic Git-origin detection must
+choose one of these three sources.
 
 Delivery is bounded and off the request path. Queue overflow or a collector
 outage drops capture and increments internal counters; it never changes the

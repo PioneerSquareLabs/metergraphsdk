@@ -10,9 +10,10 @@ client; call `init(...)` before the first `wrap()` only to pass options in
 code.
 
 ```ts
-import { wrap, route, trace, modelFor, recordOutcome, setSession } from "metergraph";
+import { init, wrap, route, trace, modelFor, recordOutcome, setSession } from "metergraph";
 import OpenAI from "openai";
 
+init({ repository: "owner/repository" });
 // new Anthropic() and new GoogleGenAI({}) wrap the same way.
 const client = wrap(new OpenAI());
 setSession("ticket-123");
@@ -86,13 +87,20 @@ required and throws if missing so a caller error surfaces immediately
 instead of an `undefined` model reaching a provider call.
 
 Set `METERGRAPH_APP_TOKEN`; `METERGRAPH_INGEST_URL` is only needed to override
-the hosted HTTPS endpoint. SDK 0.4 automatically reads the GitHub `origin` on
-first initialization and creates `.metergraph/config.json` at the repository
-root if absent. Commit this non-secret file so production can use
-repository-aware ingest without Git metadata. Existing config is authoritative
-and never overwritten; when discovery or creation is unavailable, the SDK
-falls back to direct app-token ingestion for compatibility with older
-collectors. SDK 0.4 captures the scrubbed provider request and a
+the hosted HTTPS endpoint. Configure repository identity explicitly:
+
+```ts
+mg.init({ repository: "owner/repository" });
+```
+
+Alternatively set `METERGRAPH_REPOSITORY`, or manually provide the optional
+non-secret `.metergraph/config.json` containing
+`{"version":2,"repository":"owner/repository"}`. Resolution order is the
+explicit option, environment variable, then existing file. The SDK only reads
+that file; it never creates or changes it. Without repository identity it warns
+once and continues legacy app-token ingestion where supported. Customers
+upgrading from SDK 0.4 or 0.5 who relied on automatic Git-origin detection must
+choose one of these three sources. SDK 0.4 captures the scrubbed provider request and a
 normalized response envelope, including assistant content and tool calls, by
 default. Provider credentials and transport headers are removed. Request and
 response are each limited to 100 KiB of UTF-8 with an explicit truncation

@@ -21,7 +21,7 @@ from ._batch_first import (
     LateBatchInfo,
     batch_first,
 )
-from ._repo_config import ensure_repo_config
+from ._repo_config import RepoConfig, discover_repo_config
 from ._session import SessionManager
 from ._track import track
 from ._transport import Writer
@@ -36,6 +36,7 @@ _config: ConfigPoller | None = None
 _session_manager: SessionManager | None = None
 _initialized = False
 _warned_no_token = False
+_warned_no_repository = False
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -52,12 +53,13 @@ def init(
     capture_text: bool | None = None,
     redact: Callable[[str, str], str] | None = None,
     app_root: str | None = None,
+    repository: str | None = None,
     skip_frames: list[str] | None = None,
     environment: str | None = None,
     disabled: bool | None = None,
 ) -> None:
     """Initialize capture. This function is idempotent and never raises."""
-    global _initialized, _warned_no_token, _writer, _config, _session_manager
+    global _initialized, _warned_no_token, _warned_no_repository, _writer, _config, _session_manager
     if _initialized:
         return
     if os.getenv("METERGRAPH_DISABLED") == "1" or disabled:
@@ -76,7 +78,20 @@ def init(
     _initialized = True
     try:
         app_root_resolved = os.path.realpath(app_root or os.getcwd())
-        repo_config = ensure_repo_config(app_root_resolved)
+        repository_value = repository or os.getenv("METERGRAPH_REPOSITORY")
+        repo_config = (
+            RepoConfig(repository_value.strip(), app_root_resolved)
+            if isinstance(repository_value, str)
+            and "/" in repository_value.strip()
+            else discover_repo_config(app_root_resolved)
+        )
+        if repo_config is None and not _warned_no_repository:
+            _warned_no_repository = True
+            log.warning(
+                "Metergraph repository identity is not configured; set "
+                "init(repository='owner/repository'), METERGRAPH_REPOSITORY, "
+                "or provide .metergraph/config.json. Continuing with legacy ingestion."
+            )
         session = (
             SessionManager(
                 token,
