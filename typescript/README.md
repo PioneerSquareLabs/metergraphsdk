@@ -93,15 +93,19 @@ the hosted HTTPS endpoint. Configure repository identity explicitly:
 mg.init({ repository: "owner/repository" });
 ```
 
-Alternatively set `METERGRAPH_REPOSITORY` (used by [MeterGraph Bot](https://github.com/apps/metergraph)), or manually provide the optional
-non-secret `.metergraph/config.json` containing
-`{"repository":"owner/repository"}`. The optional `version` field defaults to
-`2`. Resolution order is the
-explicit option, environment variable, then existing file. The SDK only reads
-that file; it never creates or changes it. Without repository identity it warns
-once and continues legacy app-token ingestion where supported. Customers
-upgrading from SDK 0.4 or 0.5 who relied on automatic Git-origin detection must
-choose one of these three sources. SDK 0.4 captures the scrubbed provider request and a
+Alternatively set `METERGRAPH_REPOSITORY` (used by
+[MeterGraph Bot](https://github.com/apps/metergraph)). To keep the identity with
+the source code, create the optional non-secret `.metergraph/config.json` file:
+
+```json
+{"repository":"owner/repository"}
+```
+
+The optional `version` field defaults to `2`. Resolution order is the explicit
+option, environment variable, then configuration file. The SDK treats the file
+as read-only. Without repository identity, it warns once and continues capture
+without repository attribution where the collector accepts app-token ingestion.
+Metergraph captures the scrubbed provider request and a
 normalized response envelope, including assistant content and tool calls, by
 default. Provider credentials and transport headers are removed. Request and
 response are each limited to 100 KiB of UTF-8 with an explicit truncation

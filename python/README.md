@@ -68,14 +68,17 @@ Configuration:
 
 Configure repository identity with
 `metergraph.init(repository="owner/repository")`. Alternatively set
-`METERGRAPH_REPOSITORY`, or manually provide the optional non-secret
-`.metergraph/config.json` containing `{"repository":"owner/repository"}`. The
-optional `version` field defaults to `2`. Resolution order is the
-explicit option, environment variable, then existing file. The SDK only reads
-that file; it never creates or changes it. Without repository identity it warns
-once and continues legacy app-token ingestion where supported. Customers
-upgrading from SDK 0.4 or 0.5 who relied on automatic Git-origin detection must
-choose one of these three sources.
+`METERGRAPH_REPOSITORY`. To keep the identity with the source code, create the
+optional non-secret `.metergraph/config.json` file:
+
+```json
+{"repository":"owner/repository"}
+```
+
+The optional `version` field defaults to `2`. Resolution order is the explicit
+option, environment variable, then configuration file. The SDK treats the file
+as read-only. Without repository identity, it warns once and continues capture
+without repository attribution where the collector accepts app-token ingestion.
 
 Delivery is bounded and off the request path. Queue overflow or a collector
 outage drops capture and increments internal counters; it never changes the
