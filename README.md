@@ -212,6 +212,10 @@ Each provider request in a multi-step AI SDK tool loop becomes its own costed
 span. Provider options and transport headers are excluded from capture.
 The middleware initializes Metergraph itself; pass `init()` options to it as
 shown above, or call `mg.init()` first in applications with centralized setup.
+For multi-provider applications, use the [examples chooser](examples/README.md)
+to select the provider-registry pattern or instrument a custom factory that
+your application already has. Each example clearly marks original application
+code versus MeterGraph additions.
 
 For concurrent Node workers, bind request identity to a callback instead of
 mutable process state:
