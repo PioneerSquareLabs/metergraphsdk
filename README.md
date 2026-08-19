@@ -97,14 +97,14 @@ from google import genai
 gemini_client = metergraph.wrap(genai.Client())
 ```
 
-Initialization is process-wide in both SDKs. The first `init()` configuration
+Initialization is process-wide. The first `init()` configuration
 remains active; later explicit calls are ignored and produce one generic
 warning without option names, token values, or other secrets.
 
-Vercel's Python integration is AI Gateway through the official OpenAI or
-Anthropic client (the `ai` middleware package itself is TypeScript). Metergraph
-detects the public gateway URL automatically and uses the `creator/model`
-prefix for catalog pricing:
+For Python applications using Vercel AI Gateway, configure the official
+OpenAI or Anthropic client with the Gateway URL and wrap that client.
+Metergraph detects the public Gateway URL automatically and uses the
+`creator/model` prefix for catalog pricing:
 
 ```python
 import os
@@ -141,6 +141,23 @@ Attribution is automatic in Python: the SDK walks the stack to the nearest appli
 Use `with metergraph.trace("checkout"):` or the equivalent decorator to group
 multiple provider calls. Set `capture_text=False` on `init()`, `route()`, or
 `trace()` when an operation must remain metadata-only.
+
+For concurrent requests, background jobs, or reused workers, keep session and
+tag identity inside a bounded context:
+
+```python
+with metergraph.context(
+    session_id=run_id,
+    tags={"customer": customer_id},
+):
+    run_job()
+```
+
+Context follows async work started inside the `with` block and is restored
+when the block exits. `metergraph.session()` and `metergraph.tags()` provide
+narrower scopes, and `metergraph.set_default_tags()` sets process-wide service
+metadata. See the [Python SDK guide](python/README.md) for nesting, legacy
+setter behavior, and the complete configuration reference.
 
 ## TypeScript / JavaScript
 

@@ -13,7 +13,18 @@ from typing import Any, Callable
 from ._capture import Options, Runtime, set_runtime
 from ._capture import wrap as _wrap
 from ._config import ConfigPoller
-from ._context import route, set_session, set_tags, snapshot, trace, wrap_executor
+from ._context import (
+    context,
+    route,
+    session,
+    set_default_tags,
+    set_session,
+    set_tags,
+    snapshot,
+    tags,
+    trace,
+    wrap_executor,
+)
 from ._batch_first import (
     BatchFirstIneligibleError,
     BatchFirstMetadata,
@@ -290,14 +301,18 @@ __all__ = [
     "BatchFirstResult",
     "LateBatchInfo",
     "batch_first",
+    "context",
     "flush",
     "init",
     "model_for",
     "record_outcome",
     "route",
+    "session",
+    "set_default_tags",
     "set_session",
     "set_tags",
     "shutdown",
+    "tags",
     "track",
     "trace",
     "wrap",

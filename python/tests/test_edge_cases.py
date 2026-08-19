@@ -525,8 +525,7 @@ def test_wrapped_executor_propagates_submission_context_and_is_idempotent():
 def test_record_outcome_rejects_nonfinite_and_noninteger_values(monkeypatch, field, value):
     rows = Rows()
     monkeypatch.setattr(metergraph, "_writer", rows)
-    metergraph.set_session("edge-session")
-    try:
+    with metergraph.session("edge-session"):
         assert metergraph.record_outcome(
             "route",
             model="model",
@@ -534,8 +533,6 @@ def test_record_outcome_rejects_nonfinite_and_noninteger_values(monkeypatch, fie
             **{field: value},
         ) is False
         assert rows.rows == []
-    finally:
-        metergraph.set_session(None)
 
 
 def test_record_outcome_accepts_all_documented_boundaries(monkeypatch):

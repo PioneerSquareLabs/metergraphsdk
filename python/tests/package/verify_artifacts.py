@@ -74,7 +74,8 @@ import sys
 import metergraph
 
 required = {
-    "init", "wrap", "route", "trace", "set_session", "set_tags",
+    "init", "wrap", "route", "trace", "context", "session", "tags",
+    "set_default_tags", "set_session", "set_tags",
     "flush", "shutdown", "model_for", "record_outcome", "batch_first",
 }
 assert required <= set(metergraph.__all__)

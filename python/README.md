@@ -16,12 +16,15 @@ from openai import OpenAI
 metergraph.init(repository="owner/repository")
 # Anthropic() and google-genai's genai.Client() wrap the same way.
 client = metergraph.wrap(OpenAI())
-metergraph.set_session("ticket-123")
 
-with metergraph.trace("ticket-workflow"):
-    with metergraph.route("ticket-classifier", unit="answer"):
-        model = metergraph.model_for("ticket-classifier", default="gpt-4.1-mini")
-        client.chat.completions.create(model=model, messages=[...])
+with metergraph.context(
+    session_id="ticket-123",
+    tags={"customer": "acme"},
+):
+    with metergraph.trace("ticket-workflow"):
+        with metergraph.route("ticket-classifier", unit="answer"):
+            model = metergraph.model_for("ticket-classifier", default="gpt-4.1-mini")
+            client.chat.completions.create(model=model, messages=[...])
 
 # Emit this after the user-visible task resolves. It shares the bounded async
 # transport and contains no prompt or output content.
@@ -34,6 +37,14 @@ metergraph.record_outcome(
     escalated=False,
 )
 ```
+
+Use `metergraph.context()` for request or job identity. It follows async work
+created inside the scope and is restored afterward, so concurrent and reused
+workers cannot leak session IDs or tags into one another. The narrower
+`metergraph.session()` and `metergraph.tags()` scopes compose with it.
+`metergraph.set_default_tags()` sets process-wide service metadata. Legacy
+`set_session()` and `set_tags()` calls only update an active Metergraph scope;
+outside one they warn once and do nothing.
 
 Vercel's supported Python surface is AI Gateway through the OpenAI or
 Anthropic SDK. Point either client at the public gateway and `wrap()` detects
