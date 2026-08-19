@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
@@ -8,19 +7,6 @@ import test from "node:test";
 import { gunzipSync } from "node:zlib";
 
 import { flush, init, shutdown, wrap } from "../dist/index.js";
-
-function git(args, cwd) {
-  execFileSync("git", args, { cwd, stdio: "ignore" });
-}
-
-function tempRepoWithOrigin(origin) {
-  const root = mkdtempSync(join(tmpdir(), "metergraph-init-git-"));
-  git(["init"], root);
-  git(["config", "user.email", "test@example.com"], root);
-  git(["config", "user.name", "Test"], root);
-  git(["remote", "add", "origin", origin], root);
-  return root;
-}
 
 function fakeServer(sessionToken) {
   const ingestRequests = [];
@@ -63,7 +49,7 @@ function fakeServer(sessionToken) {
 }
 
 test("init uses an explicit repository without writing config", async (t) => {
-  const root = tempRepoWithOrigin("https://github.com/acme/widgets.git");
+  const root = mkdtempSync(join(tmpdir(), "metergraph-init-explicit-"));
   process.env.METERGRAPH_REPOSITORY = "acme/from-env";
   t.after(() => delete process.env.METERGRAPH_REPOSITORY);
   t.after(() => rmSync(root, { recursive: true, force: true }));
