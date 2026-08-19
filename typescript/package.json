@@ -19,7 +19,8 @@
     "build": "node scripts/prepare-build.mjs && tsc -p tsconfig.json && node scripts/finish-build.mjs",
     "prepack": "npm run build",
     "prepublishOnly": "npm test && npm run test:package",
-    "test": "npm run build && npm run test:types && node --test test/*.test.mjs",
+    "test": "npm run build && npm run test:types && npm run test:examples && node --test test/*.test.mjs",
+    "test:examples": "tsc --noEmit --strict --skipLibCheck --target ES2022 --module NodeNext --moduleResolution NodeNext test/ai-sdk-factories.types.ts",
     "test:package": "npm run build && node --test test/package/packed-package.test.mjs",
     "test:types": "tsc --noEmit --strict --skipLibCheck --target ES2022 --module NodeNext --moduleResolution NodeNext test/ai-sdk-current.types.ts"
   },
@@ -40,12 +41,15 @@
   "keywords": ["llm", "observability", "openai", "anthropic", "gemini", "vercel-ai-sdk", "cost-tracking"],
   "dependencies": {},
   "devDependencies": {
-    "ai": "^7.0.55",
-    "@types/node": "^24.0.0",
-    "typescript": "^5.8.0",
-    "openai": "^7",
+    "@ai-sdk/anthropic": "^4.0.39",
+    "@ai-sdk/openai": "^4.0.43",
+    "@ai-sdk/openai-compatible": "^3.0.31",
     "@anthropic-ai/sdk": "^0.30",
-    "@google/genai": "^1"
+    "@google/genai": "^1",
+    "@types/node": "^24.0.0",
+    "ai": "^7.0.55",
+    "openai": "^7",
+    "typescript": "^5.8.0"
   },
   "peerDependencies": {
     "@anthropic-ai/sdk": ">=0.30",

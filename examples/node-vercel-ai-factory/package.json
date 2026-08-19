@@ -1,0 +1,16 @@
+{
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "preinstall": "npm --prefix ../../typescript install --ignore-scripts && npm --prefix ../../typescript run build",
+    "test": "node --test selection.test.mjs && DRY_RUN=1 node provider-registry.mjs openai:gpt-5-mini && DRY_RUN=1 node provider-registry.mjs anthropic:claude-haiku-4-5 && DRY_RUN=1 node provider-registry.mjs gateway:anthropic/claude-sonnet-4.5 && DRY_RUN=1 node provider-registry.mjs compatible:gemma3 && DRY_RUN=1 node existing-factory.mjs && DRY_RUN=1 node existing-factory.mjs anthropic:claude-haiku-4-5 && DRY_RUN=1 node existing-factory.mjs gateway:anthropic/claude-sonnet-4.5 && DRY_RUN=1 node existing-factory.mjs compatible:llama3.2:latest"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.39",
+    "@ai-sdk/openai": "^4.0.43",
+    "@ai-sdk/openai-compatible": "^3.0.31",
+    "ai": "^7.0.55",
+    "metergraph": "file:../../typescript"
+  }
+}

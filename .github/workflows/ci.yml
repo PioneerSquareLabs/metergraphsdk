@@ -66,3 +66,9 @@ jobs:
         working-directory: typescript
       - run: AI_SDK_MAJOR=${{ matrix.ai }} node --test --test-name-pattern="Vercel" test/*.test.mjs
         working-directory: typescript
+      - if: matrix.ai == 7
+        run: npm install
+        working-directory: examples/node-vercel-ai-factory
+      - if: matrix.ai == 7
+        run: npm test
+        working-directory: examples/node-vercel-ai-factory

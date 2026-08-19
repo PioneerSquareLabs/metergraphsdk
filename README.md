@@ -212,6 +212,10 @@ Each provider request in a multi-step AI SDK tool loop becomes its own costed
 span. Provider options and transport headers are excluded from capture.
 The middleware initializes Metergraph itself; pass `init()` options to it as
 shown above, or call `mg.init()` first in applications with centralized setup.
+For a central multi-provider model factory, use the AI SDK provider registry or
+wrap one controlled factory exit. See the [tested registry and existing-factory
+examples](examples/node-vercel-ai-factory/) for direct OpenAI and Anthropic,
+Vercel AI Gateway, OpenAI-compatible providers, and middleware composition.
 
 | Vercel AI SDK | Metergraph middleware | Node.js |
 |---|---|---|
