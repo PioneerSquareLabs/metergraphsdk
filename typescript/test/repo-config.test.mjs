@@ -65,6 +65,18 @@ test("discoverRepoConfig finds file at appRoot", (t) => {
   assert.equal(config.repository, "acme/widgets");
 });
 
+test("discoverRepoConfig defaults a missing version to version 2", (t) => {
+  const root = tempDir();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, ".metergraph"));
+  writeFileSync(
+    join(root, ".metergraph", "config.json"),
+    JSON.stringify({ repository: "acme/widgets" }),
+  );
+
+  assert.equal(discoverRepoConfig(root)?.repository, "acme/widgets");
+});
+
 test("discoverRepoConfig walks up from a nested appRoot", (t) => {
   const root = tempDir();
   t.after(() => rmSync(root, { recursive: true, force: true }));

@@ -93,9 +93,10 @@ the hosted HTTPS endpoint. Configure repository identity explicitly:
 mg.init({ repository: "owner/repository" });
 ```
 
-Alternatively set `METERGRAPH_REPOSITORY`, or manually provide the optional
+Alternatively set `METERGRAPH_REPOSITORY` (used by [MeterGraph Bot](https://github.com/apps/metergraph)), or manually provide the optional
 non-secret `.metergraph/config.json` containing
-`{"version":2,"repository":"owner/repository"}`. Resolution order is the
+`{"repository":"owner/repository"}`. The optional `version` field defaults to
+`2`. Resolution order is the
 explicit option, environment variable, then existing file. The SDK only reads
 that file; it never creates or changes it. Without repository identity it warns
 once and continues legacy app-token ingestion where supported. Customers

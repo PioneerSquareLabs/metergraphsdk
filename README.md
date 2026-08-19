@@ -43,7 +43,7 @@ that made the call. Set METERGRAPH_CAPTURE_TEXT=0 for metadata-only capture.
    Add both to .env.example or the deployment config; never commit a real
    token. Configure repository identity explicitly in `init({ repository:
    "owner/repository" })` / `init(repository="owner/repository")`, or set
-   `METERGRAPH_REPOSITORY`. An existing `.metergraph/config.json` is also read,
+   `METERGRAPH_REPOSITORY` (used by [MeterGraph Bot](https://github.com/apps/metergraph)). An existing `.metergraph/config.json` is also read,
    but the SDK never creates or changes it.
 4. Attribution:
    - Python: automatic via stack walk. Optionally decorate key LLM-calling
