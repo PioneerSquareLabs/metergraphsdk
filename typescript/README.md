@@ -13,30 +13,38 @@ active; later explicit calls are ignored and produce one generic warning
 without option names, token values, or other secrets.
 
 ```ts
-import { init, wrap, route, trace, modelFor, recordOutcome, setSession } from "metergraph";
+import { init, wrap, route, trace, modelFor, recordOutcome, withSession } from "metergraph";
 import OpenAI from "openai";
 
 init({ repository: "owner/repository" });
 // new Anthropic() and new GoogleGenAI({}) wrap the same way.
 const client = wrap(new OpenAI());
-setSession("ticket-123");
 
 let model = "gpt-4.1-mini";
-await trace("ticket-workflow", () =>
-  route("ticket-classifier", async () => {
-    model = modelFor("ticket-classifier", { default: model });
-    await client.chat.completions.create({ model, messages: [] });
-  }, { unit: "answer" })
-);
+await withSession("ticket-123", async () => {
+  await trace("ticket-workflow", () =>
+    route("ticket-classifier", async () => {
+      model = modelFor("ticket-classifier", { default: model });
+      await client.chat.completions.create({ model, messages: [] });
+    }, { unit: "answer" })
+  );
 
-recordOutcome("ticket-classifier", {
-  model,
-  taskCompleted: true,
-  feedbackScore: 1,
-  turnsToResolution: 2,
-  escalated: false,
+  recordOutcome("ticket-classifier", {
+    model,
+    taskCompleted: true,
+    feedbackScore: 1,
+    turnsToResolution: 2,
+    escalated: false,
+  });
 });
 ```
+
+Use `withContext({ sessionId, tags }, fn)`, `withSession(sessionId, fn)`, or
+`withTags(tags, fn)` for request and job identity. These callback scopes follow
+Node's asynchronous execution and isolate concurrent jobs. Legacy
+`setSession()` and `setTags()` remain available inside an active Metergraph
+scope, but warn and do nothing when called outside one. Use `setDefaultTags()`
+only for deliberate process-wide tags; sessions are always execution-scoped.
 
 ## Vercel AI SDK
 

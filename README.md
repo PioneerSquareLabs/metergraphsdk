@@ -217,6 +217,21 @@ to select the provider-registry pattern or instrument a custom factory that
 your application already has. Each example clearly marks original application
 code versus MeterGraph additions.
 
+For concurrent Node workers, bind request identity to a callback instead of
+mutable process state:
+
+```ts
+await mg.withContext({
+  sessionId: runId,
+  tags: { customer: customerId },
+}, async () => {
+  await runJob();
+});
+```
+
+`withSession()` and `withTags()` provide narrower forms. Context follows async
+work created inside the callback and is restored afterward.
+
 | Vercel AI SDK | Metergraph middleware | Node.js |
 |---|---|---|
 | 5 | `vercelAISDKMiddleware({ aiSdkVersion: 5 })` | 18+ |

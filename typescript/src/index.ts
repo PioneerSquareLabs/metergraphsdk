@@ -3,9 +3,14 @@ import { ConfigPoller } from "./config.js";
 import {
   contextSnapshot,
   route,
+  setDefaultTags,
   setSession,
   setTags,
   trace,
+  withContext,
+  withSession,
+  withTags,
+  type ContextOptions,
   type RouteOptions,
   type TraceOptions,
 } from "./context.js";
@@ -296,8 +301,19 @@ export function vercelAISDKMiddleware(
   return createVercelAISDKMiddleware(options as any);
 }
 
-export { route, setSession, setTags, trace, track };
+export {
+  route,
+  setDefaultTags,
+  setSession,
+  setTags,
+  trace,
+  track,
+  withContext,
+  withSession,
+  withTags,
+};
 export type {
+  ContextOptions,
   RouteOptions,
   TraceOptions,
   TransportMode,
