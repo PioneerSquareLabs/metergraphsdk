@@ -66,10 +66,11 @@ Configuration:
 - `METERGRAPH_DISABLED=1` — process kill switch
 - `METERGRAPH_QUEUE_SIZE`, `METERGRAPH_BATCH_SIZE`, `METERGRAPH_FLUSH_SECONDS`
 
-Configure repository identity with
+Choose any one of these three options to configure repository identity; each
+option is sufficient on its own. Pass
 `metergraph.init(repository="owner/repository")`. Alternatively set
-`METERGRAPH_REPOSITORY`. To keep the identity with the source code, create the
-optional non-secret `.metergraph/config.json` file:
+`METERGRAPH_REPOSITORY`. To keep the identity with the source code instead,
+create the non-secret `.metergraph/config.json` file:
 
 ```json
 {"repository":"owner/repository"}

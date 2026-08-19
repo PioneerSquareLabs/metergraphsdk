@@ -41,12 +41,14 @@ that made the call. Set METERGRAPH_CAPTURE_TEXT=0 for metadata-only capture.
    is silently off without it), and METERGRAPH_INGEST_URL is only needed when
    self-hosting the server from https://github.com/PioneerSquareLabs/metergraph.
    Add both to .env.example or the deployment config; never commit a real
-   token. Configure repository identity explicitly in `init({ repository:
-   "owner/repository" })` / `init(repository="owner/repository")`, or set
+   token. Choose any one of three sufficient ways to configure repository
+   identity: pass the repository option to `init()`
+   (`repository="owner/repository"` in Python or
+   `{ repository: "owner/repository" }` in TypeScript), set
    `METERGRAPH_REPOSITORY` (used by
-   [MeterGraph Bot](https://github.com/apps/metergraph)). To keep identity with
-   the source code, create the optional `.metergraph/config.json` file containing
-   `{"repository":"owner/repository"}`; the SDK treats this file as read-only.
+   [MeterGraph Bot](https://github.com/apps/metergraph)), or create the optional
+   read-only `.metergraph/config.json` file containing
+   `{"repository":"owner/repository"}`.
 4. Attribution:
    - Python: automatic via stack walk. Optionally decorate key LLM-calling
      functions with @metergraph.track to pin a stable name.

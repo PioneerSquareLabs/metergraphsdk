@@ -87,15 +87,16 @@ required and throws if missing so a caller error surfaces immediately
 instead of an `undefined` model reaching a provider call.
 
 Set `METERGRAPH_APP_TOKEN`; `METERGRAPH_INGEST_URL` is only needed to override
-the hosted HTTPS endpoint. Configure repository identity explicitly:
+the hosted HTTPS endpoint. Choose any one of these three options to configure
+repository identity; each option is sufficient on its own:
 
 ```ts
 mg.init({ repository: "owner/repository" });
 ```
 
-Alternatively set `METERGRAPH_REPOSITORY` (used by
+Alternatively, set `METERGRAPH_REPOSITORY` (used by
 [MeterGraph Bot](https://github.com/apps/metergraph)). To keep the identity with
-the source code, create the optional non-secret `.metergraph/config.json` file:
+the source code instead, create the non-secret `.metergraph/config.json` file:
 
 ```json
 {"repository":"owner/repository"}
