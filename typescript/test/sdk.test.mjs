@@ -19,11 +19,11 @@ import {
   modelFor,
   recordOutcome,
   route,
-  setSession,
   shutdown,
   track,
   trace,
   vercelAISDKMiddleware,
+  withSession,
   wrap,
 } from "../dist/index.js";
 import { CaptureRuntime } from "../dist/capture.js";
@@ -120,30 +120,31 @@ test("wrap captures usage/context and config assignment is sticky", async (t) =>
     },
   }, "openai");
   wrap(client, "openai"); // idempotent
-  setSession("session-1");
-  await route("classify", async () => {
-    const result = await client.chat.completions.create({
-      model: "model-a",
-      messages: [{ role: "user", content: "classify 123" }],
-    });
-    assert.equal(result.id, "req_1");
-  }, { unit: "answer", tags: { tier: "pro" }, captureText: true });
+  await withSession("session-1", async () => {
+    await route("classify", async () => {
+      const result = await client.chat.completions.create({
+        model: "model-a",
+        messages: [{ role: "user", content: "classify 123" }],
+      });
+      assert.equal(result.id, "req_1");
+    }, { unit: "answer", tags: { tier: "pro" }, captureText: true });
 
-  await client.chat.completions.create({
-    model: "metadata-model",
-    messages: [{ role: "user", content: "private by default" }],
+    await client.chat.completions.create({
+      model: "metadata-model",
+      messages: [{ role: "user", content: "private by default" }],
+    });
+    assert.equal(recordOutcome("classify", {
+      model: "model-a",
+      taskCompleted: true,
+      feedbackScore: 0.8,
+      turnsToResolution: 2,
+      escalated: false,
+      abandoned: false,
+      editDistanceRatio: 0.1,
+      regenerationCount: 0,
+      eventId: "outcome-1",
+    }), true);
   });
-  assert.equal(recordOutcome("classify", {
-    model: "model-a",
-    taskCompleted: true,
-    feedbackScore: 0.8,
-    turnsToResolution: 2,
-    escalated: false,
-    abandoned: false,
-    editDistanceRatio: 0.1,
-    regenerationCount: 0,
-    eventId: "outcome-1",
-  }), true);
 
   assert.equal(await flush(), true);
   assert.equal(batches.length, 1);

@@ -213,6 +213,21 @@ span. Provider options and transport headers are excluded from capture.
 The middleware initializes Metergraph itself; pass `init()` options to it as
 shown above, or call `mg.init()` first in applications with centralized setup.
 
+For concurrent Node workers, bind request identity to a callback instead of
+mutable process state:
+
+```ts
+await mg.withContext({
+  sessionId: runId,
+  tags: { customer: customerId },
+}, async () => {
+  await runJob();
+});
+```
+
+`withSession()` and `withTags()` provide narrower forms. Context follows async
+work created inside the callback and is restored afterward.
+
 | Vercel AI SDK | Metergraph middleware | Node.js |
 |---|---|---|
 | 5 | `vercelAISDKMiddleware({ aiSdkVersion: 5 })` | 18+ |

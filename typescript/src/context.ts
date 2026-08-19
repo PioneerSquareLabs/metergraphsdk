@@ -24,17 +24,51 @@ export interface TraceOptions {
   parentSpanId?: string;
   captureText?: boolean;
 }
+export interface ContextOptions {
+  sessionId?: string;
+  tags?: Record<string, unknown>;
+}
 
 const storage = new AsyncLocalStorage<CaptureContext>();
-let ambient: CaptureContext = { tags: {} };
+let defaultTags: Record<string, string> = {};
+let warnedSessionOutsideScope = false;
+let warnedTagsOutsideScope = false;
+
+function normalizeTags(tags: Record<string, unknown>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(tags).map(([key, value]) => [key, String(value)]),
+  );
+}
 
 export function contextSnapshot(): CaptureContext {
-  const value = storage.getStore() ?? ambient;
+  const value = storage.getStore() ?? { tags: defaultTags };
   return { ...value, tags: { ...value.tags } };
 }
 
 export function runWithContext<T>(context: CaptureContext, fn: () => T): T {
   return storage.run(context, fn);
+}
+
+export function withContext<T>(options: ContextOptions, fn: () => T): T {
+  const parent = contextSnapshot();
+  const child: CaptureContext = {
+    ...parent,
+    sessionId: options.sessionId ?? parent.sessionId,
+    tags: { ...parent.tags, ...normalizeTags(options.tags ?? {}) },
+  };
+  return storage.run(child, fn);
+}
+
+export function withSession<T>(sessionId: string, fn: () => T): T {
+  return withContext({ sessionId }, fn);
+}
+
+export function withTags<T>(tags: Record<string, unknown>, fn: () => T): T {
+  return withContext({ tags }, fn);
+}
+
+export function setDefaultTags(tags: Record<string, unknown>): void {
+  defaultTags = normalizeTags(tags);
 }
 
 export async function route<T>(
@@ -80,15 +114,28 @@ export function trace<T>(
 
 export function setSession(sessionId?: string): void {
   const store = storage.getStore();
-  if (store) store.sessionId = sessionId;
-  else ambient = { ...ambient, sessionId };
+  if (!store) {
+    if (!warnedSessionOutsideScope) {
+      warnedSessionOutsideScope = true;
+      console.warn(
+        "Metergraph setSession() requires an active Metergraph context; use withSession() or withContext().",
+      );
+    }
+    return;
+  }
+  storage.enterWith({ ...store, sessionId, tags: { ...store.tags } });
 }
 
 export function setTags(tags: Record<string, unknown>): void {
-  const normalized = Object.fromEntries(
-    Object.entries(tags).map(([key, value]) => [key, String(value)]),
-  );
   const store = storage.getStore();
-  if (store) store.tags = { ...store.tags, ...normalized };
-  else ambient = { ...ambient, tags: { ...ambient.tags, ...normalized } };
+  if (!store) {
+    if (!warnedTagsOutsideScope) {
+      warnedTagsOutsideScope = true;
+      console.warn(
+        "Metergraph setTags() requires an active Metergraph context; use withTags() or withContext().",
+      );
+    }
+    return;
+  }
+  storage.enterWith({ ...store, tags: { ...store.tags, ...normalizeTags(tags) } });
 }
