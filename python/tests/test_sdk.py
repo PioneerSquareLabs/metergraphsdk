@@ -67,6 +67,64 @@ def captured_response(row):
     return json.loads(row["response_text"])
 
 
+def test_capture_separates_otel_status_from_model_finish_reasons(tmp_path):
+    rows = Rows()
+    runtime = Runtime(rows, Options(app_root=str(tmp_path)))
+
+    completed = runtime.call_state(
+        "anthropic", "messages.create", {"model": "claude-test"}
+    )
+    completed.finish(SimpleNamespace(stop_reason="end_turn"))
+    failed = runtime.call_state(
+        "anthropic", "messages.create", {"model": "claude-test"}
+    )
+    failed.finish(error=TypeError("provider failed"))
+    cancelled = runtime.call_state(
+        "anthropic", "messages.stream", {"model": "claude-test"}
+    )
+    cancelled.finish(status="abandoned", stream=True)
+    in_band_failure = runtime.call_state(
+        "openai", "responses.create", {"model": "gpt-test"}
+    )
+    in_band_failure.finish(SimpleNamespace(status="failed"))
+    incomplete = runtime.call_state(
+        "openai", "responses.create", {"model": "gpt-test"}
+    )
+    incomplete.finish(SimpleNamespace(
+        status="incomplete",
+        incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+    ))
+
+    assert rows.rows[0]["status"] == "end_turn"
+    assert rows.rows[0]["status_code"] == "unset"
+    assert rows.rows[0]["finish_reason"] == "stop"
+    assert rows.rows[0]["finish_reason_raw"] == "end_turn"
+    assert rows.rows[0]["error"] is False
+
+    assert rows.rows[1]["status"] == "error"
+    assert rows.rows[1]["status_code"] == "error"
+    assert rows.rows[1]["finish_reason"] is None
+    assert rows.rows[1]["error"] is True
+    assert rows.rows[1]["error_type"] == "TypeError"
+
+    assert rows.rows[2]["status"] == "abandoned"
+    assert rows.rows[2]["status_code"] == "unset"
+    assert rows.rows[2]["finish_reason"] is None
+    assert rows.rows[2]["error"] is False
+
+    assert rows.rows[3]["status"] == "failed"
+    assert rows.rows[3]["status_code"] == "error"
+    assert rows.rows[3]["finish_reason"] == "error"
+    assert rows.rows[3]["finish_reason_raw"] == "failed"
+    assert rows.rows[3]["error"] is True
+
+    assert rows.rows[4]["status"] == "incomplete"
+    assert rows.rows[4]["status_code"] == "unset"
+    assert rows.rows[4]["finish_reason"] == "length"
+    assert rows.rows[4]["finish_reason_raw"] == "max_output_tokens"
+    assert rows.rows[4]["error"] is False
+
+
 def test_wrap_auto_init_does_not_latch_before_a_token_is_available():
     class Completions:
         def create(self, **kwargs):

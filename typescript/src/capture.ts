@@ -146,6 +146,42 @@ function stopReason(response: unknown): string | undefined {
   return normalized == null ? undefined : String(normalized);
 }
 
+function normalizeFinishReason(value: string): string {
+  const normalized = value.trim().toLowerCase().replace(/[\s_]+/g, "-");
+  if (["stop", "end-turn", "stop-sequence", "completed", "succeeded"].includes(normalized)) {
+    return "stop";
+  }
+  if (["length", "max-tokens", "max-output-tokens"].includes(normalized)) return "length";
+  if (["content-filter", "safety", "blocked"].includes(normalized)) return "content-filter";
+  if (["tool-calls", "tool-use", "function-call"].includes(normalized)) return "tool-calls";
+  if (["error", "failed"].includes(normalized)) return "error";
+  if (["other", "unknown"].includes(normalized)) return "other";
+  return normalized;
+}
+
+function finishReasonDetails(response: unknown): {
+  finishReason?: string;
+  finishReasonRaw?: string;
+} {
+  const responseStatus = get(response, "status");
+  const incompleteReason = responseStatus === "incomplete"
+    ? get(get(response, "incomplete_details"), "reason")
+    : undefined;
+  const value = get(response, "stop_reason") ?? incompleteReason ?? responseStatus
+    ?? get(response, "finishReason") ?? get(response, "finish_reason")
+    ?? get(first(get(response, "choices")), "finish_reason");
+  const unified = get(value, "unified");
+  const rawValue = get(value, "raw") ?? (unified === undefined ? value : undefined);
+  const source = unified ?? rawValue;
+  if (source == null) return {};
+  const finishReason = normalizeFinishReason(String(source));
+  const raw = rawValue == null ? undefined : String(rawValue);
+  return {
+    finishReason,
+    finishReasonRaw: raw !== undefined && raw !== finishReason ? raw : undefined,
+  };
+}
+
 function toolNames(request: Record<string, unknown>): { name: string }[] | undefined {
   if (!Array.isArray(request.tools)) return undefined;
   const names = request.tools.flatMap((tool) => {
@@ -562,6 +598,10 @@ export class CaptureRuntime {
     const status = extra.status ?? (
       extra.error ? "error" : stopReason(response) ?? "success"
     );
+    const { finishReason, finishReasonRaw } = finishReasonDetails(response);
+    const statusCode = extra.error || extra.status === "error" || finishReason === "error"
+      ? "error"
+      : "unset";
     const output = text(
       JSON.stringify(
         responseEnvelope(
@@ -609,6 +649,9 @@ export class CaptureRuntime {
       ...usage(response),
       latency_ms: Math.round(performance.now() - state.started),
       status,
+      status_code: statusCode,
+      finish_reason: finishReason,
+      finish_reason_raw: finishReasonRaw,
       session_id: state.context.sessionId,
       conversation_id: state.context.sessionId,
       trace_id: state.traceId,
@@ -640,7 +683,7 @@ export class CaptureRuntime {
       frames_json: state.frames,
       tags: state.context.tags,
       environment: this.options.environment,
-      error: Boolean(extra.error),
+      error: statusCode === "error",
       error_type: extra.error instanceof Error ? extra.error.name : undefined,
       sdk: "js",
       sdk_version: SDK_VERSION,

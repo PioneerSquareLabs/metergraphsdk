@@ -254,6 +254,48 @@ def _stop_reason(response: Any) -> str | None:
     return str(reason) if reason is not None else None
 
 
+def _normalize_finish_reason(value: str) -> str:
+    normalized = "-".join(value.strip().lower().replace("_", "-").split())
+    if normalized in {"stop", "end-turn", "stop-sequence", "completed", "succeeded"}:
+        return "stop"
+    if normalized in {"length", "max-tokens", "max-output-tokens"}:
+        return "length"
+    if normalized in {"content-filter", "safety", "blocked"}:
+        return "content-filter"
+    if normalized in {"tool-calls", "tool-use", "function-call"}:
+        return "tool-calls"
+    if normalized in {"error", "failed"}:
+        return "error"
+    if normalized in {"other", "unknown"}:
+        return "other"
+    return normalized
+
+
+def _finish_reason_details(response: Any) -> tuple[str | None, str | None]:
+    response_status = _get(response, "status")
+    incomplete_reason = (
+        _get(_get(response, "incomplete_details"), "reason")
+        if response_status == "incomplete"
+        else None
+    )
+    value = (
+        _get(response, "stop_reason")
+        or incomplete_reason
+        or response_status
+        or _get(response, "finishReason")
+        or _get(response, "finish_reason")
+        or _get(_first(_get(response, "choices")), "finish_reason")
+    )
+    unified = _get(value, "unified")
+    raw_value = _get(value, "raw") or (value if unified is None else None)
+    source = unified if unified is not None else raw_value
+    if source is None:
+        return None, None
+    finish_reason = _normalize_finish_reason(str(source))
+    raw = str(raw_value) if raw_value is not None else None
+    return finish_reason, raw if raw != finish_reason else None
+
+
 def _request_id(response: Any) -> str | None:
     value = (
         _get(response, "_request_id")
@@ -740,6 +782,12 @@ class CallState:
         effective_status = status or (
             "error" if error else _stop_reason(response) or "success"
         )
+        finish_reason, finish_reason_raw = _finish_reason_details(response)
+        status_code = (
+            "error"
+            if error or status == "error" or finish_reason == "error"
+            else "unset"
+        )
         response_json, response_truncated = self.runtime._text(
             json.dumps(
                 _response_envelope(
@@ -764,6 +812,9 @@ class CallState:
             **_usage(response),
             "latency_ms": round((time.perf_counter() - self.started) * 1000),
             "status": effective_status,
+            "status_code": status_code,
+            "finish_reason": finish_reason,
+            "finish_reason_raw": finish_reason_raw,
             "session_id": self.context.session_id,
             "conversation_id": self.context.session_id,
             "trace_id": self.trace_id,
@@ -792,7 +843,7 @@ class CallState:
             "frames_json": self.frames,
             "tags": dict(self.context.tags),
             "environment": self.runtime.options.environment,
-            "error": bool(error),
+            "error": status_code == "error",
             "error_type": type(error).__name__ if error else None,
             "sdk": "python",
             "sdk_version": SDK_VERSION,
