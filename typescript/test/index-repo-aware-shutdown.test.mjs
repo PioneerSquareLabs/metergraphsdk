@@ -60,6 +60,7 @@ test("shutdown stops the repo-aware session manager cleanly", async (t) => {
     token: "mg_test",
     ingestUrl: `http://127.0.0.1:${address.port}`,
     appRoot: root,
+    repository: "acme/widgets",
     transport: "background",
     flushMs: 60_000,
     configPollMs: 60_000,

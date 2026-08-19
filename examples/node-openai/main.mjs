@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import * as mg from "metergraph";
 
-mg.init({ environment: "example" });
+mg.init({ repository: "owner/repository", environment: "example" });
 const client = mg.wrap(new OpenAI());
 
 const haikuAbout = mg.track("haiku.write", async (topic) => {

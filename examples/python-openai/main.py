@@ -1,7 +1,7 @@
 import metergraph
 from openai import OpenAI
 
-metergraph.init(environment="example")
+metergraph.init(repository="owner/repository", environment="example")
 client = metergraph.wrap(OpenAI())
 
 

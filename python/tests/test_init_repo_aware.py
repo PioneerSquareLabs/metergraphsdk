@@ -24,20 +24,23 @@ def _reset_metergraph_state():
     metergraph.shutdown()
     metergraph._initialized = False
     metergraph._warned_no_token = False
+    metergraph._warned_no_repository = False
 
 
-def test_init_discovers_git_origin_and_wires_session_and_repo_root(tmp_path):
+def test_init_uses_explicit_repository_without_writing_config(tmp_path):
     _reset_metergraph_state()
     _init_repo_with_origin(tmp_path, "https://github.com/acme/widgets.git")
 
     metergraph.init(
-        token="mg_test", ingest_url="http://127.0.0.1:9", app_root=str(tmp_path)
+        token="mg_test",
+        ingest_url="http://127.0.0.1:9",
+        app_root=str(tmp_path),
+        repository="acme/widgets",
     )
 
     assert metergraph._session_manager is not None
     assert _capture._runtime.options.repo_root == str(tmp_path.resolve())
-    written = json.loads((tmp_path / ".metergraph" / "config.json").read_text())
-    assert written == {"version": 2, "repository": "acme/widgets"}
+    assert not (tmp_path / ".metergraph").exists()
 
     _reset_metergraph_state()
 
@@ -53,6 +56,51 @@ def test_init_falls_back_to_v1_when_no_repo_config_or_git(tmp_path):
     assert _capture._runtime.options.repo_root is None
     assert not (tmp_path / ".metergraph").exists()
 
+    _reset_metergraph_state()
+
+
+def test_repository_env_precedes_existing_file(monkeypatch, tmp_path):
+    _reset_metergraph_state()
+    (tmp_path / ".metergraph").mkdir()
+    (tmp_path / ".metergraph" / "config.json").write_text(
+        json.dumps({"version": 2, "repository": "acme/from-file"})
+    )
+    monkeypatch.setenv("METERGRAPH_REPOSITORY", "acme/from-env")
+
+    metergraph.init(
+        token="mg_test", ingest_url="http://127.0.0.1:9", app_root=str(tmp_path)
+    )
+
+    assert metergraph._session_manager._repository == "acme/from-env"
+    _reset_metergraph_state()
+
+
+def test_explicit_repository_precedes_environment(monkeypatch, tmp_path):
+    _reset_metergraph_state()
+    monkeypatch.setenv("METERGRAPH_REPOSITORY", "acme/from-env")
+
+    metergraph.init(
+        token="mg_test",
+        ingest_url="http://127.0.0.1:9",
+        app_root=str(tmp_path),
+        repository="acme/explicit",
+    )
+
+    assert metergraph._session_manager._repository == "acme/explicit"
+    _reset_metergraph_state()
+
+
+def test_missing_repository_warns_once_and_never_writes(caplog, tmp_path):
+    _reset_metergraph_state()
+    _init_repo_with_origin(tmp_path, "https://github.com/acme/widgets.git")
+
+    metergraph.init(
+        token="mg_test", ingest_url="http://127.0.0.1:9", app_root=str(tmp_path)
+    )
+
+    assert metergraph._session_manager is None
+    assert not (tmp_path / ".metergraph").exists()
+    assert sum("repository identity is not configured" in r.message for r in caplog.records) == 1
     _reset_metergraph_state()
 
 
@@ -78,7 +126,10 @@ def test_shutdown_stops_the_session_manager(tmp_path):
     _init_repo_with_origin(tmp_path, "https://github.com/acme/widgets.git")
 
     metergraph.init(
-        token="mg_test", ingest_url="http://127.0.0.1:9", app_root=str(tmp_path)
+        token="mg_test",
+        ingest_url="http://127.0.0.1:9",
+        app_root=str(tmp_path),
+        repository="acme/widgets",
     )
     session_manager = metergraph._session_manager
     assert session_manager is not None

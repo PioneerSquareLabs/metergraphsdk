@@ -50,7 +50,7 @@ def parse_receipt_stream():
 
 
 def main():
-    metergraph.init(environment="demo")
+    metergraph.init(repository="PioneerSquareLabs/metergraphsdk", environment="demo")
     metergraph.set_session("demo-session-1")
     with metergraph.route("invoice-summarizer", unit="invoice"):
         for _ in range(3):

@@ -2,7 +2,7 @@ import { gateway, generateText, wrapLanguageModel } from "ai";
 import { openai } from "@ai-sdk/openai";
 import * as mg from "metergraph";
 
-mg.init({ environment: "example" });
+mg.init({ repository: "owner/repository", environment: "example" });
 
 const usingGateway = Boolean(process.env.AI_GATEWAY_API_KEY);
 const baseModel = usingGateway

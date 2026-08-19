@@ -20,7 +20,8 @@ import {
   type BatchFirstSource,
   type LateBatchInfo,
 } from "./batch-first.js";
-import { ensureRepoConfig } from "./repo-config.js";
+import { realpathSync } from "node:fs";
+import { discoverRepoConfig, type RepoConfig } from "./repo-config.js";
 import { SessionManager } from "./session.js";
 import { track } from "./track.js";
 import { Transport, type TransportMode, type WaitUntil } from "./transport.js";
@@ -41,6 +42,7 @@ export interface MetergraphOptions {
   captureText?: boolean;
   redact?: (text: string, kind: "request" | "response") => string;
   appRoot?: string;
+  repository?: string;
   skipFrames?: string[];
   environment?: string;
   disabled?: boolean;
@@ -72,6 +74,7 @@ export interface OutcomeOptions {
 
 let initialized = false;
 let warnedNoToken = false;
+let warnedNoRepository = false;
 let transport: Transport | undefined;
 let config: ConfigPoller | undefined;
 let sessionManager: SessionManager | undefined;
@@ -86,6 +89,16 @@ function envBool(name: string, fallback: boolean): boolean {
   return value === undefined
     ? fallback
     : !["0", "false", "no", "off"].includes(value.toLowerCase());
+}
+
+function repositoryConfig(options: MetergraphOptions, appRoot: string): RepoConfig | undefined {
+  const explicit = options.repository ?? env("METERGRAPH_REPOSITORY");
+  if (typeof explicit === "string" && explicit.trim().includes("/")) {
+    let repoRoot = appRoot;
+    try { repoRoot = realpathSync(appRoot); } catch { /* attribution remains best-effort */ }
+    return { repository: explicit.trim(), repoRoot };
+  }
+  return discoverRepoConfig(appRoot);
 }
 
 export function init(options: MetergraphOptions = {}): void {
@@ -107,7 +120,13 @@ export function init(options: MetergraphOptions = {}): void {
   initialized = true;
   try {
     const appRoot = options.appRoot ?? (typeof process === "undefined" ? "" : process.cwd());
-    const repoConfig = ensureRepoConfig(appRoot);
+    const repoConfig = repositoryConfig(options, appRoot);
+    if (!repoConfig && !warnedNoRepository) {
+      warnedNoRepository = true;
+      console.warn(
+        "Metergraph repository identity is not configured; set init({ repository: \"owner/repository\" }), METERGRAPH_REPOSITORY, or provide .metergraph/config.json. Continuing with legacy ingestion.",
+      );
+    }
     sessionManager = repoConfig
       ? new SessionManager(token, ingestUrl, repoConfig.repository, SDK_VERSION)
       : undefined;

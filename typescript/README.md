@@ -5,14 +5,14 @@ provider-independent Vercel AI SDK language models on Node 18+, including AWS
 Lambda. Worker-style `waitUntil` hooks are present but are not part of the v1
 public-package qualification contract.
 
-`wrap()` initializes capture from the environment, so setup is one line per
-client; call `init(...)` before the first `wrap()` only to pass options in
-code.
+Initialize Metergraph once, then wrap each provider client. `init()` reads the
+token and other omitted options from the environment.
 
 ```ts
-import { wrap, route, trace, modelFor, recordOutcome, setSession } from "metergraph";
+import { init, wrap, route, trace, modelFor, recordOutcome, setSession } from "metergraph";
 import OpenAI from "openai";
 
+init({ repository: "owner/repository" });
 // new Anthropic() and new GoogleGenAI({}) wrap the same way.
 const client = wrap(new OpenAI());
 setSession("ticket-123");
@@ -44,6 +44,8 @@ one costed span per model call rather than an inaccurate aggregate:
 import { generateText, wrapLanguageModel } from "ai";
 import { openai } from "@ai-sdk/openai";
 import * as mg from "metergraph";
+
+mg.init({ repository: "owner/repository" });
 
 const model = wrapLanguageModel({
   model: openai("gpt-5.6-luna"),
@@ -86,13 +88,22 @@ required and throws if missing so a caller error surfaces immediately
 instead of an `undefined` model reaching a provider call.
 
 Set `METERGRAPH_APP_TOKEN`; `METERGRAPH_INGEST_URL` is only needed to override
-the hosted HTTPS endpoint. SDK 0.4 automatically reads the GitHub `origin` on
-first initialization and creates `.metergraph/config.json` at the repository
-root if absent. Commit this non-secret file so production can use
-repository-aware ingest without Git metadata. Existing config is authoritative
-and never overwritten; when discovery or creation is unavailable, the SDK
-falls back to direct app-token ingestion for compatibility with older
-collectors. SDK 0.4 captures the scrubbed provider request and a
+the hosted HTTPS endpoint. Repository identity enables repository-level
+attribution and [MeterGraph Bot](https://github.com/apps/metergraph). Choose any
+one of these options; each is sufficient on its own:
+
+- Pass `{ repository: "owner/repository" }` to `mg.init()`.
+- Set `METERGRAPH_REPOSITORY=owner/repository` in the environment.
+- Store the identity with the source code in `.metergraph/config.json`:
+
+```json
+{"repository":"owner/repository"}
+```
+
+Resolution order is the explicit option, environment variable, then
+configuration file. The SDK treats the file as read-only. Without repository
+identity, it warns once and continues capture without repository attribution.
+Metergraph captures the scrubbed provider request and a
 normalized response envelope, including assistant content and tool calls, by
 default. Provider credentials and transport headers are removed. Request and
 response are each limited to 100 KiB of UTF-8 with an explicit truncation
@@ -174,11 +185,14 @@ Instrument this codebase's LLM API costs with the `metergraph` npm package
 then wrap every new OpenAI(), new Anthropic(), and new GoogleGenAI()
 construction in place, e.g. const client = mg.wrap(new OpenAI()) after
 import * as mg from "metergraph". wrap() returns the same client and
-initializes itself from the environment: METERGRAPH_APP_TOKEN is required
-(capture is silently off without it) and METERGRAPH_INGEST_URL is only for
-self-hosted servers. Add both to .env.example, and never commit a real token.
-SDK 0.4 captures scrubbed provider requests and normalized responses by
-default for the hosted dashboard; use METERGRAPH_CAPTURE_TEXT=0 or
+initializes itself from the environment. Before wrapping, call
+mg.init({ repository: "owner/repository" }) using the actual GitHub owner and
+repository name. METERGRAPH_APP_TOKEN is required; the SDK warns and disables
+capture when it is missing. METERGRAPH_INGEST_URL is only for self-hosted
+servers. Document variable names with placeholders in .env.example, and put
+real values only in deployment configuration. Metergraph captures scrubbed
+provider requests and normalized responses by default for the hosted dashboard;
+use METERGRAPH_CAPTURE_TEXT=0 or
 captureText: false around sensitive operations. Provider credentials and
 transport headers must never be captured. Capture is fail-open, so do not
 change call sites, arguments, or error handling; async and streaming work

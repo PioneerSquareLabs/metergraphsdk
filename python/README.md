@@ -2,14 +2,14 @@
 
 Zero-runtime-dependency capture for OpenAI, Anthropic, Gemini, and Python
 Vercel AI Gateway clients.
-`wrap()` initializes capture from the environment, so setup is one line per
-client; call `metergraph.init(...)` before the first `wrap()` only to pass
-options in code.
+Initialize Metergraph once, then wrap each provider client. `init()` reads the
+token and other omitted options from the environment.
 
 ```python
 import metergraph
 from openai import OpenAI
 
+metergraph.init(repository="owner/repository")
 # Anthropic() and google-genai's genai.Client() wrap the same way.
 client = metergraph.wrap(OpenAI())
 metergraph.set_session("ticket-123")
@@ -40,6 +40,7 @@ import os
 import metergraph
 from openai import OpenAI
 
+metergraph.init(repository="owner/repository")
 gateway = metergraph.wrap(OpenAI(
     api_key=os.getenv("AI_GATEWAY_API_KEY") or os.getenv("VERCEL_OIDC_TOKEN"),
     base_url="https://ai-gateway.vercel.sh/v1",
@@ -60,23 +61,32 @@ Configuration:
 
 - `METERGRAPH_APP_TOKEN` — required bearer token
 - `METERGRAPH_INGEST_URL` — optional override; defaults to the hosted HTTPS endpoint
+- `METERGRAPH_REPOSITORY` — optional `owner/repository` identity; used by [MeterGraph Bot](https://github.com/apps/metergraph)
 - `METERGRAPH_CAPTURE_TEXT=0` — opt out of content capture globally
 - `METERGRAPH_DISABLED=1` — process kill switch
 - `METERGRAPH_QUEUE_SIZE`, `METERGRAPH_BATCH_SIZE`, `METERGRAPH_FLUSH_SECONDS`
 
-SDK 0.4 associates traces with their GitHub repository automatically. On the
-first `init()` in a Git checkout, it reads the `origin` remote and creates
-`.metergraph/config.json` at the repository root if that file is absent.
-Commit this non-secret file so production can use repository-aware ingest
-without Git metadata. An existing file is authoritative and is never changed
-by the SDK. If discovery or creation is unavailable, the SDK falls back to
-direct app-token ingestion for compatibility with older collectors.
+Repository identity enables repository-level attribution and
+[MeterGraph Bot](https://github.com/apps/metergraph). Choose any one of these
+options; each is sufficient on its own:
+
+- Pass `repository="owner/repository"` to `metergraph.init()`.
+- Set `METERGRAPH_REPOSITORY=owner/repository` in the environment.
+- Store the identity with the source code in `.metergraph/config.json`:
+
+```json
+{"repository":"owner/repository"}
+```
+
+Resolution order is the explicit option, environment variable, then
+configuration file. The SDK treats the file as read-only. Without repository
+identity, it warns once and continues capture without repository attribution.
 
 Delivery is bounded and off the request path. Queue overflow or a collector
 outage drops capture and increments internal counters; it never changes the
 provider call. Each wire batch is bounded to 512 KiB after optional gzip.
-SDK 0.4 captures the scrubbed provider request and a normalized response
-envelope, including assistant content and tool calls, by default. Provider
+By default, Metergraph captures the scrubbed provider request and a normalized
+response envelope, including assistant content and tool calls. Provider
 credentials and transport headers are removed. Request and response are each
 limited to 100 KiB of UTF-8 with an explicit truncation marker.
 `capture_text=False` on `route()` or `trace()` overrides the global content
@@ -146,11 +156,13 @@ genai.Client() construction in place, e.g. client = metergraph.wrap(OpenAI()).
 OpenAI or Anthropic clients pointed at https://ai-gateway.vercel.sh are Vercel
 AI Gateway clients and are detected automatically; keep their creator/model ID
 and AI_GATEWAY_API_KEY / VERCEL_OIDC_TOKEN configuration unchanged.
-wrap() returns the same client and initializes itself from the environment:
-METERGRAPH_APP_TOKEN is required (capture is silently off without it) and
-METERGRAPH_INGEST_URL is only for self-hosted servers. Add both to
-.env.example, and never commit a real token. SDK 0.4 captures scrubbed provider
-requests and normalized responses by default for the hosted dashboard; use
+Before wrapping, call metergraph.init(repository="owner/repository") using the
+actual GitHub owner and repository name. METERGRAPH_APP_TOKEN is required; the
+SDK warns and disables capture when it is missing. METERGRAPH_INGEST_URL is
+only for self-hosted servers. Document variable names with placeholders in
+.env.example, and put real values only in deployment configuration. Metergraph
+captures scrubbed provider requests and normalized responses by default for
+the hosted dashboard; use
 METERGRAPH_CAPTURE_TEXT=0 or capture_text=False around sensitive operations.
 Provider credentials and transport headers must never be captured. Capture is
 fail-open, so do not change call sites, arguments, or error handling; sync,

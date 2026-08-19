@@ -78,7 +78,7 @@ def _load(path: str, repo_root: str) -> RepoConfig | None:
     except (OSError, json.JSONDecodeError) as exc:
         log.warning("metergraph: found %s but could not read it: %s", path, exc)
         return None
-    if not isinstance(doc, dict) or doc.get("version") != SUPPORTED_CONFIG_VERSION:
+    if not isinstance(doc, dict) or doc.get("version", SUPPORTED_CONFIG_VERSION) != SUPPORTED_CONFIG_VERSION:
         log.warning(
             "metergraph: %s has an unsupported schema version; ignoring "
             "(expected version %d)",

@@ -50,7 +50,7 @@ function load(path: string, repoRoot: string): RepoConfig | undefined {
     );
     return undefined;
   }
-  if (typeof doc !== "object" || doc === null || (doc as Record<string, unknown>).version !== SUPPORTED_CONFIG_VERSION) {
+  if (typeof doc !== "object" || doc === null || ((doc as Record<string, unknown>).version ?? SUPPORTED_CONFIG_VERSION) !== SUPPORTED_CONFIG_VERSION) {
     console.warn(
       `metergraph: ${path} has an unsupported schema version; ignoring (expected version ${SUPPORTED_CONFIG_VERSION})`,
     );

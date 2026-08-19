@@ -59,6 +59,18 @@ def test_discover_repo_config_finds_file_at_app_root(tmp_path):
 
     assert config is not None
     assert config.repository == "acme/widgets"
+
+
+def test_discover_repo_config_defaults_missing_version_to_version_2(tmp_path):
+    (tmp_path / ".metergraph").mkdir()
+    (tmp_path / ".metergraph" / "config.json").write_text(
+        json.dumps({"repository": "acme/widgets"})
+    )
+
+    config = discover_repo_config(str(tmp_path))
+
+    assert config is not None
+    assert config.repository == "acme/widgets"
     assert config.repo_root == str(tmp_path.resolve())
 
 

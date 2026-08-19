@@ -1,7 +1,7 @@
 import metergraph
 from anthropic import Anthropic
 
-metergraph.init(environment="example")
+metergraph.init(repository="owner/repository", environment="example")
 client = metergraph.wrap(Anthropic())
 
 
