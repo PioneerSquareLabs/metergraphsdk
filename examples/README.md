@@ -19,7 +19,8 @@ export METERGRAPH_APP_TOKEN=dev-token                # one of MG_TOKENS
 | `node-anthropic/main.mjs` | `npm i metergraph @anthropic-ai/sdk`, `ANTHROPIC_API_KEY` |
 | `node-gemini/main.mjs` | `npm i metergraph @google/genai`, `GEMINI_API_KEY` |
 | `node-vercel-ai/main.mjs` | `npm i metergraph ai @ai-sdk/openai`, `OPENAI_API_KEY` or `AI_GATEWAY_API_KEY` |
-| `node-vercel-ai-factory/` | AI SDK 7 provider-registry and existing-factory patterns; see its README |
+| `node-vercel-ai-registry/` | New or adaptable multi-provider AI SDK applications |
+| `node-vercel-ai-existing-factory/` | Applications that already have a custom model factory |
 
 `node-vercel-ai/main.mjs` uses AI SDK 7 and therefore requires Node.js 22+. It
 wraps a language model with `mg.vercelAISDKMiddleware()` instead of a provider
@@ -32,7 +33,15 @@ OPENAI_API_KEY=... node examples/node-vercel-ai/main.mjs
 AI_GATEWAY_API_KEY=... node examples/node-vercel-ai/main.mjs
 ```
 
-For production code that selects among several providers centrally, see
-[`node-vercel-ai-factory/`](node-vercel-ai-factory/). It covers direct OpenAI
-and Anthropic, Vercel AI Gateway, and OpenAI-compatible providers using either
-the AI SDK provider registry or a controlled existing-factory exit.
+## Choose a multi-provider example
+
+| Your application | Start here | MeterGraph integration point |
+|---|---|---|
+| Calls one provider or model directly | [`node-vercel-ai/`](node-vercel-ai/) | Wrap that model with `vercelAISDKMiddleware()` |
+| Uses or can adopt `createProviderRegistry()` | [`node-vercel-ai-registry/`](node-vercel-ai-registry/) | Add middleware once to the registry |
+| Already has a custom model factory | [`node-vercel-ai-existing-factory/`](node-vercel-ai-existing-factory/) | Wrap the factory's controlled exit |
+
+Use the provider registry for new multi-provider integrations. Do not create a
+custom factory solely for MeterGraph. Each detailed README identifies the
+original application code and every MeterGraph addition; the runnable source
+uses matching `MeterGraph integration` comments.

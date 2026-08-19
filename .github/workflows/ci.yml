@@ -68,7 +68,13 @@ jobs:
         working-directory: typescript
       - if: matrix.ai == 7
         run: npm install
-        working-directory: examples/node-vercel-ai-factory
+        working-directory: examples/node-vercel-ai-registry
       - if: matrix.ai == 7
         run: npm test
-        working-directory: examples/node-vercel-ai-factory
+        working-directory: examples/node-vercel-ai-registry
+      - if: matrix.ai == 7
+        run: npm install
+        working-directory: examples/node-vercel-ai-existing-factory
+      - if: matrix.ai == 7
+        run: npm test
+        working-directory: examples/node-vercel-ai-existing-factory

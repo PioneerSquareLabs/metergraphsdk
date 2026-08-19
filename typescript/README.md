@@ -76,11 +76,11 @@ variables. Applications that initialize Metergraph centrally may continue to
 call `init()` first and then create the middleware without initialization
 options.
 
-Applications with a central model factory should instrument once through the
-AI SDK provider registry or at the controlled exit of an existing factory.
-The [tested factory examples](../examples/node-vercel-ai-factory/) cover direct
-OpenAI and Anthropic models, Vercel AI Gateway, OpenAI-compatible providers,
-middleware composition, and the coverage-versus-attribution tradeoff.
+Applications with several providers should use the [examples
+chooser](../examples/README.md): apply MeterGraph once through the AI SDK
+provider registry, or wrap the controlled exit of a custom factory the
+application already has. The separate examples mark original application code
+and every MeterGraph addition.
 
 | Vercel AI SDK | Metergraph middleware | Node.js |
 |---|---|---|

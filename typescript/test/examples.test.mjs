@@ -6,9 +6,12 @@ import path from "node:path";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
-for (const name of ["provider-registry.mjs", "existing-factory.mjs"]) {
-  test(`${name} is runnable JavaScript`, () => {
-    const example = path.join(repoRoot, "examples", "node-vercel-ai-factory", name);
+for (const [folder, name] of [
+  ["node-vercel-ai-registry", "main.mjs"],
+  ["node-vercel-ai-existing-factory", "main.mjs"],
+]) {
+  test(`${folder}/${name} is runnable JavaScript`, () => {
+    const example = path.join(repoRoot, "examples", folder, name);
     const output = execFileSync(process.execPath, ["--check", example], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
