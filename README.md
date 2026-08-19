@@ -1,6 +1,6 @@
 # Metergraph SDKs
 
-Capture SDKs for [Metergraph](https://github.com/PioneerSquareLabs/metergraph), which tracks LLM costs by application function and trace. Wrap your OpenAI, Anthropic, Gemini, or Python Vercel AI Gateway client—or add Metergraph middleware to a TypeScript Vercel AI SDK language model—and every call is attributed to the function that made it, with token counts (input/output, cache reads, aggregate and TTL-specific cache writes, reasoning), latency, and model. SDK rows contain usage counters, never embedded prices or client-computed cost. SDK 0.4 sends scrubbed request and normalized response content to the hosted service by default; applications can opt out globally or around a sensitive route or trace. The SDKs have no runtime dependencies.
+Capture SDKs for [Metergraph](https://github.com/PioneerSquareLabs/metergraph), which tracks LLM costs by application function and trace. Wrap your OpenAI, Anthropic, Gemini, or Python Vercel AI Gateway client—or add Metergraph middleware to a TypeScript Vercel AI SDK language model—and every call is attributed to the function that made it, with token counts (input/output, cache reads, aggregate and TTL-specific cache writes, reasoning), latency, and model. SDK rows contain usage counters, never embedded prices or client-computed cost. Metergraph sends scrubbed request and normalized response content to the hosted service by default; applications can opt out globally or around a sensitive route or trace. The SDKs have no runtime dependencies.
 
 | Package | Registry | Source |
 |---|---|---|
@@ -37,18 +37,17 @@ that made the call. Set METERGRAPH_CAPTURE_TEXT=0 for metadata-only capture.
    For Vercel AI SDK `generateText` / `streamText` calls, wrap each language
    model with `wrapLanguageModel({ model, middleware:
    mg.vercelAISDKMiddleware() })` instead of wrapping a provider client.
-3. Configuration is env-var based: METERGRAPH_APP_TOKEN is required (capture
-   is silently off without it), and METERGRAPH_INGEST_URL is only needed when
+3. METERGRAPH_APP_TOKEN is required; the SDK warns and disables capture when
+   it is missing. METERGRAPH_INGEST_URL is only needed when
    self-hosting the server from https://github.com/PioneerSquareLabs/metergraph.
-   Add both to .env.example or the deployment config; never commit a real
-   token. Choose any one of three sufficient ways to configure repository
-   identity: pass the repository option to `init()`
-   (`repository="owner/repository"` in Python or
-   `{ repository: "owner/repository" }` in TypeScript), set
-   `METERGRAPH_REPOSITORY` (used by
-   [MeterGraph Bot](https://github.com/apps/metergraph)), or create the optional
-   read-only `.metergraph/config.json` file containing
-   `{"repository":"owner/repository"}`.
+   Document variable names with placeholders in `.env.example`, and put real
+   values only in the deployment configuration. Repository identity enables
+   repository-level attribution and [MeterGraph Bot](https://github.com/apps/metergraph).
+   Configure it using any one of these sufficient options: the `repository`
+   option to `init()` (`repository="owner/repository"` in Python or
+   `{ repository: "owner/repository" }` in TypeScript),
+   `METERGRAPH_REPOSITORY`, or a read-only
+   `.metergraph/config.json` file containing `{"repository":"owner/repository"}`.
 4. Attribution:
    - Python: automatic via stack walk. Optionally decorate key LLM-calling
      functions with @metergraph.track to pin a stable name.
@@ -77,7 +76,8 @@ pip install metergraph
 export METERGRAPH_APP_TOKEN=<token>
 ```
 
-Setup is one line per client. `wrap()` reads `METERGRAPH_APP_TOKEN` from the environment and starts capture on its own:
+Initialize Metergraph once, then wrap each provider client. The token remains
+in the environment:
 
 ```python
 import metergraph
@@ -145,7 +145,8 @@ npm install metergraph
 export METERGRAPH_APP_TOKEN=<token>
 ```
 
-The same one-line setup applies; `wrap()` initializes from the environment:
+Initialize Metergraph once, then wrap each provider client. The token remains
+in the environment:
 
 ```ts
 import * as mg from "metergraph";
@@ -223,7 +224,7 @@ export METERGRAPH_INGEST_URL=http://localhost:8787   # your self-hosted server
 export METERGRAPH_APP_TOKEN=<token>
 ```
 
-Point `METERGRAPH_INGEST_URL` at a [self-hosted Metergraph server](https://github.com/PioneerSquareLabs/metergraph), or leave it unset to use the hosted service. Without a token, capture is off entirely; the SDK never sends anything silently. Hosted SDK 0.4 capture includes scrubbed request and response content by default, independently capped at 100 KiB; the public self-hosted server discards content even when the SDK sends it. Transport problems never break or slow your LLM calls either. When the collector is unreachable, capture drops and your application carries on.
+Point `METERGRAPH_INGEST_URL` at a [self-hosted Metergraph server](https://github.com/PioneerSquareLabs/metergraph), or leave it unset to use the hosted service. Without a token, capture is off and the SDK emits a warning. Hosted capture includes scrubbed request and response content by default, independently capped at 100 KiB; the public self-hosted server discards content even when the SDK sends it. Transport problems never break or slow your LLM calls either. When the collector is unreachable, capture drops and your application carries on.
 
 See [`examples/`](examples) for runnable per-provider examples, including an offline fake-provider demo that needs no API keys.
 
