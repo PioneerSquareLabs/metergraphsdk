@@ -75,6 +75,7 @@ export interface OutcomeOptions {
 let initialized = false;
 let warnedNoToken = false;
 let warnedNoRepository = false;
+let warnedRepeatedInit = false;
 let transport: Transport | undefined;
 let config: ConfigPoller | undefined;
 let sessionManager: SessionManager | undefined;
@@ -101,8 +102,19 @@ function repositoryConfig(options: MetergraphOptions, appRoot: string): RepoConf
   return discoverRepoConfig(appRoot);
 }
 
+function warnOnRepeatedInit(): void {
+  if (warnedRepeatedInit) return;
+  warnedRepeatedInit = true;
+  console.warn(
+    "Metergraph init() was called more than once; the first configuration remains active.",
+  );
+}
+
 export function init(options: MetergraphOptions = {}): void {
-  if (initialized) return;
+  if (initialized) {
+    warnOnRepeatedInit();
+    return;
+  }
   if (env("METERGRAPH_DISABLED") === "1" || options.disabled) {
     initialized = true;
     return;
@@ -117,10 +129,10 @@ export function init(options: MetergraphOptions = {}): void {
     }
     return;
   }
-  initialized = true;
   try {
     const appRoot = options.appRoot ?? (typeof process === "undefined" ? "" : process.cwd());
     const repoConfig = repositoryConfig(options, appRoot);
+    initialized = true;
     if (!repoConfig && !warnedNoRepository) {
       warnedNoRepository = true;
       console.warn(
@@ -254,7 +266,7 @@ export function wrap<T extends Record<PropertyKey, any>>(
   client: T,
   provider?: "openai" | "anthropic" | "google",
 ): T {
-  init();
+  if (!initialized) init();
   return wrapProvider(client, provider);
 }
 
@@ -275,7 +287,7 @@ export function vercelAISDKMiddleware<
 export function vercelAISDKMiddleware(
   options: VercelAISDKMiddlewareOptions<any> = {},
 ): VercelAISDKMiddleware<any> {
-  init();
+  if (!initialized) init();
   return createVercelAISDKMiddleware(options as any);
 }
 

@@ -97,6 +97,10 @@ from google import genai
 gemini_client = metergraph.wrap(genai.Client())
 ```
 
+Initialization is process-wide in both SDKs. The first `init()` configuration
+remains active; later explicit calls are ignored and produce one generic
+warning without option names, token values, or other secrets.
+
 Vercel's Python integration is AI Gateway through the official OpenAI or
 Anthropic client (the `ai` middleware package itself is TypeScript). Metergraph
 detects the public gateway URL automatically and uses the `creator/model`

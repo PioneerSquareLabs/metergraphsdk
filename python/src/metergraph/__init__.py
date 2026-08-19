@@ -37,6 +37,7 @@ _session_manager: SessionManager | None = None
 _initialized = False
 _warned_no_token = False
 _warned_no_repository = False
+_warned_repeated_init = False
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -44,6 +45,17 @@ def _env_bool(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.lower() not in {"0", "false", "no", "off"}
+
+
+def _warn_repeated_init() -> None:
+    global _warned_repeated_init
+    if _warned_repeated_init:
+        return
+    _warned_repeated_init = True
+    log.warning(
+        "Metergraph init() was called more than once; "
+        "the first configuration remains active."
+    )
 
 
 def init(
@@ -59,8 +71,10 @@ def init(
     disabled: bool | None = None,
 ) -> None:
     """Initialize capture. This function is idempotent and never raises."""
-    global _initialized, _warned_no_token, _warned_no_repository, _writer, _config, _session_manager
+    global _initialized, _warned_no_token, _warned_no_repository
+    global _writer, _config, _session_manager
     if _initialized:
+        _warn_repeated_init()
         return
     if os.getenv("METERGRAPH_DISABLED") == "1" or disabled:
         _initialized = True
@@ -75,7 +89,6 @@ def init(
                 "Metergraph capture disabled: token and ingest URL are required"
             )
         return
-    _initialized = True
     try:
         app_root_resolved = os.path.realpath(app_root or os.getcwd())
         repository_value = repository or os.getenv("METERGRAPH_REPOSITORY")
@@ -85,6 +98,7 @@ def init(
             and "/" in repository_value.strip()
             else discover_repo_config(app_root_resolved)
         )
+        _initialized = True
         if repo_config is None and not _warned_no_repository:
             _warned_no_repository = True
             log.warning(
@@ -165,7 +179,8 @@ def wrap(client: Any, *, provider: str | None = None) -> Any:
     force gateway handling for a compatible client with a custom URL. Call
     init(...) first to pass Metergraph options in code.
     """
-    init()
+    if not _initialized:
+        init()
     return _wrap(client, provider=provider)
 
 
