@@ -155,18 +155,18 @@ def test_wrap_sync_records_usage_context_and_preserves_response(tmp_path):
     )
     metergraph.wrap(client, provider="openai")
     metergraph.wrap(client, provider="openai")  # idempotent
-    metergraph.set_session("conversation-7")
-    with metergraph.route(
-        "ticket-classifier",
-        unit="answer",
-        tags={"tier": "pro"},
-        capture_text=True,
-    ):
-        result = client.chat.completions.create(
-            model="gpt-test",
-            messages=[{"role": "user", "content": "classify ticket 123"}],
-            tools=[{"type": "function", "function": {"name": "lookup"}}],
-        )
+    with metergraph.session("conversation-7"):
+        with metergraph.route(
+            "ticket-classifier",
+            unit="answer",
+            tags={"tier": "pro"},
+            capture_text=True,
+        ):
+            result = client.chat.completions.create(
+                model="gpt-test",
+                messages=[{"role": "user", "content": "classify ticket 123"}],
+                tools=[{"type": "function", "function": {"name": "lookup"}}],
+            )
 
     assert result.id == "req_1"
     assert len(rows.rows) == 1
@@ -1253,20 +1253,19 @@ def test_config_poller_logs_generic_failures_via_failure_logger(caplog):
 def test_record_outcome_uses_the_async_content_free_channel(monkeypatch):
     rows = Rows()
     monkeypatch.setattr(metergraph, "_writer", rows)
-    metergraph.set_session("outcome-session")
-
-    assert metergraph.record_outcome(
-        "ticket-classifier",
-        model="deepseek/v3.2",
-        task_completed=True,
-        feedback_score=0.8,
-        turns_to_resolution=2,
-        escalated=False,
-        abandoned=False,
-        edit_distance_ratio=0.1,
-        regeneration_count=0,
-        event_id="outcome-1",
-    )
+    with metergraph.session("outcome-session"):
+        assert metergraph.record_outcome(
+            "ticket-classifier",
+            model="deepseek/v3.2",
+            task_completed=True,
+            feedback_score=0.8,
+            turns_to_resolution=2,
+            escalated=False,
+            abandoned=False,
+            edit_distance_ratio=0.1,
+            regeneration_count=0,
+            event_id="outcome-1",
+        )
     row = rows.rows[0]
     assert row["event_type"] == "outcome"
     assert row["event_id"] == "outcome-1"
