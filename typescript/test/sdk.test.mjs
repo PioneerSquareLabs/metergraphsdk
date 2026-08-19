@@ -43,6 +43,56 @@ function capturedResponse(row) {
   return JSON.parse(row.response_text);
 }
 
+test("capture separates OpenTelemetry status from model finish reasons", () => {
+  const rows = [];
+  const runtime = stubRuntime(rows);
+
+  const completed = runtime.start("anthropic", "ai.doGenerate", { model: "claude-test" });
+  runtime.finish(completed, {
+    finishReason: { unified: "stop", raw: "end_turn" },
+  });
+  const failed = runtime.start("anthropic", "ai.doGenerate", { model: "claude-test" });
+  runtime.finish(failed, undefined, { error: new TypeError("provider failed") });
+  const cancelled = runtime.start("anthropic", "ai.doStream", { model: "claude-test" });
+  runtime.finish(cancelled, undefined, { status: "abandoned", stream: true });
+  const inBandFailure = runtime.start("openai", "responses.create", { model: "gpt-test" });
+  runtime.finish(inBandFailure, { status: "failed" });
+  const incomplete = runtime.start("openai", "responses.create", { model: "gpt-test" });
+  runtime.finish(incomplete, {
+    status: "incomplete",
+    incomplete_details: { reason: "max_output_tokens" },
+  });
+
+  assert.equal(rows[0].status, "stop");
+  assert.equal(rows[0].status_code, "unset");
+  assert.equal(rows[0].finish_reason, "stop");
+  assert.equal(rows[0].finish_reason_raw, "end_turn");
+  assert.equal(rows[0].error, false);
+
+  assert.equal(rows[1].status, "error");
+  assert.equal(rows[1].status_code, "error");
+  assert.equal(rows[1].finish_reason, undefined);
+  assert.equal(rows[1].error, true);
+  assert.equal(rows[1].error_type, "TypeError");
+
+  assert.equal(rows[2].status, "abandoned");
+  assert.equal(rows[2].status_code, "unset");
+  assert.equal(rows[2].finish_reason, undefined);
+  assert.equal(rows[2].error, false);
+
+  assert.equal(rows[3].status, "failed");
+  assert.equal(rows[3].status_code, "error");
+  assert.equal(rows[3].finish_reason, "error");
+  assert.equal(rows[3].finish_reason_raw, "failed");
+  assert.equal(rows[3].error, true);
+
+  assert.equal(rows[4].status, "incomplete");
+  assert.equal(rows[4].status_code, "unset");
+  assert.equal(rows[4].finish_reason, "length");
+  assert.equal(rows[4].finish_reason_raw, "max_output_tokens");
+  assert.equal(rows[4].error, false);
+});
+
 test("wrap captures usage/context and config assignment is sticky", async (t) => {
   assert.equal(DEFAULT_INGEST_URL, "https://d2xus7mp8zdv6t.cloudfront.net");
   const batches = [];
