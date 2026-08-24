@@ -72,6 +72,35 @@ async, streaming, tool calls, and OpenAI Responses API calls are captured. Use
 `metergraph.wrap(client, provider="vercel")` only when a compatible client is
 behind a custom gateway URL that cannot be detected automatically.
 
+## LiteLLM OpenTelemetry export
+
+If LiteLLM already creates OpenTelemetry GenAI spans, install the optional
+integration and configure MeterGraph as LiteLLM's custom exporter. Existing
+LiteLLM call sites remain unchanged and must not also be wrapped.
+
+```bash
+python -m pip install 'metergraph[otel]' 'litellm[proxy]>=1.96.2,<2'
+```
+
+```python
+import litellm
+from litellm.integrations.opentelemetry import OpenTelemetry, OpenTelemetryConfig
+from metergraph.opentelemetry import MetergraphGenAIExporter
+
+litellm.callbacks.append(OpenTelemetry(OpenTelemetryConfig(
+    exporter=MetergraphGenAIExporter(),
+    capture_message_content="SPAN_ONLY",
+)))
+```
+
+The exporter preserves OpenTelemetry trace identity, model/provider metadata,
+token usage, latency, system instructions, ordered messages, and text output.
+Message content is explicitly enabled because it may be sensitive. Text parts
+are retained and replayable in the current POC pipeline. Calls containing other
+part types retain their model, usage, timing, and status metadata, but those
+parts are not replayable yet. See the runnable
+[`python-litellm-otel` example](../examples/python-litellm-otel/).
+
 Configuration:
 
 - `METERGRAPH_APP_TOKEN` — required bearer token

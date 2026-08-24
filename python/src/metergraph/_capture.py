@@ -1056,6 +1056,11 @@ def set_runtime(runtime: Runtime | None) -> None:
     _runtime = runtime
 
 
+def get_runtime() -> Runtime | None:
+    """Return the active runtime for optional SDK integrations."""
+    return _runtime
+
+
 def _request(args: tuple, kwargs: dict) -> dict[str, Any]:
     request: dict[str, Any] = {}
     if args and isinstance(args[0], Mapping):

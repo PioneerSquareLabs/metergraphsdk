@@ -1,6 +1,8 @@
 # Examples
 
-Each example wraps a real provider client, attributes calls to a function with `track`, and sends usage metadata to your Metergraph server.
+These examples show supported provider wrappers, Vercel AI SDK middleware,
+LiteLLM OpenTelemetry export, and BatchFirst execution. Capture examples send
+usage metadata to your MeterGraph server.
 
 Setup for all of them:
 
@@ -16,6 +18,7 @@ export METERGRAPH_APP_TOKEN=dev-token                # one of MG_TOKENS
 | `python-anthropic/main.py` | `pip install metergraph anthropic`, `ANTHROPIC_API_KEY` |
 | `python-gemini/main.py` | `pip install metergraph google-genai`, `GEMINI_API_KEY` |
 | `python-batch-first/main.py` | Opt-in OpenAI Batch API with a deadline and direct fallback; read its warning first |
+| `python-litellm-otel/` | Export LiteLLM's OpenTelemetry GenAI spans without changing call sites |
 | `node-openai/main.mjs` | `npm i metergraph openai`, `OPENAI_API_KEY` |
 | `node-anthropic/main.mjs` | `npm i metergraph @anthropic-ai/sdk`, `ANTHROPIC_API_KEY` |
 | `node-gemini/main.mjs` | `npm i metergraph @google/genai`, `GEMINI_API_KEY` |
@@ -53,3 +56,9 @@ uses matching `MeterGraph integration` comments.
 example, not a capture example. Use it only when the request may run through a
 provider Batch API and you explicitly accept that a deadline fallback can
 execute and bill the same request twice.
+
+## LiteLLM with OpenTelemetry
+
+[`python-litellm-otel/`](python-litellm-otel/) attaches MeterGraph as LiteLLM's
+custom OpenTelemetry exporter. Use it when LiteLLM already emits GenAI semantic-
+convention spans; do not also wrap the same calls with `metergraph.wrap()`.
