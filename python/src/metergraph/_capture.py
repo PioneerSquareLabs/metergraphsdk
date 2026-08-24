@@ -1056,8 +1056,8 @@ def set_runtime(runtime: Runtime | None) -> None:
     _runtime = runtime
 
 
-def get_runtime() -> Runtime | None:
-    """Return the active runtime for optional SDK integrations."""
+def _get_runtime() -> Runtime | None:
+    """Return the active runtime to internal capture integrations."""
     return _runtime
 
 

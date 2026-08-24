@@ -128,9 +128,10 @@ Sync, async, streaming, tool calls, and Responses API requests use the same
 capture path. For a compatible client behind a custom gateway URL, pass
 `provider="vercel"` to `metergraph.wrap()`.
 
-Applications that already use LiteLLM's OpenTelemetry callback can attach
-MeterGraph as a custom GenAI span exporter without changing individual model
-calls. See the [LiteLLM OpenTelemetry example](examples/python-litellm-otel/).
+MeterGraph provides a standard OpenTelemetry GenAI span exporter. LiteLLM is
+the currently qualified integration and can attach the exporter without
+changing individual model calls. See the
+[LiteLLM OpenTelemetry example](examples/python-litellm-otel/).
 
 Then use the wrapped client exactly as before:
 

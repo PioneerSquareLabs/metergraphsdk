@@ -38,7 +38,7 @@ def _span(attributes: dict, *, status: Status | None = None) -> ReadableSpan:
             is_remote=False,
             trace_flags=TraceFlags(TraceFlags.SAMPLED),
         ),
-        resource=Resource.create({"service.name": "synthetic-litellm-app"}),
+        resource=Resource.create({"service.name": "synthetic-genai-app"}),
         attributes=attributes,
         status=status or Status(StatusCode.OK),
         start_time=1_786_496_400_000_000_000,
@@ -115,7 +115,7 @@ def test_exports_completed_genai_span_without_changing_message_order(monkeypatch
     assert row["parent_span_id"] == "56" * 8
     assert row["trace_name"] == "chat claude-opus-5"
     assert row["func"] == "chat claude-opus-5"
-    assert row["module"] == "synthetic-litellm-app"
+    assert row["module"] == "synthetic-genai-app"
     assert row["ts"] == datetime.fromtimestamp(
         1_786_496_400, tz=timezone.utc
     ).isoformat()

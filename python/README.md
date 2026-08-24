@@ -72,11 +72,13 @@ async, streaming, tool calls, and OpenAI Responses API calls are captured. Use
 `metergraph.wrap(client, provider="vercel")` only when a compatible client is
 behind a custom gateway URL that cannot be detected automatically.
 
-## LiteLLM OpenTelemetry export
+## OpenTelemetry GenAI export
 
-If LiteLLM already creates OpenTelemetry GenAI spans, install the optional
-integration and configure MeterGraph as LiteLLM's custom exporter. Existing
-LiteLLM call sites remain unchanged and must not also be wrapped.
+`MetergraphGenAIExporter` is a standard OpenTelemetry span exporter for GenAI
+semantic-convention spans. The currently qualified integration is LiteLLM:
+install the optional integration and configure MeterGraph as LiteLLM's custom
+exporter. Existing LiteLLM call sites remain unchanged and must not also be
+wrapped.
 
 ```bash
 python -m pip install 'metergraph[otel]' 'litellm[proxy]>=1.96.2,<2'

@@ -12,7 +12,7 @@ from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.trace import StatusCode
 
-from ._capture import get_runtime
+from ._capture import _get_runtime
 from ._context import CaptureContext
 
 
@@ -108,7 +108,7 @@ class MetergraphGenAIExporter(SpanExporter):
         metergraph.init()
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
-        runtime = get_runtime()
+        runtime = _get_runtime()
         if runtime is None:
             return SpanExportResult.SUCCESS
         for span in spans:
