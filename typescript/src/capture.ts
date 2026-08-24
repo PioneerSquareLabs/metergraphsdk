@@ -5,6 +5,8 @@ import { scrub, templateHash } from "./template.js";
 import type { Transport } from "./transport.js";
 import { SDK_VERSION } from "./version.js";
 
+export const DEFAULT_TEXT_MAX_BYTES = 1024 * 1024;
+
 export interface RuntimeOptions {
   captureText: boolean;
   redact?: (text: string, kind: "request" | "response") => string;

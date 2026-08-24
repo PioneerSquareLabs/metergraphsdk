@@ -3,7 +3,7 @@ import type { SessionManager } from "./session.js";
 
 export type TransportMode = "auto" | "background" | "buffered";
 export type WaitUntil = (promise: Promise<unknown>) => void;
-export const MAX_BATCH_BYTES = 512 * 1024;
+export const MAX_BATCH_BYTES = 4 * 1024 * 1024;
 
 export interface TransportOptions {
   queueSize?: number;

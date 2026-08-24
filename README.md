@@ -266,7 +266,7 @@ export METERGRAPH_INGEST_URL=http://localhost:8787   # your self-hosted server
 export METERGRAPH_APP_TOKEN=<token>
 ```
 
-Point `METERGRAPH_INGEST_URL` at a [self-hosted Metergraph server](https://github.com/PioneerSquareLabs/metergraph), or leave it unset to use the hosted service. Without a token, capture is off and the SDK emits a warning. Hosted capture includes scrubbed request and response content by default, independently capped at 100 KiB; the public self-hosted server discards content even when the SDK sends it. Transport problems never break or slow your LLM calls either. When the collector is unreachable, capture drops and your application carries on.
+Point `METERGRAPH_INGEST_URL` at a [self-hosted Metergraph server](https://github.com/PioneerSquareLabs/metergraph), or leave it unset to use the hosted service. Without a token, capture is off and the SDK emits a warning. Hosted capture includes scrubbed request and response content by default. Each field is capped at 1 MiB by default; set `METERGRAPH_TEXT_MAX_BYTES`, `text_max_bytes`, or `textMaxBytes` to accept larger prompts and responses. Collectors may enforce their own request or retention limits, and the public self-hosted server discards content even when the SDK sends it. Transport problems never break or slow your LLM calls either. When the collector is unreachable, capture drops and your application carries on.
 
 See [`examples/`](examples) for runnable per-provider examples, including an offline fake-provider demo that needs no API keys.
 

@@ -1,4 +1,4 @@
-import { CaptureRuntime } from "./capture.js";
+import { CaptureRuntime, DEFAULT_TEXT_MAX_BYTES } from "./capture.js";
 import { ConfigPoller } from "./config.js";
 import {
   contextSnapshot,
@@ -57,6 +57,7 @@ export interface MetergraphOptions {
   flushMs?: number;
   configPollMs?: number;
   configHardTtlMs?: number;
+  textMaxBytes?: number;
 }
 
 export type VercelAISDKMiddlewareOptions<
@@ -151,6 +152,8 @@ export function init(options: MetergraphOptions = {}): void {
     sessionManager = repoConfig
       ? new SessionManager(token, ingestUrl, repoConfig.repository, SDK_VERSION)
       : undefined;
+    const configuredTextMaxBytes = options.textMaxBytes
+      ?? Number(env("METERGRAPH_TEXT_MAX_BYTES") ?? DEFAULT_TEXT_MAX_BYTES);
     transport = new Transport(token, ingestUrl, {
       queueSize: options.queueSize ?? Number(env("METERGRAPH_QUEUE_SIZE") ?? 2_000),
       batchSize: options.batchSize ?? Number(env("METERGRAPH_BATCH_SIZE") ?? 100),
@@ -165,10 +168,9 @@ export function init(options: MetergraphOptions = {}): void {
       repoRoot: repoConfig?.repoRoot,
       skipFrames: options.skipFrames ?? [],
       environment: options.environment ?? env("METERGRAPH_ENV"),
-      textMaxBytes: Math.min(
-        100 * 1024,
-        Math.max(1, Number(env("METERGRAPH_TEXT_MAX_BYTES") ?? 100 * 1024)),
-      ),
+      textMaxBytes: Number.isFinite(configuredTextMaxBytes)
+        ? Math.max(1, Math.floor(configuredTextMaxBytes))
+        : DEFAULT_TEXT_MAX_BYTES,
     }));
     config = new ConfigPoller(
       token,

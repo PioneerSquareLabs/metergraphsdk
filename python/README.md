@@ -78,6 +78,7 @@ Configuration:
 - `METERGRAPH_INGEST_URL` — optional override; defaults to the hosted HTTPS endpoint
 - `METERGRAPH_REPOSITORY` — optional `owner/repository` identity; used by [MeterGraph Bot](https://github.com/apps/metergraph)
 - `METERGRAPH_CAPTURE_TEXT=0` — opt out of content capture globally
+- `METERGRAPH_TEXT_MAX_BYTES` — per-field content limit; defaults to 1 MiB
 - `METERGRAPH_DISABLED=1` — process kill switch
 - `METERGRAPH_QUEUE_SIZE`, `METERGRAPH_BATCH_SIZE`, `METERGRAPH_FLUSH_SECONDS`
 
@@ -99,11 +100,13 @@ identity, it warns once and continues capture without repository attribution.
 
 Delivery is bounded and off the request path. Queue overflow or a collector
 outage drops capture and increments internal counters; it never changes the
-provider call. Each wire batch is bounded to 512 KiB after optional gzip.
+provider call. Each wire batch is bounded to 4 MiB after optional gzip.
 By default, Metergraph captures the scrubbed provider request and a normalized
 response envelope, including assistant content and tool calls. Provider
 credentials and transport headers are removed. Request and response are each
-limited to 100 KiB of UTF-8 with an explicit truncation marker.
+limited to 1 MiB of UTF-8 by default with an explicit truncation marker. Set
+`METERGRAPH_TEXT_MAX_BYTES` or initialize with `text_max_bytes=...` to raise
+the per-field limit for larger prompts and responses.
 `capture_text=False` on `route()` or `trace()` overrides the global content
 policy for a sensitive operation. The equivalent initialization option is
 `metergraph.init(capture_text=False)`. The public open-source server continues
