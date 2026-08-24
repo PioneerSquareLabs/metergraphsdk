@@ -24,6 +24,7 @@ from ._version import SDK_VERSION
 
 
 log = logging.getLogger("metergraph")
+DEFAULT_TEXT_MAX_BYTES = 1024 * 1024
 
 
 def _get(value: Any, name: str, default: Any = None) -> Any:
@@ -639,7 +640,7 @@ class Options:
     repo_root: str | None = None
     skip_frames: tuple[str, ...] = ()
     environment: str | None = None
-    text_max_bytes: int = 100 * 1024
+    text_max_bytes: int = DEFAULT_TEXT_MAX_BYTES
 
 
 class Runtime:

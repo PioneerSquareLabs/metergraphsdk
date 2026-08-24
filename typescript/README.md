@@ -129,12 +129,13 @@ identity, it warns once and continues capture without repository attribution.
 Metergraph captures the scrubbed provider request and a
 normalized response envelope, including assistant content and tool calls, by
 default. Provider credentials and transport headers are removed. Request and
-response are each limited to 100 KiB of UTF-8 with an explicit truncation
-marker. Set `METERGRAPH_CAPTURE_TEXT=0`, initialize with
-`captureText: false`, or set `captureText: false` on an individual `route()` or
-`trace()` to opt out for sensitive operations. The public open-source server
-still discards content; hosted workspaces retain it under their metadata
-retention period.
+response are each limited to 1 MiB of UTF-8 by default with an explicit
+truncation marker. Set `METERGRAPH_TEXT_MAX_BYTES` or initialize with
+`textMaxBytes` to raise the per-field limit. Set `METERGRAPH_CAPTURE_TEXT=0`,
+initialize with `captureText: false`, or set `captureText: false` on an
+individual `route()` or `trace()` to opt out for sensitive operations. The
+public open-source server still discards content; hosted workspaces retain it
+under their metadata retention period.
 
 `trace(name, fn, { traceId, parentSpanId, captureText })` groups calls into a
 logical trace using `AsyncLocalStorage`. Nested traces reuse the active trace
@@ -142,7 +143,7 @@ unless given a different trace ID. Calls outside a trace become one-span
 traces. Manual IDs can join work across process boundaries; automatic W3C HTTP
 propagation is not included.
 
-Actual wire batches never exceed 512 KiB after optional gzip.
+Actual wire batches never exceed 4 MiB after optional gzip.
 Long-running Node processes use an unref'd
 background timer. On Workers or Vercel, call
 `bindWaitUntil(ctx)` once per request. On Lambda, use `wrapHandler(handler)`

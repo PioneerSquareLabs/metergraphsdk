@@ -16,7 +16,7 @@ from metergraph._capture import Options, Runtime
 from metergraph._config import ConfigPoller, choose_model
 from metergraph._failure_log import FailureLogger
 from metergraph._template import template_hash
-from metergraph._transport import Writer
+from metergraph._transport import MAX_BATCH_BYTES, Writer
 
 
 # wrap() auto-initializes from the environment; keep the suite hermetic.
@@ -835,14 +835,17 @@ def test_anthropic_batch_results_capture_usage_without_changing_iteration(tmp_pa
 def test_content_defaults_on_and_route_can_override_capture(tmp_path):
     rows = Rows()
     runtime = Runtime(rows, Options(app_root=str(tmp_path)))
+    large_prompt = "private" + ("x" * (200 * 1024))
+    large_response = "private output" + ("y" * (200 * 1024))
     call = runtime.call_state(
-        "openai", "responses", {"model": "test", "input": "private"}
+        "openai", "responses", {"model": "test", "input": large_prompt}
     )
-    call.finish(response("private output"))
+    call.finish(response(large_response))
 
     assert rows.rows[0]["content_opted_in"] is True
-    assert "private" in rows.rows[0]["request_json"]
-    assert captured_response(rows.rows[0])["content"] == "private output"
+    assert len(rows.rows[0]["request_json"].encode()) > 100 * 1024
+    assert captured_response(rows.rows[0])["content"] == large_response
+    assert rows.rows[0]["text_truncated"] is False
 
     _capture.set_runtime(runtime)
 
@@ -1315,7 +1318,7 @@ def test_writer_gzips_large_batches_and_flushes():
     assert received[0][1]["rows"][0]["payload"].startswith("x")
 
 
-def test_writer_splits_wire_batches_at_512_kib():
+def test_writer_splits_wire_batches_at_4_mib():
     wire_lengths = []
     delivered_rows = []
 
@@ -1342,13 +1345,13 @@ def test_writer_splits_wire_batches_at_512_kib():
         flush_seconds=5,
     )
     for index in range(6):
-        writer.enqueue({"index": index, "payload": os.urandom(120_000).hex()})
+        writer.enqueue({"index": index, "payload": os.urandom(800_000).hex()})
     assert writer.flush(10)
     writer.shutdown()
     server.shutdown()
 
     assert len(wire_lengths) > 1
-    assert max(wire_lengths) <= 512 * 1024
+    assert max(wire_lengths) <= MAX_BATCH_BYTES
     assert sorted(row["index"] for row in delivered_rows) == list(range(6))
 
 

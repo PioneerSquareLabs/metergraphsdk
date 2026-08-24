@@ -32,7 +32,9 @@ latency, model, route/session/tag labels, a structural template hash) sent to
 provider request and normalized response by default. Applications can opt out
 globally with `METERGRAPH_CAPTURE_TEXT=0`, at initialization, or around an
 individual route or trace. Request and response are independently limited to
-100 KiB of UTF-8. Known-sensitive request keys (`api_key`, `authorization`,
+1 MiB of UTF-8 by default; applications can raise that limit with
+`METERGRAPH_TEXT_MAX_BYTES` or the initialization option. Known-sensitive
+request keys (`api_key`, `authorization`,
 `headers`, `token`, `secret`) are stripped before anything is serialized —
 see `scrub()` in [`python/src/metergraph/_template.py`](python/src/metergraph/_template.py)
 and [`typescript/src/template.ts`](typescript/src/template.ts).

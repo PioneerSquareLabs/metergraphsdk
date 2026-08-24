@@ -26,7 +26,7 @@ import {
   withSession,
   wrap,
 } from "../dist/index.js";
-import { CaptureRuntime } from "../dist/capture.js";
+import { CaptureRuntime, DEFAULT_TEXT_MAX_BYTES } from "../dist/capture.js";
 import { MAX_BATCH_BYTES, Transport } from "../dist/transport.js";
 import { FailureLogger } from "../dist/failure-log.js";
 import { ConfigPoller } from "../dist/config.js";
@@ -35,7 +35,7 @@ import { setCaptureRuntime, SEAM_TABLES, OPENAI_SEAMS, ANTHROPIC_SEAMS, GOOGLE_S
 function stubRuntime(rows, options = {}) {
   return new CaptureRuntime(
     { enqueue(row) { rows.push(row); return true; } },
-    { captureText: true, appRoot: "", skipFrames: [], textMaxBytes: 100 * 1024, ...options },
+    { captureText: true, appRoot: "", skipFrames: [], textMaxBytes: DEFAULT_TEXT_MAX_BYTES, ...options },
   );
 }
 
@@ -181,7 +181,10 @@ test("wrap captures usage/context and config assignment is sticky", async (t) =>
 
     await client.chat.completions.create({
       model: "metadata-model",
-      messages: [{ role: "user", content: "private by default" }],
+      messages: [{
+        role: "user",
+        content: `private by default ${"x".repeat(200 * 1024)}`,
+      }],
     });
     assert.equal(recordOutcome("classify", {
       model: "model-a",
@@ -347,6 +350,8 @@ test("wrap captures usage/context and config assignment is sticky", async (t) =>
   const metadataOnly = allRows.find((candidate) => candidate.model === "metadata-model");
   assert.equal(metadataOnly.content_opted_in, true);
   assert.match(metadataOnly.request_json, /private by default/);
+  assert.ok(Buffer.byteLength(metadataOnly.request_json) > 100 * 1024);
+  assert.equal(metadataOnly.text_truncated, false);
   assert.equal(capturedResponse(metadataOnly).content, "done");
   const streamed = allRows.find((candidate) => candidate.model === "stream-model");
   assert.equal(streamed.input_tokens, 2);
@@ -552,6 +557,7 @@ test("trace groups spans, propagates manual ids, and permits scoped opt-out", as
 test("capture scrubs credentials, applies redaction, and independently bounds UTF-8 fields", () => {
   const rows = [];
   const runtime = stubRuntime(rows, {
+    textMaxBytes: 100 * 1024,
     redact(value, kind) {
       return value.replaceAll("customer-secret", `<redacted-${kind}>`);
     },
@@ -581,6 +587,7 @@ test("capture scrubs credentials, applies redaction, and independently bounds UT
 test("captured tool calls use response redaction and the shared UTF-8 bound", () => {
   const rows = [];
   const runtime = stubRuntime(rows, {
+    textMaxBytes: 100 * 1024,
     redact(value, kind) {
       return value.replaceAll("customer-secret", `<redacted-${kind}>`);
     },
@@ -1077,7 +1084,7 @@ test("wrap never throws even if client attribute access throws", async (t) => {
   assert.ok(warnings.some((w) => w.includes("wrap() failed")));
 });
 
-test("transport splits wire batches at 512 KiB", async (t) => {
+test("transport splits wire batches at 4 MiB", async (t) => {
   const wireLengths = [];
   let deliveredRows = 0;
   const server = http.createServer(async (request, response) => {
@@ -1101,7 +1108,7 @@ test("transport splits wire batches at 512 KiB", async (t) => {
     { mode: "background", batchSize: 100, flushMs: 60_000 },
   );
   for (let index = 0; index < 6; index += 1) {
-    transport.enqueue({ index, payload: randomBytes(120_000).toString("hex") });
+    transport.enqueue({ index, payload: randomBytes(800_000).toString("hex") });
   }
   assert.equal(await transport.flush(10_000), true);
   await transport.shutdown();

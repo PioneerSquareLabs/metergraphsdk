@@ -18,7 +18,7 @@ from ._version import SDK_VERSION
 
 
 log = logging.getLogger("metergraph")
-MAX_BATCH_BYTES = 512 * 1024
+MAX_BATCH_BYTES = 4 * 1024 * 1024
 
 
 class Writer:

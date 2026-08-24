@@ -25,6 +25,12 @@ from metergraph._capture import Options, Runtime
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
+try:
+    import httpx2 as anthropic_httpx
+except ImportError:
+    # Anthropic <1 uses httpx; Anthropic 1.0+ uses its API-compatible httpx2.
+    anthropic_httpx = httpx
+
 
 class Rows:
     def __init__(self):
@@ -194,8 +200,8 @@ def test_wrap_captures_anthropic_messages_create_through_a_real_client(tmp_path)
     rows = Rows()
     _capture.set_runtime(Runtime(rows, Options(app_root=str(tmp_path))))
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handler(request: anthropic_httpx.Request) -> anthropic_httpx.Response:
+        return anthropic_httpx.Response(
             200,
             json={
                 "id": "msg_test",
@@ -210,7 +216,9 @@ def test_wrap_captures_anthropic_messages_create_through_a_real_client(tmp_path)
 
     client = AsyncAnthropic(
         api_key="test",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        http_client=anthropic_httpx.AsyncClient(
+            transport=anthropic_httpx.MockTransport(handler)
+        ),
     )
     metergraph.wrap(client, provider="anthropic")
 
@@ -237,9 +245,9 @@ def test_wrap_detects_vercel_gateway_through_real_async_anthropic_client(tmp_pat
     rows = Rows()
     _capture.set_runtime(Runtime(rows, Options(app_root=str(tmp_path))))
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: anthropic_httpx.Request) -> anthropic_httpx.Response:
         assert request.url.host == "ai-gateway.vercel.sh"
-        return httpx.Response(
+        return anthropic_httpx.Response(
             200,
             json={
                 "id": "msg_gateway",
@@ -255,7 +263,9 @@ def test_wrap_detects_vercel_gateway_through_real_async_anthropic_client(tmp_pat
     client = AsyncAnthropic(
         api_key="test",
         base_url="https://ai-gateway.vercel.sh",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        http_client=anthropic_httpx.AsyncClient(
+            transport=anthropic_httpx.MockTransport(handler)
+        ),
     )
     metergraph.wrap(client)
 
