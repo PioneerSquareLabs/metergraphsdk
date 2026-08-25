@@ -20,6 +20,19 @@ jobs:
       - run: pytest python/tests -q
       - run: python python/tests/package/verify_artifacts.py
 
+  python-ddtrace-anthropic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e "python[dev]" "ddtrace==4.13.1"
+      - name: Datadog + MeterGraph Anthropic streaming composition
+        env:
+          DD_TRACE_ENABLED: "false"
+        run: pytest python/tests/integrations/instrumentation/test_ddtrace_anthropic_composition.py -q
+
   python-litellm-otel:
     runs-on: ubuntu-latest
     steps:
