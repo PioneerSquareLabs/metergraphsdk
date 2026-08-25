@@ -1,21 +1,19 @@
 """Real-package composition: Datadog ``ddtrace`` Anthropic instrumentation and
 MeterGraph over a single async, context-managed ``messages.stream`` call.
 
-This is the load-bearing integration test that the generic proxy matrix
-(``tests/contracts/stream_lifecycle``) stands in for the rest of the time: it
-runs the *actual* ddtrace 4.13.1 Anthropic patch against an *actual*
+This test runs the ddtrace 4.13.1 Anthropic patch against an
 ``AsyncAnthropic`` 0.125.0 client, with only the HTTP/SSE transport mocked — no
 credentials, no live network, no billable call.
 
 Installation order is the customer-relevant one. Datadog auto-instruments at
 startup (``ddtrace-run`` / ``patch_all()``), monkeypatching the anthropic
-*classes*; the application then calls ``metergraph.wrap(client)`` on its own
-*instance*. Because an instance attribute shadows the class method, MeterGraph
+classes; the application then calls ``metergraph.wrap(client)`` on its own
+instance. Because an instance attribute shadows the class method, MeterGraph
 is always the **outer** layer and Datadog's ``TracedAsyncStream`` proxy the
 **inner** one, regardless of import order.
 
-The one shape that matters for correctness is the same one the parity harness
-protects: Datadog's ``.stream()`` proxy is a context manager whose
+The parity harness covers the same behavior: Datadog's ``.stream()`` proxy is a
+context manager whose
 ``__aenter__`` returns a *distinct* entered stream (a fresh ``TracedAsyncStream``
 wrapping the real ``AsyncMessageStream``). MeterGraph must delegate iteration
 and ``get_final_message()`` to that entered object, not to the manager.
@@ -37,8 +35,8 @@ import json
 
 import pytest
 
-# Skip cleanly whenever ddtrace is not part of the normal dev environment; the
-# isolated CI job (`python-ddtrace-anthropic`) installs the exact version.
+# The normal development environment does not install ddtrace. The isolated
+# CI job (`python-ddtrace-anthropic`) installs the pinned version.
 ddtrace = pytest.importorskip(
     "ddtrace",
     reason="ddtrace is not a dev dependency; covered by the isolated CI job",
