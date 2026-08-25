@@ -157,6 +157,8 @@ function wrapStreamResult(
   const content: unknown[] = [];
   const responseMetadata: Record<string, unknown> = {};
 
+  // Telemetry inspection of one part. Reads part fields, so callers run it
+  // fail-open; a fault must not block delivery or become a stream error.
   const observe = (part: AnyRecord) => {
     if (firstOutputAt === undefined && outputChunk(part)) firstOutputAt = performance.now();
     const delta = chunkText(part);
@@ -172,18 +174,35 @@ function wrapStreamResult(
     }
   };
 
+  const observeSafely = (part: AnyRecord) => {
+    try {
+      observe(part);
+    } catch {
+      // Telemetry inspection fault: skip this part, deliver it unchanged.
+    }
+  };
+
+  // End-of-stream response assembly reads finish-part fields, so it is telemetry
+  // and fail-open; a partial or lost trace is acceptable.
+  const assembleResponse = (): AnyRecord | undefined => {
+    try {
+      if (text) content.unshift({ type: "text", text });
+      return {
+        content,
+        usage: finishPart?.usage,
+        finishReason: finishPart?.finishReason,
+        response: {
+          ...responseMetadata,
+          ...(result.response ?? {}),
+        },
+      };
+    } catch {
+      return undefined;
+    }
+  };
+
   const finish = (status?: string, error: unknown = streamError) => {
-    if (text) content.unshift({ type: "text", text });
-    const response = {
-      content,
-      usage: finishPart?.usage,
-      finishReason: finishPart?.finishReason,
-      response: {
-        ...responseMetadata,
-        ...(result.response ?? {}),
-      },
-    };
-    finishCapture(capture, state, response, {
+    finishCapture(capture, state, assembleResponse(), {
       error,
       status,
       stream: true,
@@ -194,19 +213,21 @@ function wrapStreamResult(
 
   const stream = new ReadableStream<any>({
     async pull(controller) {
+      let next: ReadableStreamReadResult<any>;
       try {
-        const next = await reader.read();
-        if (next.done) {
-          finish();
-          controller.close();
-          return;
-        }
-        observe(next.value);
-        controller.enqueue(next.value);
+        next = await reader.read();
       } catch (error) {
         finish("error", error);
         controller.error(error);
+        return;
       }
+      if (next.done) {
+        finish();
+        controller.close();
+        return;
+      }
+      observeSafely(next.value);
+      controller.enqueue(next.value);
     },
     async cancel(reason) {
       try {

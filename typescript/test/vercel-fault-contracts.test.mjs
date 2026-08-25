@@ -11,11 +11,11 @@
 // unwrapped, generation still runs), and capture.finish() faults are swallowed
 // by finishCapture (delivery, read rejections, and cancel identity survive).
 //
-// The gap is per-part field access inside observe()/finish(): it is not guarded,
-// so a part that resolves reader.read() but throws when telemetry touches one of
-// its fields is reported to the consumer as a provider stream error and its
-// delivery is altered. These are held under expectContractViolation, which pins
-// the current-behavior assertion and fails once the production guard lands.
+// Per-part field access inside observe() and end-of-stream assembly inside
+// finish() are telemetry-owned and fail-open: a part that resolves reader.read()
+// but throws when telemetry touches one of its fields is still delivered by
+// identity, is not reported to the consumer as a provider stream error, and does
+// not set a stream error status. These are pinned below as plain tests.
 //
 // outputChunk and content collection read only the `type` discriminant of a
 // valid part (a string), so they have no independent fault surface; chunkText,
@@ -33,10 +33,7 @@ import {
   readerFromParts,
   streamResultFromReader,
 } from "./support/instrumentation-doubles.mjs";
-import {
-  expectContractViolation,
-  installFaultRuntime,
-} from "./support/wrap-fault-doubles.mjs";
+import { installFaultRuntime } from "./support/wrap-fault-doubles.mjs";
 
 const START_FAULT = new Error("capture.start fault");
 const FINISH_FAULT = new Error("capture.finish fault");
@@ -213,9 +210,9 @@ test("wrapStream cancel rejection identity survives a finish fault in the finall
   await assert.rejects(reader.cancel("stop"), (error) => error === cancelError);
 });
 
-// --- Gap: per-part field access inside observe() is not guarded --------------
+// --- Per-part field access inside observe()/finish() is fail-open ------------
 
-test("per-part text-field fault must not surface to the stream consumer (expected failure)", (t) => {
+test("per-part text-field fault must not surface to the stream consumer", async (t) => {
   installRuntime(t);
   const middleware = createVercelAISDKMiddleware();
   const first = textDelta("a");
@@ -223,51 +220,43 @@ test("per-part text-field fault must not surface to the stream consumer (expecte
   const last = textDelta("b");
   const parts = [first, faulted, last];
 
-  return expectContractViolation(async () => {
-    const result = await wrapStream(middleware, readerFromParts(parts));
-    const { observed, leaked } = await readAll(result.stream);
-    assert.equal(leaked, undefined, "a per-part field fault must not surface to the stream consumer");
-    assertSameSequence(observed, parts);
-  }, { failsWith: "a per-part field fault must not surface to the stream consumer" });
+  const result = await wrapStream(middleware, readerFromParts(parts));
+  const { observed, leaked } = await readAll(result.stream);
+  assert.equal(leaked, undefined, "a per-part field fault must not surface to the stream consumer");
+  assertSameSequence(observed, parts);
 });
 
-test("per-part text-field fault must not be recorded as a provider read error (expected failure)", (t) => {
+test("per-part text-field fault must not be recorded as a provider read error", async (t) => {
   const rows = installRuntime(t);
   const middleware = createVercelAISDKMiddleware();
   const faulted = textDeltaWithFaultingText(FIELD_FAULT);
 
-  return expectContractViolation(async () => {
-    const result = await wrapStream(middleware, readerFromParts([faulted]));
-    await readAll(result.stream); // drive pull() so the observe() fault is recorded
-    assert.equal(rows.length, 1);
-    assert.equal(rows[0].status, "success", "a per-part field fault must not be recorded as a provider read error");
-  }, { failsWith: "a per-part field fault must not be recorded as a provider read error" });
+  const result = await wrapStream(middleware, readerFromParts([faulted]));
+  await readAll(result.stream); // drive pull() so the observe() fault is recorded
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].status, "success", "a per-part field fault must not be recorded as a provider read error");
 });
 
-test("response-metadata accumulation fault must not surface to the stream consumer (expected failure)", (t) => {
+test("response-metadata accumulation fault must not surface to the stream consumer", async (t) => {
   installRuntime(t);
   const middleware = createVercelAISDKMiddleware();
   const first = textDelta("a");
   const metadata = responseMetadataWithFaultingField(FIELD_FAULT);
 
-  return expectContractViolation(async () => {
-    const result = await wrapStream(middleware, readerFromParts([first, metadata]));
-    const { observed, leaked } = await readAll(result.stream);
-    assert.equal(leaked, undefined, "a response-metadata accumulation fault must not surface to the stream consumer");
-    assertSameSequence(observed, [first, metadata]);
-  }, { failsWith: "a response-metadata accumulation fault must not surface to the stream consumer" });
+  const result = await wrapStream(middleware, readerFromParts([first, metadata]));
+  const { observed, leaked } = await readAll(result.stream);
+  assert.equal(leaked, undefined, "a response-metadata accumulation fault must not surface to the stream consumer");
+  assertSameSequence(observed, [first, metadata]);
 });
 
-test("finish-part field fault must not surface at stream end (expected failure)", (t) => {
+test("finish-part field fault must not surface at stream end", async (t) => {
   installRuntime(t);
   const middleware = createVercelAISDKMiddleware();
   const first = textDelta("a");
   const finishPart = finishWithFaultingUsage(FIELD_FAULT);
 
-  return expectContractViolation(async () => {
-    const result = await wrapStream(middleware, readerFromParts([first, finishPart]));
-    const { observed, leaked } = await readAll(result.stream);
-    assert.equal(leaked, undefined, "a finish-part field fault must not surface at stream end");
-    assertSameSequence(observed, [first, finishPart]);
-  }, { failsWith: "a finish-part field fault must not surface at stream end" });
+  const result = await wrapStream(middleware, readerFromParts([first, finishPart]));
+  const { observed, leaked } = await readAll(result.stream);
+  assert.equal(leaked, undefined, "a finish-part field fault must not surface at stream end");
+  assertSameSequence(observed, [first, finishPart]);
 });
