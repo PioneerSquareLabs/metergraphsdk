@@ -858,13 +858,21 @@ class CallState:
 
 class _StreamState:
     def __init__(self, stream: Any, call: CallState) -> None:
+        self.manager = stream
         self.stream = stream
         self.call = call
         self.iterator = None
+        self.entered = False
         self.last = None
         self.parts: list[str] = []
         self.chunks: list[Any] = []
         self.ttft_ms: int | None = None
+
+    def use_entered_stream(self, stream: Any) -> None:
+        if stream is not None:
+            self.stream = stream
+            self.iterator = None
+        self.entered = True
 
     def chunk(self, value: Any) -> Any:
         self.last = value
@@ -955,17 +963,21 @@ class SyncStream:
                 raise
 
     def __enter__(self) -> "SyncStream":
-        enter = getattr(self._state.stream, "__enter__", None)
+        enter = getattr(self._state.manager, "__enter__", None)
         if enter:
-            enter()
+            try:
+                self._state.use_entered_stream(enter())
+            except BaseException as exc:
+                self._state.finish(error=exc)
+                raise
         return self
 
     def __exit__(self, exc_type, exc, tb) -> Any:
         if exc:
             self._state.finish(error=exc)
         elif not self._state.call.done:
-            self._state.finish(status="abandoned")
-        exit_fn = getattr(self._state.stream, "__exit__", None)
+            self._state.finish(status=None if self._state.entered else "abandoned")
+        exit_fn = getattr(self._state.manager, "__exit__", None)
         return exit_fn(exc_type, exc, tb) if exit_fn else None
 
     def close(self) -> None:
@@ -1012,17 +1024,23 @@ class AsyncStream:
                 raise
 
     async def __aenter__(self) -> "AsyncStream":
-        enter = getattr(self._state.stream, "__aenter__", None)
+        enter = getattr(self._state.manager, "__aenter__", None)
         if enter:
-            await enter()
+            try:
+                self._state.use_entered_stream(await enter())
+            except BaseException as exc:
+                await self._state.finish_async(error=exc)
+                raise
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> Any:
         if exc:
             await self._state.finish_async(error=exc)
         elif not self._state.call.done:
-            await self._state.finish_async(status="abandoned")
-        exit_fn = getattr(self._state.stream, "__aexit__", None)
+            await self._state.finish_async(
+                status=None if self._state.entered else "abandoned"
+            )
+        exit_fn = getattr(self._state.manager, "__aexit__", None)
         return await exit_fn(exc_type, exc, tb) if exit_fn else None
 
     async def aclose(self) -> None:
@@ -1375,9 +1393,15 @@ def _finish_or_stream(
     result: Any, call: CallState, endpoint: str, request: Mapping[str, Any]
 ):
     is_stream = endpoint.endswith(".stream") or bool(request.get("stream"))
-    if is_stream and hasattr(result, "__aiter__"):
+    if is_stream and (
+        hasattr(result, "__aiter__")
+        or (hasattr(result, "__aenter__") and hasattr(result, "__aexit__"))
+    ):
         return AsyncStream(result, call)
-    if is_stream and hasattr(result, "__iter__"):
+    if is_stream and (
+        hasattr(result, "__iter__")
+        or (hasattr(result, "__enter__") and hasattr(result, "__exit__"))
+    ):
         return SyncStream(result, call)
     call.finish(result)
     return result

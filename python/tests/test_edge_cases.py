@@ -223,6 +223,114 @@ def test_async_stream_aclose_context_exit_and_iteration_error_capture_once():
     assert rows.rows[1]["error_type"] == "ArithmeticError"
 
 
+@pytest.mark.parametrize("proxied", [False, True])
+def test_anthropic_stream_manager_uses_the_entered_stream(proxied):
+    capture_runtime, rows = runtime()
+    _capture.set_runtime(capture_runtime)
+
+    final_message = SimpleNamespace(
+        usage=SimpleNamespace(input_tokens=6, output_tokens=2),
+        content=[SimpleNamespace(text="complete")],
+        stop_reason="end_turn",
+    )
+
+    class EnteredStream:
+        def __aiter__(self):
+            async def chunks():
+                yield SimpleNamespace(
+                    type="content_block_delta",
+                    delta=SimpleNamespace(text="complete"),
+                )
+
+            return chunks()
+
+        async def get_final_message(self):
+            return final_message
+
+    class StreamManager:
+        def __init__(self):
+            self.entered = EnteredStream()
+            self.exited = False
+
+        async def __aenter__(self):
+            return self.entered
+
+        async def __aexit__(self, exc_type, exc, tb):
+            self.exited = True
+
+    class IterableProxy:
+        """Models the iterable proxy added by Datadog's Anthropic integration."""
+
+        def __init__(self, manager):
+            self.manager = manager
+
+        def __aiter__(self):
+            return self.manager.entered.__aiter__()
+
+        async def __aenter__(self):
+            return await self.manager.__aenter__()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return await self.manager.__aexit__(exc_type, exc, tb)
+
+    manager = StreamManager()
+
+    class Messages:
+        def stream(self, **kwargs):
+            return IterableProxy(manager) if proxied else manager
+
+    client = SimpleNamespace(messages=Messages())
+    metergraph.wrap(client, provider="anthropic")
+
+    async def exercise():
+        async with client.messages.stream(model="claude", messages=[]) as stream:
+            assert await stream.get_final_message() is final_message
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        _capture.set_runtime(None)
+
+    assert manager.exited is True
+    assert len(rows.rows) == 1
+    assert rows.rows[0]["finish_reason"] == "stop"
+    assert rows.rows[0]["input_tokens"] == 6
+    assert rows.rows[0]["output_tokens"] == 2
+
+
+def test_anthropic_stream_manager_records_context_entry_failure():
+    capture_runtime, rows = runtime()
+    _capture.set_runtime(capture_runtime)
+
+    class FailingManager:
+        async def __aenter__(self):
+            raise ConnectionError("provider unavailable")
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    class Messages:
+        def stream(self, **kwargs):
+            return FailingManager()
+
+    client = SimpleNamespace(messages=Messages())
+    metergraph.wrap(client, provider="anthropic")
+
+    async def exercise():
+        async with client.messages.stream(model="claude", messages=[]):
+            pass
+
+    try:
+        with pytest.raises(ConnectionError, match="provider unavailable"):
+            asyncio.run(exercise())
+    finally:
+        _capture.set_runtime(None)
+
+    assert len(rows.rows) == 1
+    assert rows.rows[0]["status"] == "error"
+    assert rows.rows[0]["error_type"] == "ConnectionError"
+
+
 def test_final_message_failures_and_awaitable_mismatch_fall_back_to_last_chunk():
     capture_runtime, rows = runtime()
 
