@@ -1,15 +1,12 @@
 // Fault-injection contracts for the direct provider wrapper (wrap.ts). Each
 // case injects a fault at a telemetry boundary and states the fail-open
-// contract an application should observe: provider invocation count and
+// contract an application observes: provider invocation count and
 // result/error/chunk identity must not change because capture faulted.
 //
-// wrap.ts does not currently guard capture.start()/finish() or stream
-// observation, so those contracts fail today. They are held under
-// expectContractViolation, which requires the specific current-behavior
-// assertion and fails if the contract starts passing, forcing the marker to be
-// removed when the production fix lands. The two control cases show that,
-// absent telemetry faults, the same fixtures pass straight through, so the
-// gaps are owned by the telemetry boundary rather than the wrapper.
+// wrap.ts guards capture.start()/finish() and stream observation so these
+// contracts hold. The two control cases show that, absent telemetry faults,
+// the same fixtures pass straight through, so the boundaries — not the wrapper
+// — own the fail-open behavior.
 
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -21,7 +18,6 @@ import {
   seamDouble,
 } from "./support/instrumentation-doubles.mjs";
 import {
-  expectContractViolation,
   fieldFaultChunk,
   installFaultRuntime,
 } from "./support/wrap-fault-doubles.mjs";
@@ -66,7 +62,7 @@ test("wrap rejects with the provider error by identity when telemetry is healthy
 
 // --- Gap: capture.start before provider invocation --------------------------
 
-test("wrap start fault must not stop provider invocation (expected failure)", (t) => {
+test("wrap start fault must not stop provider invocation", (t) => {
   installFaultRuntime(t, { startError: START_FAULT });
   let invocations = 0;
   const result = { id: "start-fault" };
@@ -77,19 +73,17 @@ test("wrap start fault must not stop provider invocation (expected failure)", (t
     impl: () => { invocations++; return result; },
   });
 
-  return expectContractViolation(() => {
-    let leaked;
-    let returned;
-    try { returned = call({ model: "m" }); } catch (error) { leaked = error; }
-    assert.equal(leaked, undefined, "start fault must not surface to the caller");
-    assert.equal(invocations, 1, "provider must be invoked despite a start fault");
-    assert.equal(returned, result, "provider result identity must be preserved");
-  }, { failsWith: "start fault must not surface to the caller" });
+  let leaked;
+  let returned;
+  try { returned = call({ model: "m" }); } catch (error) { leaked = error; }
+  assert.equal(leaked, undefined, "start fault must not surface to the caller");
+  assert.equal(invocations, 1, "provider must be invoked despite a start fault");
+  assert.equal(returned, result, "provider result identity must be preserved");
 });
 
 // --- Gap: sync/promise finish on success ------------------------------------
 
-test("wrap finish fault must not surface on a synchronous success (expected failure)", (t) => {
+test("wrap finish fault must not surface on a synchronous success", (t) => {
   installFaultRuntime(t, { finishError: FINISH_FAULT });
   const result = { id: "sync-success" };
   const { call } = seamDouble({
@@ -99,16 +93,14 @@ test("wrap finish fault must not surface on a synchronous success (expected fail
     impl: () => result,
   });
 
-  return expectContractViolation(() => {
-    let leaked;
-    let returned;
-    try { returned = call({ model: "m" }); } catch (error) { leaked = error; }
-    assert.equal(leaked, undefined, "finish fault must not surface on a synchronous success");
-    assert.equal(returned, result, "provider result identity must be preserved");
-  }, { failsWith: "finish fault must not surface on a synchronous success" });
+  let leaked;
+  let returned;
+  try { returned = call({ model: "m" }); } catch (error) { leaked = error; }
+  assert.equal(leaked, undefined, "finish fault must not surface on a synchronous success");
+  assert.equal(returned, result, "provider result identity must be preserved");
 });
 
-test("wrap finish fault must not reject a fulfilled promise (expected failure)", (t) => {
+test("wrap finish fault must not reject a fulfilled promise", async (t) => {
   installFaultRuntime(t, { finishError: FINISH_FAULT });
   const result = { id: "async-success" };
   const { call } = seamDouble({
@@ -118,18 +110,16 @@ test("wrap finish fault must not reject a fulfilled promise (expected failure)",
     impl: async () => result,
   });
 
-  return expectContractViolation(async () => {
-    let leaked;
-    let returned;
-    try { returned = await call({ model: "m" }); } catch (error) { leaked = error; }
-    assert.equal(leaked, undefined, "finish fault must not reject a fulfilled promise");
-    assert.equal(returned, result, "provider result identity must be preserved");
-  }, { failsWith: "finish fault must not reject a fulfilled promise" });
+  let leaked;
+  let returned;
+  try { returned = await call({ model: "m" }); } catch (error) { leaked = error; }
+  assert.equal(leaked, undefined, "finish fault must not reject a fulfilled promise");
+  assert.equal(returned, result, "provider result identity must be preserved");
 });
 
 // --- Gap: sync/promise finish on provider error -----------------------------
 
-test("wrap finish fault must not mask a synchronous provider error (expected failure)", (t) => {
+test("wrap finish fault must not mask a synchronous provider error", (t) => {
   installFaultRuntime(t, { finishError: FINISH_FAULT });
   const providerError = new RangeError("provider threw synchronously");
   const { call } = seamDouble({
@@ -139,14 +129,12 @@ test("wrap finish fault must not mask a synchronous provider error (expected fai
     impl: () => { throw providerError; },
   });
 
-  return expectContractViolation(() => {
-    let leaked;
-    try { call({ model: "m" }); } catch (error) { leaked = error; }
-    assert.equal(leaked, providerError, "synchronous provider error identity must survive a finish fault");
-  }, { failsWith: "synchronous provider error identity must survive a finish fault" });
+  let leaked;
+  try { call({ model: "m" }); } catch (error) { leaked = error; }
+  assert.equal(leaked, providerError, "synchronous provider error identity must survive a finish fault");
 });
 
-test("wrap finish fault must not mask a promise provider error (expected failure)", (t) => {
+test("wrap finish fault must not mask a promise provider error", async (t) => {
   installFaultRuntime(t, { finishError: FINISH_FAULT });
   const providerError = new RangeError("provider rejected");
   const { call } = seamDouble({
@@ -156,16 +144,14 @@ test("wrap finish fault must not mask a promise provider error (expected failure
     impl: async () => { throw providerError; },
   });
 
-  return expectContractViolation(async () => {
-    let leaked;
-    try { await call({ model: "m" }); } catch (error) { leaked = error; }
-    assert.equal(leaked, providerError, "promise provider error identity must survive a finish fault");
-  }, { failsWith: "promise provider error identity must survive a finish fault" });
+  let leaked;
+  try { await call({ model: "m" }); } catch (error) { leaked = error; }
+  assert.equal(leaked, providerError, "promise provider error identity must survive a finish fault");
 });
 
 // --- Gap: async-stream observation/classification ---------------------------
 
-test("wrap stream classification fault must not surface to the consumer (expected failure)", (t) => {
+test("wrap stream classification fault must not surface to the consumer", async (t) => {
   installRuntime(t);
   const first = { type: "content_block_delta", delta: { text: "a" } };
   const faulted = fieldFaultChunk(new Error("field access fault"));
@@ -178,20 +164,18 @@ test("wrap stream classification fault must not surface to the consumer (expecte
     impl: () => asyncIterableStream(chunks),
   });
 
-  return expectContractViolation(async () => {
-    const observed = [];
-    let leaked;
-    try {
-      for await (const chunk of call({ model: "c", messages: [] })) observed.push(chunk);
-    } catch (error) { leaked = error; }
-    assert.equal(leaked, undefined, "a classification field fault must not surface to the consumer");
-    assertSameSequence(observed, chunks);
-  }, { failsWith: "a classification field fault must not surface to the consumer" });
+  const observed = [];
+  let leaked;
+  try {
+    for await (const chunk of call({ model: "c", messages: [] })) observed.push(chunk);
+  } catch (error) { leaked = error; }
+  assert.equal(leaked, undefined, "a classification field fault must not surface to the consumer");
+  assertSameSequence(observed, chunks);
 });
 
 // --- Gap: async-stream normal exhaustion ------------------------------------
 
-test("wrap finish fault must not surface after full stream exhaustion (expected failure)", (t) => {
+test("wrap finish fault must not surface after full stream exhaustion", async (t) => {
   installFaultRuntime(t, { finishError: FINISH_FAULT });
   const chunks = [
     { type: "content_block_delta", delta: { text: "a" } },
@@ -204,20 +188,18 @@ test("wrap finish fault must not surface after full stream exhaustion (expected 
     impl: () => asyncIterableStream(chunks),
   });
 
-  return expectContractViolation(async () => {
-    const observed = [];
-    let leaked;
-    try {
-      for await (const chunk of call({ model: "c", messages: [] })) observed.push(chunk);
-    } catch (error) { leaked = error; }
-    assert.equal(leaked, undefined, "finish fault must not surface after full stream exhaustion");
-    assertSameSequence(observed, chunks);
-  }, { failsWith: "finish fault must not surface after full stream exhaustion" });
+  const observed = [];
+  let leaked;
+  try {
+    for await (const chunk of call({ model: "c", messages: [] })) observed.push(chunk);
+  } catch (error) { leaked = error; }
+  assert.equal(leaked, undefined, "finish fault must not surface after full stream exhaustion");
+  assertSameSequence(observed, chunks);
 });
 
 // --- Gap: async-stream provider iteration error -----------------------------
 
-test("wrap finish fault must not mask a provider iteration error (expected failure)", (t) => {
+test("wrap finish fault must not mask a provider iteration error", async (t) => {
   installFaultRuntime(t, { finishError: FINISH_FAULT });
   const first = { type: "content_block_delta", delta: { text: "a" } };
   const providerError = new URIError("iterator failed mid-stream");
@@ -228,20 +210,18 @@ test("wrap finish fault must not mask a provider iteration error (expected failu
     impl: () => asyncIterableStream([first], { throwAfter: providerError }),
   });
 
-  return expectContractViolation(async () => {
-    const observed = [];
-    let leaked;
-    try {
-      for await (const chunk of call({ model: "c", messages: [] })) observed.push(chunk);
-    } catch (error) { leaked = error; }
-    assert.equal(leaked, providerError, "provider iteration error identity must survive a finish fault");
-    assertSameSequence(observed, [first]);
-  }, { failsWith: "provider iteration error identity must survive a finish fault" });
+  const observed = [];
+  let leaked;
+  try {
+    for await (const chunk of call({ model: "c", messages: [] })) observed.push(chunk);
+  } catch (error) { leaked = error; }
+  assert.equal(leaked, providerError, "provider iteration error identity must survive a finish fault");
+  assertSameSequence(observed, [first]);
 });
 
 // --- Gap: async-stream finalMessage() ---------------------------------------
 
-test("wrap finish fault must not reject finalMessage() (expected failure)", (t) => {
+test("wrap finish fault must not reject finalMessage()", async (t) => {
   installFaultRuntime(t, { finishError: FINISH_FAULT });
   const finalMessage = {
     content: [{ type: "text", text: "done" }],
@@ -257,17 +237,15 @@ test("wrap finish fault must not reject finalMessage() (expected failure)", (t) 
     ),
   });
 
-  return expectContractViolation(async () => {
-    const stream = call({ model: "c", messages: [] });
-    let leaked;
-    let resolved;
-    try { resolved = await stream.finalMessage(); } catch (error) { leaked = error; }
-    assert.equal(leaked, undefined, "finish fault must not reject finalMessage()");
-    assert.equal(resolved, finalMessage, "finalMessage() identity must be preserved");
-  }, { failsWith: "finish fault must not reject finalMessage()" });
+  const stream = call({ model: "c", messages: [] });
+  let leaked;
+  let resolved;
+  try { resolved = await stream.finalMessage(); } catch (error) { leaked = error; }
+  assert.equal(leaked, undefined, "finish fault must not reject finalMessage()");
+  assert.equal(resolved, finalMessage, "finalMessage() identity must be preserved");
 });
 
-test("wrap finish fault must not mask a finalMessage() rejection (expected failure)", (t) => {
+test("wrap finish fault must not mask a finalMessage() rejection", async (t) => {
   installFaultRuntime(t, { finishError: FINISH_FAULT });
   const providerError = new URIError("finalMessage rejected");
   const { call } = seamDouble({
@@ -282,17 +260,15 @@ test("wrap finish fault must not mask a finalMessage() rejection (expected failu
     },
   });
 
-  return expectContractViolation(async () => {
-    const stream = call({ model: "c", messages: [] });
-    let leaked;
-    try { await stream.finalMessage(); } catch (error) { leaked = error; }
-    assert.equal(leaked, providerError, "finalMessage() rejection identity must survive a finish fault");
-  }, { failsWith: "finalMessage() rejection identity must survive a finish fault" });
+  const stream = call({ model: "c", messages: [] });
+  let leaked;
+  try { await stream.finalMessage(); } catch (error) { leaked = error; }
+  assert.equal(leaked, providerError, "finalMessage() rejection identity must survive a finish fault");
 });
 
 // --- Gap: async-stream close()/abort() --------------------------------------
 
-test("wrap finish fault must not surface from close() (expected failure)", (t) => {
+test("wrap finish fault must not surface from close()", (t) => {
   installFaultRuntime(t, { finishError: FINISH_FAULT });
   const closeSentinel = { closed: true };
   const { call } = seamDouble({
@@ -302,17 +278,15 @@ test("wrap finish fault must not surface from close() (expected failure)", (t) =
     impl: () => asyncIterableStream([], { onClose: () => closeSentinel }),
   });
 
-  return expectContractViolation(() => {
-    let leaked;
-    let returned;
-    try { returned = call({ model: "c", messages: [] }).close(); }
-    catch (error) { leaked = error; }
-    assert.equal(leaked, undefined, "finish fault in a finally must not surface from close()");
-    assert.equal(returned, closeSentinel, "close() return identity must be preserved");
-  }, { failsWith: "finish fault in a finally must not surface from close()" });
+  let leaked;
+  let returned;
+  try { returned = call({ model: "c", messages: [] }).close(); }
+  catch (error) { leaked = error; }
+  assert.equal(leaked, undefined, "finish fault in a finally must not surface from close()");
+  assert.equal(returned, closeSentinel, "close() return identity must be preserved");
 });
 
-test("wrap finish fault must not surface from abort() (expected failure)", (t) => {
+test("wrap finish fault must not surface from abort()", (t) => {
   installFaultRuntime(t, { finishError: FINISH_FAULT });
   const abortSentinel = { aborted: true };
   const { call } = seamDouble({
@@ -322,17 +296,15 @@ test("wrap finish fault must not surface from abort() (expected failure)", (t) =
     impl: () => asyncIterableStream([], { onAbort: () => abortSentinel }),
   });
 
-  return expectContractViolation(() => {
-    let leaked;
-    let returned;
-    try { returned = call({ model: "c", messages: [] }).abort(); }
-    catch (error) { leaked = error; }
-    assert.equal(leaked, undefined, "finish fault in a finally must not surface from abort()");
-    assert.equal(returned, abortSentinel, "abort() return identity must be preserved");
-  }, { failsWith: "finish fault in a finally must not surface from abort()" });
+  let leaked;
+  let returned;
+  try { returned = call({ model: "c", messages: [] }).abort(); }
+  catch (error) { leaked = error; }
+  assert.equal(leaked, undefined, "finish fault in a finally must not surface from abort()");
+  assert.equal(returned, abortSentinel, "abort() return identity must be preserved");
 });
 
-test("wrap finish fault must not mask a close() error (expected failure)", (t) => {
+test("wrap finish fault must not mask a close() error", (t) => {
   installFaultRuntime(t, { finishError: FINISH_FAULT });
   const providerError = new RangeError("close failed");
   const { call } = seamDouble({
@@ -342,14 +314,12 @@ test("wrap finish fault must not mask a close() error (expected failure)", (t) =
     impl: () => asyncIterableStream([], { onClose: () => { throw providerError; } }),
   });
 
-  return expectContractViolation(() => {
-    let leaked;
-    try { call({ model: "c", messages: [] }).close(); } catch (error) { leaked = error; }
-    assert.equal(leaked, providerError, "close() error identity must survive a finish fault");
-  }, { failsWith: "close() error identity must survive a finish fault" });
+  let leaked;
+  try { call({ model: "c", messages: [] }).close(); } catch (error) { leaked = error; }
+  assert.equal(leaked, providerError, "close() error identity must survive a finish fault");
 });
 
-test("wrap finish fault must not mask an abort() error (expected failure)", (t) => {
+test("wrap finish fault must not mask an abort() error", (t) => {
   installFaultRuntime(t, { finishError: FINISH_FAULT });
   const providerError = new RangeError("abort failed");
   const { call } = seamDouble({
@@ -359,9 +329,7 @@ test("wrap finish fault must not mask an abort() error (expected failure)", (t) 
     impl: () => asyncIterableStream([], { onAbort: () => { throw providerError; } }),
   });
 
-  return expectContractViolation(() => {
-    let leaked;
-    try { call({ model: "c", messages: [] }).abort(); } catch (error) { leaked = error; }
-    assert.equal(leaked, providerError, "abort() error identity must survive a finish fault");
-  }, { failsWith: "abort() error identity must survive a finish fault" });
+  let leaked;
+  try { call({ model: "c", messages: [] }).abort(); } catch (error) { leaked = error; }
+  assert.equal(leaked, providerError, "abort() error identity must survive a finish fault");
 });

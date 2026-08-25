@@ -1,4 +1,4 @@
-import { type CaptureRuntime, chunkText } from "./capture.js";
+import { type CallState, type CaptureRuntime, chunkText } from "./capture.js";
 import { contextSnapshot, type CaptureContext } from "./context.js";
 
 type AnyRecord = Record<PropertyKey, any>;
@@ -31,6 +31,36 @@ function requestFrom(args: unknown[]): Record<string, unknown> {
 
 function get(value: unknown, key: string): any {
   return value && typeof value === "object" ? (value as AnyRecord)[key] : undefined;
+}
+
+// Capture is fail-open: a start() fault drops instrumentation for the call, a
+// finish() fault drops the row. Neither may reach the provider path.
+function startCapture(
+  capture: CaptureRuntime,
+  provider: string,
+  endpoint: string,
+  request: Record<string, unknown>,
+  stack?: string,
+): CallState | undefined {
+  try {
+    return capture.start(provider, endpoint, request, stack);
+  } catch {
+    return undefined;
+  }
+}
+
+function finishCapture(
+  capture: CaptureRuntime,
+  state: CallState | undefined,
+  response?: unknown,
+  extra: Parameters<CaptureRuntime["finish"]>[2] = {},
+): void {
+  if (!state) return;
+  try {
+    capture.finish(state, response, extra);
+  } catch {
+    // Telemetry finalization is fail-open.
+  }
 }
 
 function markBatchItem(key: string): boolean {
@@ -232,7 +262,7 @@ function patchAnthropicBatchResults(owner: AnyRecord | undefined): boolean {
   return true;
 }
 
-function streamProxy(stream: AnyRecord, state: ReturnType<CaptureRuntime["start"]>, capture: CaptureRuntime): AnyRecord {
+function streamProxy(stream: AnyRecord, state: CallState, capture: CaptureRuntime): AnyRecord {
   let last: unknown;
   let ttftMs: number | undefined;
   const parts: string[] = [];
@@ -272,7 +302,7 @@ function streamProxy(stream: AnyRecord, state: ReturnType<CaptureRuntime["start"
     return chunk;
   };
   const finish = (response: unknown = last, error?: unknown, status?: string) => {
-    capture.finish(state, response, {
+    finishCapture(capture, state, response, {
       error,
       status,
       stream: true,
@@ -292,43 +322,64 @@ function streamProxy(stream: AnyRecord, state: ReturnType<CaptureRuntime["start"
         return async function* () {
           try {
             for await (const chunk of target as AsyncIterable<unknown>) {
-              const value = observe(chunk);
-              const usageOnly = state.provider === "openai"
-                && state.endpoint === "chat.completions"
-                && Array.isArray((chunk as AnyRecord)?.choices)
-                && (chunk as AnyRecord).choices.length === 0
-                && (chunk as AnyRecord).usage != null;
-              if (!usageOnly) yield value;
+              // Telemetry boundary: observation and usage-only classification.
+              // An ordinary telemetry fault yields the raw chunk and continues.
+              let usageOnly = false;
+              try {
+                observe(chunk);
+                usageOnly = state.provider === "openai"
+                  && state.endpoint === "chat.completions"
+                  && Array.isArray((chunk as AnyRecord)?.choices)
+                  && (chunk as AnyRecord).choices.length === 0
+                  && (chunk as AnyRecord).usage != null;
+              } catch {
+                yield chunk;
+                continue;
+              }
+              if (!usageOnly) yield chunk;
             }
-            let final = last;
-            if (typeof target.finalMessage === "function") {
-              try { final = await target.finalMessage(); } catch { /* captured by stream error */ }
-            }
-            finish(final);
           } catch (error) {
+            // Provider iteration error: finalize fail-open, keep its identity.
             finish(last, error);
             throw error;
           }
+          // Exhaustion: enrich with finalMessage when present, then finalize.
+          let final = last;
+          if (typeof target.finalMessage === "function") {
+            try { final = await target.finalMessage(); } catch { /* enrichment is best-effort */ }
+          }
+          finish(final);
         };
       }
       if (property === "finalMessage" && typeof target.finalMessage === "function") {
         return async (...args: unknown[]) => {
+          let final: unknown;
           try {
-            const final = await target.finalMessage(...args);
-            finish(final);
-            return final;
+            final = await target.finalMessage(...args);
           } catch (error) {
             finish(last, error);
             throw error;
           }
+          finish(final);
+          return final;
         };
       }
       if (property === "close" || property === "abort") {
         const original = Reflect.get(target, property, receiver);
         if (typeof original !== "function") return original;
         return (...args: unknown[]) => {
-          try { return original.apply(target, args); }
-          finally { finish(last, undefined, "abandoned"); }
+          let returned: unknown;
+          let error: unknown;
+          let threw = false;
+          try {
+            returned = original.apply(target, args);
+          } catch (caught) {
+            threw = true;
+            error = caught;
+          }
+          finish(last, undefined, "abandoned");
+          if (threw) throw error;
+          return returned;
         };
       }
       const value = Reflect.get(target, property, receiver);
@@ -373,13 +424,22 @@ function patch(owner: AnyRecord | undefined, method: string, provider: string, e
     ) {
       args = [{ ...incoming, stream_options: { include_usage: true } }, ...args.slice(1)];
     }
-    const state = capture.start(provider, endpoint, requestFrom(args), new Error().stack);
+    const state = startCapture(capture, provider, endpoint, requestFrom(args), new Error().stack);
+    if (!state) {
+      // start faulted: invoke the provider once, return its result unwrapped.
+      reentrantOwners.add(owner);
+      try {
+        return original.apply(owner, args);
+      } finally {
+        reentrantOwners.delete(owner);
+      }
+    }
     let result: unknown;
     reentrantOwners.add(owner);
     try {
       result = original.apply(owner, args);
     } catch (error) {
-      capture.finish(state, undefined, { error });
+      finishCapture(capture, state, undefined, { error });
       throw error;
     } finally {
       reentrantOwners.delete(owner);
@@ -390,12 +450,12 @@ function patch(owner: AnyRecord | undefined, method: string, provider: string, e
       if (streaming && response && (response[Symbol.asyncIterator] || response.finalMessage)) {
         return streamProxy(response, state, capture);
       }
-      capture.finish(state, response);
+      finishCapture(capture, state, response);
       return response;
     };
     if (result && typeof (result as Promise<unknown>).then === "function") {
       return (result as Promise<unknown>).then(complete, (error) => {
-        capture.finish(state, undefined, { error });
+        finishCapture(capture, state, undefined, { error });
         throw error;
       });
     }
