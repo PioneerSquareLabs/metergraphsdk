@@ -884,6 +884,28 @@ class _StreamState:
             self.parts.append(text)
         return value
 
+    def safe_chunk(self, value: Any) -> Any:
+        """Record a provider chunk, but return the raw provider value if
+        MeterGraph's own normalization/bookkeeping fails. The caller passes the
+        chunk it already obtained from the provider, so a telemetry error here
+        never drops or corrupts iteration. Only MeterGraph's ``Exception`` is
+        swallowed; a cancellation propagating through ``chunk`` is not."""
+        try:
+            return self.chunk(value)
+        except Exception:
+            return value
+
+    def is_usage_only(self, value: Any) -> bool:
+        """Classify a usage-only chunk, failing open. A genuine usage-only chunk
+        is suppressed only when classification succeeds; if MeterGraph's own
+        classification raises on a pathological/proxied chunk, treat it as an
+        ordinary provider chunk so it is yielded, not dropped. Only MeterGraph's
+        ``Exception`` is swallowed here."""
+        try:
+            return _usage_only_chunk(value, self.call)
+        except Exception:
+            return False
+
     def finish(
         self, status: str | None = None, error: BaseException | None = None
     ) -> None:
@@ -933,6 +955,32 @@ class _StreamState:
             stream_chunks=self.chunks,
         )
 
+    def safe_finish(
+        self, status: str | None = None, error: BaseException | None = None
+    ) -> None:
+        """Shared fail-open finalization for every sync lifecycle path (entry
+        error, normal exhaustion, provider iteration error, context exit, and
+        close). MeterGraph's own telemetry ``Exception`` is swallowed so a
+        failed finish can never replace normal completion, the provider
+        iteration exception, or a close; the trace may be lost, but application
+        behavior is unchanged. Provider/application exceptions never reach
+        here."""
+        try:
+            self.finish(status=status, error=error)
+        except Exception:
+            pass
+
+    async def safe_finish_async(
+        self, status: str | None = None, error: BaseException | None = None
+    ) -> None:
+        """Async counterpart to :meth:`safe_finish`, shared by every async
+        lifecycle path (entry error, normal exhaustion, provider iteration
+        error, context exit, and aclose)."""
+        try:
+            await self.finish_async(status=status, error=error)
+        except Exception:
+            pass
+
 
 class SyncStream:
     def __init__(self, stream: Any, call: CallState) -> None:
@@ -951,16 +999,17 @@ class SyncStream:
             self._state.iterator = iter(self._state.stream)
         while True:
             try:
-                value = self._state.chunk(next(self._state.iterator))
-                if _usage_only_chunk(value, self._state.call):
-                    continue
-                return value
+                provider_chunk = next(self._state.iterator)
             except StopIteration:
-                self._state.finish()
+                self._state.safe_finish()
                 raise
             except BaseException as exc:
-                self._state.finish(error=exc)
+                self._state.safe_finish(error=exc)
                 raise
+            value = self._state.safe_chunk(provider_chunk)
+            if self._state.is_usage_only(value):
+                continue
+            return value
 
     def __enter__(self) -> "SyncStream":
         enter = getattr(self._state.manager, "__enter__", None)
@@ -968,15 +1017,15 @@ class SyncStream:
             try:
                 self._state.use_entered_stream(enter())
             except BaseException as exc:
-                self._state.finish(error=exc)
+                self._state.safe_finish(error=exc)
                 raise
         return self
 
     def __exit__(self, exc_type, exc, tb) -> Any:
         if exc:
-            self._state.finish(error=exc)
+            self._state.safe_finish(error=exc)
         elif not self._state.call.done:
-            self._state.finish(status=None if self._state.entered else "abandoned")
+            self._state.safe_finish(status=None if self._state.entered else "abandoned")
         exit_fn = getattr(self._state.manager, "__exit__", None)
         return exit_fn(exc_type, exc, tb) if exit_fn else None
 
@@ -985,7 +1034,7 @@ class SyncStream:
         if close:
             close()
         if not self._state.call.done:
-            self._state.finish(status="abandoned")
+            self._state.safe_finish(status="abandoned")
 
     def __del__(self) -> None:
         try:
@@ -1012,16 +1061,17 @@ class AsyncStream:
             self._state.iterator = self._state.stream.__aiter__()
         while True:
             try:
-                value = self._state.chunk(await self._state.iterator.__anext__())
-                if _usage_only_chunk(value, self._state.call):
-                    continue
-                return value
+                provider_chunk = await self._state.iterator.__anext__()
             except StopAsyncIteration:
-                await self._state.finish_async()
+                await self._state.safe_finish_async()
                 raise
             except BaseException as exc:
-                await self._state.finish_async(error=exc)
+                await self._state.safe_finish_async(error=exc)
                 raise
+            value = self._state.safe_chunk(provider_chunk)
+            if self._state.is_usage_only(value):
+                continue
+            return value
 
     async def __aenter__(self) -> "AsyncStream":
         enter = getattr(self._state.manager, "__aenter__", None)
@@ -1029,15 +1079,15 @@ class AsyncStream:
             try:
                 self._state.use_entered_stream(await enter())
             except BaseException as exc:
-                await self._state.finish_async(error=exc)
+                await self._state.safe_finish_async(error=exc)
                 raise
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> Any:
         if exc:
-            await self._state.finish_async(error=exc)
+            await self._state.safe_finish_async(error=exc)
         elif not self._state.call.done:
-            await self._state.finish_async(
+            await self._state.safe_finish_async(
                 status=None if self._state.entered else "abandoned"
             )
         exit_fn = getattr(self._state.manager, "__aexit__", None)
@@ -1048,7 +1098,7 @@ class AsyncStream:
         if close:
             await close()
         if not self._state.call.done:
-            await self._state.finish_async(status="abandoned")
+            await self._state.safe_finish_async(status="abandoned")
 
     def __del__(self) -> None:
         try:
@@ -1359,13 +1409,19 @@ def _patch(
                     args = (first, *args[1:])
                 else:
                     kwargs = {**kwargs, "stream_options": {"include_usage": True}}
-        request = _request(args, kwargs)
-        capture_provider = _gateway_provider(request) if gateway else provider
-        call = runtime.call_state(capture_provider, endpoint, request)
+        try:
+            request = _request(args, kwargs)
+            capture_provider = _gateway_provider(request) if gateway else provider
+            call = runtime.call_state(capture_provider, endpoint, request)
+        except Exception:
+            # Capture-state creation is telemetry-only. If it fails, invoke the
+            # provider exactly once and return/await its native result with no
+            # MeterGraph wrapping — the caller observes an uninstrumented call.
+            return original(*args, **kwargs)
         try:
             result = original(*args, **kwargs)
         except BaseException as exc:
-            call.finish(error=exc)
+            _safe_finish(call, error=exc)
             raise
 
         if inspect.isawaitable(result):
@@ -1374,7 +1430,7 @@ def _patch(
                 try:
                     resolved = await result
                 except BaseException as exc:
-                    call.finish(error=exc)
+                    _safe_finish(call, error=exc)
                     raise
                 return _finish_or_stream(resolved, call, endpoint, request)
 
@@ -1387,6 +1443,18 @@ def _patch(
     except Exception:
         return False
     return True
+
+
+def _safe_finish(call: CallState, response: Any = None, **kwargs: Any) -> None:
+    """Fail-open finalization for a non-streaming call. MeterGraph's own
+    telemetry ``Exception`` is swallowed so a failed ``CallState.finish`` can
+    never replace the provider result or the provider exception the caller must
+    observe. Only telemetry runs here — the provider result/exception is passed
+    in, never produced — so a cancellation is never wrongly swallowed."""
+    try:
+        call.finish(response, **kwargs)
+    except Exception:
+        pass
 
 
 def _finish_or_stream(
@@ -1403,7 +1471,7 @@ def _finish_or_stream(
         or (hasattr(result, "__enter__") and hasattr(result, "__exit__"))
     ):
         return SyncStream(result, call)
-    call.finish(result)
+    _safe_finish(call, result)
     return result
 
 

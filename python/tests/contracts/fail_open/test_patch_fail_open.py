@@ -16,11 +16,10 @@ a *non-streaming* call:
 3. the returned ``CallState.finish`` raises, while recording an exact provider
    exception.
 
-Each asserts the fail-open contract above. Where current behavior violates it,
-the test is a minimal ``xfail(strict=True)`` documenting the gap and the exact
-production fix a later PR must land — without touching production here. A strict
-xfail flips to a failure the moment the gap is fixed, forcing the marker's
-removal.
+Each asserts the fail-open contract above as a permanent guarantee the seam
+must honor: the provider is invoked exactly once whenever it otherwise would be,
+the exact successful result or provider exception reaches the caller, and
+MeterGraph's injected telemetry failure never escapes.
 
 The writer-enqueue fail-open boundary is deliberately *not* re-covered here: it
 is already characterized by
@@ -115,15 +114,6 @@ def _raise_telemetry(*_args: Any, **_kwargs: Any):
 # --- 1. call_state raises before the provider is invoked ---------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "GAP: _patch.wrapped calls runtime.call_state() before original(); a "
-        "failure there escapes and the provider is never invoked. Fix (later "
-        "PR): guard call_state creation in wrapped so a null/failed call state "
-        "still runs original() and returns its result."
-    ),
-)
 def test_sync_call_state_failure_still_invokes_provider(monkeypatch):
     monkeypatch.setattr(Runtime, "call_state", _raise_telemetry)
     owner = _instrument(SyncProvider())
@@ -134,13 +124,6 @@ def test_sync_call_state_failure_still_invokes_provider(monkeypatch):
     assert result is PROVIDER_RESULT
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "GAP: call_state runs synchronously in wrapped before the coroutine is "
-        "built, so an async seam fails identically. Same fix as the sync case."
-    ),
-)
 def test_async_call_state_failure_still_invokes_provider(monkeypatch):
     monkeypatch.setattr(Runtime, "call_state", _raise_telemetry)
     owner = _instrument(AsyncProvider())
@@ -154,15 +137,6 @@ def test_async_call_state_failure_still_invokes_provider(monkeypatch):
 # --- 2. finish raises after a successful provider result ---------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "GAP: _finish_or_stream calls call.finish(result) unguarded, so a "
-        "failure while recording replaces the successful provider result with "
-        "MeterGraph's exception. Fix (later PR): make CallState.finish (or its "
-        "call site) swallow its own errors so the result is returned intact."
-    ),
-)
 def test_sync_finish_failure_preserves_successful_result(monkeypatch):
     monkeypatch.setattr(_capture.CallState, "finish", _raise_telemetry)
     owner = _instrument(SyncProvider())
@@ -173,14 +147,6 @@ def test_sync_finish_failure_preserves_successful_result(monkeypatch):
     assert result is PROVIDER_RESULT
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "GAP: the async await_result path likewise calls _finish_or_stream -> "
-        "call.finish unguarded, so a finish failure escapes the coroutine and "
-        "replaces the awaited result. Same fix as the sync case."
-    ),
-)
 def test_async_finish_failure_preserves_successful_result(monkeypatch):
     monkeypatch.setattr(_capture.CallState, "finish", _raise_telemetry)
     owner = _instrument(AsyncProvider())
@@ -194,15 +160,6 @@ def test_async_finish_failure_preserves_successful_result(monkeypatch):
 # --- 3. finish raises while recording an exact provider exception ------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "GAP: wrapped's except branch runs call.finish(error=exc) before "
-        "re-raising, unguarded; a failure there propagates instead and replaces "
-        "the exact provider exception. Fix (later PR): guard the finish call in "
-        "the except branch so the original provider exception is re-raised."
-    ),
-)
 def test_sync_finish_failure_preserves_provider_exception(monkeypatch):
     monkeypatch.setattr(_capture.CallState, "finish", _raise_telemetry)
     provider_error = ProviderError("provider down")
@@ -215,14 +172,6 @@ def test_sync_finish_failure_preserves_provider_exception(monkeypatch):
     assert owner.calls == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "GAP: the async await_result except branch runs call.finish(error=exc) "
-        "unguarded, so a finish failure replaces the exact provider exception "
-        "reaching the awaiter. Same fix as the sync case."
-    ),
-)
 def test_async_finish_failure_preserves_provider_exception(monkeypatch):
     monkeypatch.setattr(_capture.CallState, "finish", _raise_telemetry)
     provider_error = ProviderError("provider down")
