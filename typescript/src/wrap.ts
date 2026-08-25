@@ -262,7 +262,12 @@ function patchAnthropicBatchResults(owner: AnyRecord | undefined): boolean {
   return true;
 }
 
-function streamProxy(stream: AnyRecord, state: CallState, capture: CaptureRuntime): AnyRecord {
+function streamProxy(
+  stream: AnyRecord,
+  state: CallState,
+  capture: CaptureRuntime,
+  suppressUsageOnly: boolean,
+): AnyRecord {
   let last: unknown;
   let ttftMs: number | undefined;
   const parts: string[] = [];
@@ -327,7 +332,11 @@ function streamProxy(stream: AnyRecord, state: CallState, capture: CaptureRuntim
               let usageOnly = false;
               try {
                 observe(chunk);
-                usageOnly = state.provider === "openai"
+                // Suppress the usage-only final chunk only when MeterGraph
+                // injected stream_options.include_usage; a caller who asked for
+                // it keeps their chunk. Capture reads usage from it either way.
+                usageOnly = suppressUsageOnly
+                  && state.provider === "openai"
                   && state.endpoint === "chat.completions"
                   && Array.isArray((chunk as AnyRecord)?.choices)
                   && (chunk as AnyRecord).choices.length === 0
@@ -388,6 +397,50 @@ function streamProxy(stream: AnyRecord, state: CallState, capture: CaptureRuntim
   });
 }
 
+// The provider SDKs (openai, @anthropic-ai/sdk) return an APIPromise — a
+// Promise subclass carrying helpers like .withResponse()/.asResponse(). Chaining
+// .then() would resolve through Promise species into a plain Promise and drop
+// those helpers, so wrap the original in a proxy that routes await/then/catch/
+// finally through capture while forwarding every helper to the untouched
+// original. The provider memoizes its single in-flight request, so preserving
+// the helpers does not issue it twice.
+function preserveProviderPromise(
+  target: AnyRecord,
+  complete: (response: any) => unknown,
+  fail: (error: unknown) => never,
+): AnyRecord {
+  let chained: Promise<unknown> | undefined;
+  const captured = () => (chained ??= (target as Promise<unknown>).then(complete, fail));
+  return new Proxy(target, {
+    get(t, property, receiver) {
+      if (property === "then") return (onF: any, onR: any) => captured().then(onF, onR);
+      if (property === "catch") return (onR: any) => captured().catch(onR);
+      if (property === "finally") return (onFin: any) => captured().finally(onFin);
+      if (property === "withResponse" && typeof t.withResponse === "function") {
+        // .withResponse() carries the parsed body (or a stream) plus the raw
+        // Response. Route data through complete() so a streaming body stays
+        // instrumented and capture fires exactly once, then hand back a fresh
+        // envelope — the provider's own object is left untouched.
+        return async (...a: unknown[]) => {
+          let envelope: AnyRecord;
+          try {
+            envelope = await t.withResponse(...a);
+          } catch (error) {
+            fail(error);
+          }
+          return { ...envelope, data: complete(envelope.data) };
+        };
+      }
+      // Every other helper (.asResponse(), ._thenUnwrap(), ...) is forwarded to
+      // the untouched original. .asResponse() intentionally returns the raw
+      // Response with no parsed body, so there is nothing for MeterGraph to
+      // normalize on that path; capture stays with the parsing paths above.
+      const value = Reflect.get(t, property, receiver);
+      return typeof value === "function" ? value.bind(t) : value;
+    },
+  });
+}
+
 function patch(owner: AnyRecord | undefined, method: string, provider: string, endpoint: string): boolean {
   if (!owner || typeof owner[method] !== "function") return false;
   if (owner[method].__metergraph__) return true;
@@ -415,6 +468,7 @@ function patch(owner: AnyRecord | undefined, method: string, provider: string, e
     const incoming = requestFrom(args);
     const patchUsage = typeof process === "undefined"
       || process.env.METERGRAPH_PATCH_STREAM_USAGE !== "0";
+    let injectedUsage = false;
     if (
       provider === "openai"
       && endpoint === "chat.completions"
@@ -423,6 +477,7 @@ function patch(owner: AnyRecord | undefined, method: string, provider: string, e
       && patchUsage
     ) {
       args = [{ ...incoming, stream_options: { include_usage: true } }, ...args.slice(1)];
+      injectedUsage = true;
     }
     const state = startCapture(capture, provider, endpoint, requestFrom(args), new Error().stack);
     if (!state) {
@@ -444,20 +499,31 @@ function patch(owner: AnyRecord | undefined, method: string, provider: string, e
     } finally {
       reentrantOwners.delete(owner);
     }
+    // complete()/fail() finalize capture at most once regardless of which
+    // consumption path (await, .withResponse(), ...) reaches the value first.
+    let settled = false;
+    let streamValue: unknown;
     const complete = (response: any) => {
       const request = requestFrom(args);
       const streaming = endpoint.endsWith(".stream") || request.stream === true;
       if (streaming && response && (response[Symbol.asyncIterator] || response.finalMessage)) {
-        return streamProxy(response, state, capture);
+        return (streamValue ??= streamProxy(response, state, capture, injectedUsage));
       }
-      finishCapture(capture, state, response);
+      if (!settled) {
+        settled = true;
+        finishCapture(capture, state, response);
+      }
       return response;
     };
-    if (result && typeof (result as Promise<unknown>).then === "function") {
-      return (result as Promise<unknown>).then(complete, (error) => {
+    const fail = (error: unknown): never => {
+      if (!settled) {
+        settled = true;
         finishCapture(capture, state, undefined, { error });
-        throw error;
-      });
+      }
+      throw error;
+    };
+    if (result && typeof (result as Promise<unknown>).then === "function") {
+      return preserveProviderPromise(result as AnyRecord, complete, fail);
     }
     return complete(result);
   };
