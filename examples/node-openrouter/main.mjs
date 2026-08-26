@@ -7,14 +7,6 @@ import { pathToFileURL } from "node:url";
 import OpenAI from "openai";
 import * as mg from "metergraph";
 
-function reportedCost(usage) {
-  // Application helper (example output only): read OpenRouter's reported account
-  // charge from usage.cost for display. This is not part of the MeterGraph
-  // integration — MeterGraph captures the same field independently.
-  const cost = usage?.cost;
-  return typeof cost === "number" && Number.isFinite(cost) ? cost : undefined;
-}
-
 export async function main() {
   // MeterGraph integration (init): identify captured calls; token and ingest URL
   // come from METERGRAPH_APP_TOKEN / METERGRAPH_INGEST_URL.
@@ -41,7 +33,6 @@ export async function main() {
     const nonstream = {
       servedModel: response.model,
       content: response.choices[0].message.content,
-      reportedCostUsd: reportedCost(response.usage),
     };
 
     // Application code: an ordinary streaming call and its iteration. OpenRouter
@@ -54,19 +45,16 @@ export async function main() {
     let text = "";
     let chunkCount = 0;
     let servedModel;
-    let reportedCostUsd;
     for await (const chunk of stream) {
       chunkCount += 1;
       servedModel ??= chunk.model;
       text += chunk.choices?.[0]?.delta?.content ?? "";
-      if (chunk.usage?.cost !== undefined) reportedCostUsd = reportedCost(chunk.usage);
     }
-    const streamSummary = { servedModel, content: text, chunkCount, reportedCostUsd };
+    const streamSummary = { servedModel, content: text, chunkCount };
     return { nonstream, stream: streamSummary };
   } finally {
-    // MeterGraph integration (flush/shutdown): deliver captured rows and stop
+    // MeterGraph integration (shutdown): deliver captured rows and stop
     // background work.
-    await mg.flush();
     await mg.shutdown();
   }
 }
@@ -74,6 +62,6 @@ export async function main() {
 // Run only when invoked directly (path-safe against spaces and encoding).
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const result = await main();
-  console.log(`non-streaming served_model=${result.nonstream.servedModel} reported_cost_usd=${result.nonstream.reportedCostUsd}`);
-  console.log(`streaming served_model=${result.stream.servedModel} reported_cost_usd=${result.stream.reportedCostUsd} chunks=${result.stream.chunkCount}`);
+  console.log(`non-streaming served_model=${result.nonstream.servedModel}`);
+  console.log(`streaming served_model=${result.stream.servedModel} chunks=${result.stream.chunkCount}`);
 }

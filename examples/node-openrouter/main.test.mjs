@@ -90,21 +90,17 @@ test("node-openrouter example: native results and captured wire rows (offline)",
   process.env.OPENROUTER_API_KEY = "sk-or-PLACEHOLDER";
   process.env.METERGRAPH_APP_TOKEN = "mg_test";
   process.env.METERGRAPH_INGEST_URL = `http://127.0.0.1:${port}`;
-  process.env.METERGRAPH_FLUSH_MS = "1000";
-  process.env.METERGRAPH_CONFIG_POLL_MS = "60000";
 
   const summary = await main();
 
   // Native OpenAI results survive the wrapper unchanged.
   assert.equal(summary.nonstream.servedModel, SERVED_MODEL);
   assert.match(summary.nonstream.content, /Cache-aware/);
-  assert.equal(summary.nonstream.reportedCostUsd, REPORTED_COST);
   assert.equal(summary.stream.servedModel, SERVED_MODEL);
   assert.equal(summary.stream.content, "Streaming keeps usage final.");
   assert.ok(summary.stream.chunkCount >= 4); // final usage chunk stays visible
-  assert.equal(summary.stream.reportedCostUsd, REPORTED_COST);
 
-  // Exactly two gateway rows: one non-stream, one stream. No duplicate capture.
+  // shutdown() delivers exactly two gateway rows: one non-stream, one stream.
   const rows = batches.flatMap((batch) => batch.rows ?? []);
   const gatewayRows = rows.filter((row) => row.gateway === "openrouter");
   assert.equal(gatewayRows.length, 2);
