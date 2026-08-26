@@ -46,6 +46,17 @@ Node's asynchronous execution and isolate concurrent jobs. Legacy
 scope, but warn and do nothing when called outside one. Use `setDefaultTags()`
 only for deliberate process-wide tags; sessions are always execution-scoped.
 
+## OpenRouter
+
+Point an OpenAI client at `https://openrouter.ai/api/v1` and `wrap()` auto-detects
+the host, adding `served_model` and — when OpenRouter supplies a valid
+`usage.cost` — `reported_cost_usd` to Chat Completions rows without changing the
+requested model or the capture provider. A trusted custom domain uses
+`wrap(client, { gateway: "openrouter" })`;
+the existing `wrap(client, "openai")` form is unchanged. The runnable
+[Node OpenRouter example](../examples/node-openrouter/) covers requested-vs-served
+model, reported-vs-catalog cost, streaming usage, and the BYOK limitation.
+
 ## Vercel AI SDK
 
 Use Metergraph as language-model middleware. It records each actual provider

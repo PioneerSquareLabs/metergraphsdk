@@ -27,5 +27,4 @@ def haiku_stream(topic: str) -> None:
 with metergraph.route("haiku-writer"):
     print(haiku_about("metered clouds"))
     haiku_stream("token budgets")
-metergraph.flush()
 metergraph.shutdown()

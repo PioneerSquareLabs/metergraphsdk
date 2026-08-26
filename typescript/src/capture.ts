@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 import { contextSnapshot, type CaptureContext } from "./context.js";
+import { gatewayEvidence } from "./gateway.js";
 import { scrub, templateHash } from "./template.js";
 import type { Transport } from "./transport.js";
 import { SDK_VERSION } from "./version.js";
@@ -36,6 +37,7 @@ export interface CallState {
   spanId: string;
   parentSpanId?: string;
   traceName: string;
+  gateway?: string;
   done: boolean;
 }
 
@@ -649,6 +651,7 @@ export class CaptureRuntime {
       provider: state.provider,
       model: state.request.model,
       ...usage(response),
+      ...gatewayEvidence(state.gateway, state.endpoint, response),
       latency_ms: Math.round(performance.now() - state.started),
       status,
       status_code: statusCode,

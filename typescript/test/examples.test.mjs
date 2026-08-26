@@ -9,6 +9,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../
 for (const [folder, name] of [
   ["node-vercel-ai-registry", "main.mjs"],
   ["node-vercel-ai-existing-factory", "main.mjs"],
+  ["node-openrouter", "main.mjs"],
 ]) {
   test(`${folder}/${name} is runnable JavaScript`, () => {
     const example = path.join(repoRoot, "examples", folder, name);

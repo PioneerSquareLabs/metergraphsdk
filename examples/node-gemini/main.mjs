@@ -25,5 +25,4 @@ await mg.route("haiku-writer", async () => {
   console.log(await haikuAbout("metered clouds"));
   await haikuStream("token budgets");
 });
-await mg.flush();
 await mg.shutdown();

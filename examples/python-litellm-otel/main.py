@@ -41,5 +41,4 @@ if __name__ == "__main__":
     # LiteLLM dispatches sync-call logging callbacks off the request path. A
     # long-running service needs no wait; this one-shot example allows it to finish.
     time.sleep(1)
-    metergraph.flush()
     metergraph.shutdown()

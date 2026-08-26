@@ -128,6 +128,13 @@ Sync, async, streaming, tool calls, and Responses API requests use the same
 capture path. For a compatible client behind a custom gateway URL, pass
 `provider="vercel"` to `metergraph.wrap()`.
 
+For OpenRouter, wrap an ordinary OpenAI client pointed at
+`https://openrouter.ai/api/v1`; the host is auto-detected and captured rows gain
+`served_model` and, when OpenRouter supplies a valid `usage.cost`, the
+gateway-reported `reported_cost_usd`. A trusted custom domain uses
+`metergraph.wrap(client, gateway="openrouter")`. See the runnable
+[Python OpenRouter example](examples/python-openrouter/).
+
 MeterGraph provides a standard OpenTelemetry GenAI span exporter. LiteLLM is
 the currently qualified integration and can attach the exporter without
 changing individual model calls. See the
@@ -191,6 +198,13 @@ const anthropic = mg.wrap(new Anthropic());
 import { GoogleGenAI } from "@google/genai";
 const gemini = mg.wrap(new GoogleGenAI({}));
 ```
+
+For OpenRouter, wrap an ordinary OpenAI client pointed at
+`https://openrouter.ai/api/v1`; the host is auto-detected and captured rows gain
+`served_model` and, when OpenRouter supplies a valid `usage.cost`, the
+gateway-reported `reported_cost_usd`. A trusted custom domain uses
+`mg.wrap(client, { gateway: "openrouter" })`. See the runnable
+[Node OpenRouter example](examples/node-openrouter/).
 
 ```ts
 const summarizeInvoice = mg.track("billing.summarize_invoice", async (invoice) => {

@@ -181,18 +181,25 @@ def init(
         )
 
 
-def wrap(client: Any, *, provider: str | None = None) -> Any:
+def wrap(
+    client: Any, *, provider: str | None = None, gateway: str | None = None
+) -> Any:
     """Wrap an OpenAI, Anthropic, Google, or Vercel AI Gateway client.
 
     Calls init() automatically, so with env-var configuration this is the
     only setup line needed. OpenAI and Anthropic clients using Vercel's public
     AI Gateway URL are detected automatically; pass ``provider="vercel"`` to
-    force gateway handling for a compatible client with a custom URL. Call
-    init(...) first to pass Metergraph options in code.
+    force gateway handling for a compatible client with a custom URL.
+
+    OpenAI-compatible clients pointed at OpenRouter (``https://openrouter.ai``)
+    are detected automatically and gain gateway billing evidence without changing
+    the capture provider; pass ``gateway="openrouter"`` to force that handling for
+    a trusted custom domain. ``provider=`` and ``gateway=`` cannot be combined.
+    Call init(...) first to pass Metergraph options in code.
     """
     if not _initialized:
         init()
-    return _wrap(client, provider=provider)
+    return _wrap(client, provider=provider, gateway=gateway)
 
 
 def model_for(route_name: str, *, default: str, session_key: str | None = None) -> str:

@@ -22,7 +22,7 @@
     "test": "npm run build && npm run test:types && npm run test:examples && node --test test/*.test.mjs",
     "test:examples": "tsc --noEmit --strict --skipLibCheck --target ES2022 --module NodeNext --moduleResolution NodeNext test/ai-sdk-factories.types.ts",
     "test:package": "npm run build && node --test test/package/packed-package.test.mjs",
-    "test:types": "tsc --noEmit --strict --skipLibCheck --target ES2022 --module NodeNext --moduleResolution NodeNext test/ai-sdk-current.types.ts"
+    "test:types": "tsc --noEmit --strict --skipLibCheck --target ES2022 --module NodeNext --moduleResolution NodeNext test/ai-sdk-current.types.ts test/wrap-gateway.types.ts"
   },
   "engines": {
     "node": ">=18"

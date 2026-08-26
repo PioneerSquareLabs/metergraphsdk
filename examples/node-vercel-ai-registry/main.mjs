@@ -41,10 +41,6 @@ try {
     console.log(text);
   }
 } finally {
-  // MeterGraph integration: drain queued events during application shutdown.
-  try {
-    await mg.flush();
-  } finally {
-    await mg.shutdown();
-  }
+  // MeterGraph integration: deliver queued events and stop background work.
+  await mg.shutdown();
 }

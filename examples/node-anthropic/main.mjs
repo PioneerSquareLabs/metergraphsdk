@@ -16,5 +16,4 @@ const haikuAbout = mg.track("haiku.write", async (topic) => {
 await mg.route("haiku-writer", async () => {
   console.log(await haikuAbout("metered clouds"));
 });
-await mg.flush();
 await mg.shutdown();

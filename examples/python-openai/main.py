@@ -16,5 +16,4 @@ def haiku_about(topic: str) -> str:
 
 with metergraph.route("haiku-writer"):
     print(haiku_about("metered clouds"))
-metergraph.flush()
 metergraph.shutdown()

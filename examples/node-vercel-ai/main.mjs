@@ -25,9 +25,5 @@ try {
     }),
   );
 } finally {
-  try {
-    await mg.flush();
-  } finally {
-    await mg.shutdown();
-  }
+  await mg.shutdown();
 }
