@@ -1,5 +1,6 @@
 import { type CallState, type CaptureRuntime, chunkText } from "./capture.js";
 import { contextSnapshot, type CaptureContext } from "./context.js";
+import { detectGateway, resolveGateway } from "./gateway.js";
 
 type AnyRecord = Record<PropertyKey, any>;
 
@@ -441,7 +442,13 @@ function preserveProviderPromise(
   });
 }
 
-function patch(owner: AnyRecord | undefined, method: string, provider: string, endpoint: string): boolean {
+function patch(
+  owner: AnyRecord | undefined,
+  method: string,
+  provider: string,
+  endpoint: string,
+  gatewayName?: string,
+): boolean {
   if (!owner || typeof owner[method] !== "function") return false;
   if (owner[method].__metergraph__) return true;
   const original = owner[method];
@@ -472,6 +479,7 @@ function patch(owner: AnyRecord | undefined, method: string, provider: string, e
     if (
       provider === "openai"
       && endpoint === "chat.completions"
+      && !gatewayName // a gateway supplies its final usage event itself; no request mutation
       && incoming.stream === true
       && incoming.stream_options == null
       && patchUsage
@@ -480,6 +488,7 @@ function patch(owner: AnyRecord | undefined, method: string, provider: string, e
       injectedUsage = true;
     }
     const state = startCapture(capture, provider, endpoint, requestFrom(args), new Error().stack);
+    if (state && gatewayName) state.gateway = gatewayName;
     if (!state) {
       // start faulted: invoke the provider once, return its result unwrapped.
       reentrantOwners.add(owner);
@@ -594,7 +603,7 @@ function resolveSeam(client: AnyRecord, path: string): AnyRecord | undefined {
   return obj;
 }
 
-function applySeams(client: AnyRecord, provider: string): string[] {
+function applySeams(client: AnyRecord, provider: string, gatewayName?: string): string[] {
   const patched: string[] = [];
   for (const seam of SEAM_TABLES[provider] ?? []) {
     let owner: AnyRecord | undefined;
@@ -603,7 +612,7 @@ function applySeams(client: AnyRecord, provider: string): string[] {
     } catch {
       continue; // a pathological client property must never break wrap()
     }
-    if (owner !== undefined && patch(owner, seam.method, provider, seam.endpoint)) {
+    if (owner !== undefined && patch(owner, seam.method, provider, seam.endpoint, gatewayName)) {
       patched.push(`${seam.path}.${seam.method}`);
     }
   }
@@ -622,15 +631,55 @@ function applyBatchExtras(client: AnyRecord, provider: string): number {
   return patched;
 }
 
-export function wrap<T extends AnyRecord>(client: T, provider?: "openai" | "anthropic" | "google"): T {
+export type ProviderName = "openai" | "anthropic" | "google";
+
+// A gateway override requires the OpenAI-compatible contract, so at the type
+// level `gateway` is allowed only when `provider` is absent or "openai".
+export type WrapOptions =
+  | { provider?: ProviderName; gateway?: never }
+  | { provider?: Extract<ProviderName, "openai">; gateway: "openrouter" };
+
+// A gateway override requires the OpenAI-compatible contract, so a provider is
+// accepted only when it is "openai". Unsupported/contradictory setup throws
+// before any provider call, without echoing a URL or credential.
+function validateGatewayConfig(
+  client: AnyRecord,
+  provider: ProviderName | undefined,
+  gateway: string | undefined,
+): string | undefined {
+  if (gateway === undefined) return undefined;
+  const overrideGateway = resolveGateway(gateway);
+  if (provider !== undefined && String(provider).toLowerCase() !== "openai") {
+    throw new Error("metergraph.wrap() gateway requires an OpenAI-compatible provider");
+  }
+  if (detectProvider(client) !== "openai") {
+    throw new Error("metergraph.wrap() gateway requires an OpenAI-compatible client");
+  }
+  return overrideGateway;
+}
+
+export function wrap<T extends AnyRecord>(client: T, provider?: ProviderName): T;
+export function wrap<T extends AnyRecord>(client: T, options: WrapOptions): T;
+export function wrap<T extends AnyRecord>(client: T, providerOrOptions?: ProviderName | WrapOptions): T {
+  let provider: ProviderName | undefined;
+  let gateway: string | undefined;
+  if (typeof providerOrOptions === "string") {
+    provider = providerOrOptions;
+  } else if (providerOrOptions && typeof providerOrOptions === "object") {
+    provider = providerOrOptions.provider;
+    gateway = providerOrOptions.gateway;
+  }
+  const overrideGateway = validateGatewayConfig(client, provider, gateway);
   try {
     const name = provider ?? detectProvider(client);
-    const patched = applySeams(client, name);
+    const gatewayName = overrideGateway ?? (name === "openai" ? detectGateway(client) : undefined);
+    const patched = applySeams(client, name, gatewayName);
     const patchedCount = patched.length + applyBatchExtras(client, name);
+    const label = gatewayName ? `${gatewayName} gateway via ${name}` : name;
     if (!patchedCount) {
-      console.warn(`Metergraph found no supported methods on ${name} client`);
+      console.warn(`Metergraph found no supported methods on ${label} client`);
     } else {
-      console.info(`Metergraph patched ${patchedCount} seam(s) on ${name} client: ${patched.join(", ") || "(batch-only)"}`);
+      console.info(`Metergraph patched ${patchedCount} seam(s) on ${label} client: ${patched.join(", ") || "(batch-only)"}`);
     }
   } catch (error) {
     console.warn("Metergraph wrap() failed; client is unmodified and uninstrumented", error);

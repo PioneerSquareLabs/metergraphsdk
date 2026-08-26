@@ -25,6 +25,8 @@ export METERGRAPH_APP_TOKEN=dev-token                # one of MG_TOKENS
 | `node-vercel-ai/main.mjs` | `npm i metergraph ai @ai-sdk/openai`, `OPENAI_API_KEY` or `AI_GATEWAY_API_KEY` |
 | `node-vercel-ai-registry/` | New or adaptable multi-provider AI SDK applications |
 | `node-vercel-ai-existing-factory/` | Applications that already have a custom model factory |
+| `python-openrouter/main.py` | `pip install metergraph openai`, `OPENROUTER_API_KEY` |
+| `node-openrouter/` | self-contained package: `cd` in, `npm install`, `npm start`; `OPENROUTER_API_KEY` |
 
 `node-vercel-ai/main.mjs` uses AI SDK 7 and therefore requires Node.js 22+. It
 wraps a language model with `mg.vercelAISDKMiddleware()` instead of a provider
@@ -49,6 +51,16 @@ Use the provider registry for new multi-provider integrations. Do not create a
 custom factory solely for MeterGraph. Each detailed README identifies the
 original application code and every MeterGraph addition; the runnable source
 uses matching `MeterGraph integration` comments.
+
+## OpenRouter (OpenAI-compatible gateway)
+
+[`python-openrouter/`](python-openrouter/) and [`node-openrouter/`](node-openrouter/)
+wrap an ordinary OpenAI client pointed at OpenRouter. `https://openrouter.ai` is
+auto-detected; a trusted custom domain uses the `gateway="openrouter"` override.
+Captured rows add `served_model` and the gateway-reported `reported_cost_usd`
+(the OpenRouter account charge) alongside the requested model and catalog cost.
+Each folder's README explains requested-vs-served model, reported-vs-catalog
+cost, final streaming usage, and the BYOK limitation.
 
 ## Batch-first execution
 

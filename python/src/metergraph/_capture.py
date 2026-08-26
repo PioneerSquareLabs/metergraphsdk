@@ -19,6 +19,7 @@ from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 
 from ._context import CaptureContext, snapshot
+from ._gateway import detect_gateway, gateway_evidence, resolve_gateway
 from ._template import scrub, template_hash
 from ._version import SDK_VERSION
 
@@ -54,6 +55,21 @@ def _int(value: Any) -> int | None:
         )
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+def _gateway_evidence(
+    gateway: str | None, endpoint: str, response: Any
+) -> dict[str, Any]:
+    """Fail-open gateway evidence extraction.
+
+    A fault here (e.g. a pathological response property that raises) drops the
+    optional gateway fields but never the base row, and never reaches the
+    provider result, error, or stream the caller observes.
+    """
+    try:
+        return gateway_evidence(gateway, endpoint, response)
+    except Exception:
+        return {}
 
 
 def _usage(response: Any) -> dict[str, int | None]:
@@ -239,8 +255,12 @@ def _chunk_has_output(chunk: Any) -> bool:
 
 
 def _usage_only_chunk(chunk: Any, call: "CallState") -> bool:
+    # A usage-only chunk is suppressed only for a direct call, where MeterGraph
+    # injected include_usage the caller did not request. A gateway supplies its
+    # final usage event as part of its own contract, so it is left visible.
     return (
-        call.endpoint == "chat.completions"
+        call.gateway is None
+        and call.endpoint == "chat.completions"
         and _get(chunk, "choices") == []
         and _get(chunk, "usage") is not None
     )
@@ -655,6 +675,7 @@ class Runtime:
         request: Mapping[str, Any],
         *,
         context: CaptureContext | None = None,
+        gateway: str | None = None,
     ) -> "CallState":
         context = context or snapshot()
         func, module, frames = _capture_frames(
@@ -687,6 +708,7 @@ class Runtime:
             or context.func_name
             or func
             or endpoint,
+            gateway=gateway,
         )
 
     def _text(
@@ -725,6 +747,7 @@ class CallState:
     span_id: str
     parent_span_id: str | None
     trace_name: str
+    gateway: str | None = None
     done: bool = False
 
     def finish(
@@ -811,6 +834,7 @@ class CallState:
             "provider": self.provider,
             "model": self.request.get("model"),
             **_usage(response),
+            **_gateway_evidence(self.gateway, self.endpoint, response),
             "latency_ms": round((time.perf_counter() - self.started) * 1000),
             "status": effective_status,
             "status_code": status_code,
@@ -1385,6 +1409,7 @@ def _patch(
     endpoint: str,
     *,
     gateway: bool = False,
+    gateway_name: str | None = None,
 ) -> bool:
     original = getattr(owner, method_name, None)
     if not callable(original):
@@ -1400,6 +1425,7 @@ def _patch(
         if (
             provider == "openai"
             and endpoint == "chat.completions"
+            and gateway_name is None
             and os.getenv("METERGRAPH_PATCH_STREAM_USAGE", "1") != "0"
         ):
             incoming = _request(args, kwargs)
@@ -1412,7 +1438,9 @@ def _patch(
         try:
             request = _request(args, kwargs)
             capture_provider = _gateway_provider(request) if gateway else provider
-            call = runtime.call_state(capture_provider, endpoint, request)
+            call = runtime.call_state(
+                capture_provider, endpoint, request, gateway=gateway_name
+            )
         except Exception:
             # Capture-state creation is telemetry-only. If it fails, invoke the
             # provider exactly once and return/await its native result with no
@@ -1557,7 +1585,13 @@ def _gateway_provider(request: Mapping[str, Any]) -> str:
     return creator if separator and creator else "vercel-ai-gateway"
 
 
-def _apply_seams(client: Any, provider: str, *, gateway: bool = False) -> list[str]:
+def _apply_seams(
+    client: Any,
+    provider: str,
+    *,
+    gateway: bool = False,
+    gateway_name: str | None = None,
+) -> list[str]:
     patched: list[str] = []
     for seam in SEAM_TABLES.get(provider, ()):
         try:
@@ -1570,6 +1604,7 @@ def _apply_seams(client: Any, provider: str, *, gateway: bool = False) -> list[s
             provider,
             seam.endpoint,
             gateway=gateway,
+            gateway_name=gateway_name,
         ):
             patched.append(f"{seam.path}.{seam.method}")
     return patched
@@ -1595,36 +1630,55 @@ def _apply_batch_extras(client: Any, provider: str) -> int:
     return patched
 
 
-def wrap(client: Any, *, provider: str | None = None) -> Any:
+def wrap(
+    client: Any, *, provider: str | None = None, gateway: str | None = None
+) -> Any:
     """Patch supported resource methods on an OpenAI, Anthropic, or Google client.
 
-    OpenAI and Anthropic clients pointed at Vercel AI Gateway are recognized
-    automatically. ``provider="vercel"`` can force gateway attribution for a
-    compatible client whose public base URL has been customized.
+    Vercel AI Gateway clients are recognized automatically; ``provider="vercel"``
+    forces it for a custom URL. OpenAI-compatible clients pointed at OpenRouter
+    (``https://openrouter.ai``) are recognized automatically and gain gateway
+    billing evidence without changing the capture provider; ``gateway="openrouter"``
+    forces it for a trusted custom domain.
 
-    Never raises: an unrecognized client shape, or an exception while probing
-    it, results in an unmodified, uninstrumented client — not a crash.
+    An unsupported or contradictory ``gateway``/``provider`` combination raises
+    before any provider call, without echoing a URL or credential. Every other
+    failure is fail-open: the client is returned unmodified and uninstrumented.
     """
+    override_gateway = _validate_gateway_config(client, provider, gateway)
     try:
-        gateway = (
-            provider.strip().lower() in _VERCEL_PROVIDER_ALIASES
-            if isinstance(provider, str)
-            else _uses_vercel_gateway(client)
+        if override_gateway is not None:
+            vercel = False
+            resolved_provider = "openai"
+            gateway_name: str | None = override_gateway
+        else:
+            vercel = (
+                provider.strip().lower() in _VERCEL_PROVIDER_ALIASES
+                if isinstance(provider, str)
+                else _uses_vercel_gateway(client)
+            )
+            resolved_provider = (
+                _detect_provider(client)
+                if vercel
+                else provider or _detect_provider(client)
+            )
+            gateway_name = (
+                detect_gateway(client)
+                if not vercel and resolved_provider == "openai"
+                else None
+            )
+        patched = _apply_seams(
+            client, resolved_provider, gateway=vercel, gateway_name=gateway_name
         )
-        resolved_provider = (
-            _detect_provider(client)
-            if gateway
-            else provider or _detect_provider(client)
-        )
-        patched = _apply_seams(client, resolved_provider, gateway=gateway)
         patched_count = len(patched)
-        if not gateway:
+        if not vercel:
             patched_count += _apply_batch_extras(client, resolved_provider)
-        client_label = (
-            f"Vercel AI Gateway via {resolved_provider}"
-            if gateway
-            else resolved_provider
-        )
+        if vercel:
+            client_label = f"Vercel AI Gateway via {resolved_provider}"
+        elif gateway_name is not None:
+            client_label = f"{gateway_name} gateway via {resolved_provider}"
+        else:
+            client_label = resolved_provider
         if not patched_count:
             log.warning(
                 "Metergraph found no supported methods on %s client", client_label
@@ -1642,3 +1696,29 @@ def wrap(client: Any, *, provider: str | None = None) -> Any:
             exc_info=True,
         )
     return client
+
+
+def _validate_gateway_config(
+    client: Any, provider: str | None, gateway: str | None
+) -> str | None:
+    """Resolve an explicit ``gateway=`` override, or return None.
+
+    A gateway override requires the OpenAI-compatible response contract, so a
+    ``provider=`` value is accepted only when it is ``"openai"``; anything else
+    (including a Vercel alias) contradicts the gateway. Raises ``ValueError`` for
+    an unsupported gateway, a contradictory provider, or a non-OpenAI-compatible
+    client — before any provider call, and without echoing a URL or credential.
+    """
+    if gateway is None:
+        return None
+    override_gateway = resolve_gateway(gateway)
+    if provider is not None and str(provider).strip().lower() != "openai":
+        raise ValueError(
+            "metergraph.wrap() gateway requires an OpenAI-compatible provider; "
+            "the given provider= is incompatible with gateway="
+        )
+    if _detect_provider(client) != "openai":
+        raise ValueError(
+            "metergraph.wrap(gateway=...) requires an OpenAI-compatible client"
+        )
+    return override_gateway

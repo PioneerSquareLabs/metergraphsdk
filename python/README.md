@@ -72,6 +72,15 @@ async, streaming, tool calls, and OpenAI Responses API calls are captured. Use
 `metergraph.wrap(client, provider="vercel")` only when a compatible client is
 behind a custom gateway URL that cannot be detected automatically.
 
+OpenRouter is captured the same way: point an OpenAI client at
+`https://openrouter.ai/api/v1` and `wrap()` auto-detects the host, adding
+`served_model` and — when OpenRouter supplies a valid `usage.cost` —
+`reported_cost_usd` to Chat Completions rows without changing the requested model
+or the capture provider. A trusted custom domain uses
+`metergraph.wrap(client, gateway="openrouter")`. The runnable
+[Python OpenRouter example](../examples/python-openrouter/) covers requested-vs-
+served model, reported-vs-catalog cost, streaming usage, and the BYOK limitation.
+
 ## OpenTelemetry GenAI export
 
 `MetergraphGenAIExporter` is a standard OpenTelemetry span exporter for GenAI

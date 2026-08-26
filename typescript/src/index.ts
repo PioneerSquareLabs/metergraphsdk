@@ -31,7 +31,7 @@ import { SessionManager } from "./session.js";
 import { track } from "./track.js";
 import { Transport, type TransportMode, type WaitUntil } from "./transport.js";
 import { SDK_VERSION } from "./version.js";
-import { setCaptureRuntime, wrap as wrapProvider } from "./wrap.js";
+import { setCaptureRuntime, wrap as wrapProvider, type WrapOptions } from "./wrap.js";
 import {
   createVercelAISDKMiddleware,
   type VercelAISDKMiddleware,
@@ -272,13 +272,20 @@ export function wrapHandler<TArgs extends unknown[], TResult>(
  *
  * Calls init() automatically, so with env-var configuration this is the
  * only setup line needed. Call init(...) first to pass options in code.
+ * OpenAI-compatible clients pointed at OpenRouter are detected automatically;
+ * pass `{ gateway: "openrouter" }` to force it for a trusted custom domain.
  */
 export function wrap<T extends Record<PropertyKey, any>>(
   client: T,
   provider?: "openai" | "anthropic" | "google",
+): T;
+export function wrap<T extends Record<PropertyKey, any>>(client: T, options: WrapOptions): T;
+export function wrap<T extends Record<PropertyKey, any>>(
+  client: T,
+  providerOrOptions?: "openai" | "anthropic" | "google" | WrapOptions,
 ): T {
   if (!initialized) init();
-  return wrapProvider(client, provider);
+  return wrapProvider(client, providerOrOptions as WrapOptions);
 }
 
 export const wrapClient = wrap;
@@ -321,6 +328,7 @@ export type {
   TransportMode,
   VercelAISDKMiddleware,
   VercelAISDKSpecificationVersion,
+  WrapOptions,
 };
 
 /**
