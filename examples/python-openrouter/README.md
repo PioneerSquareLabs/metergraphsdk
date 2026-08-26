@@ -15,7 +15,7 @@ export METERGRAPH_INGEST_URL=http://localhost:8787   # your self-hosted server
 python examples/python-openrouter/main.py
 ```
 
-The integration is one line:
+Client instrumentation is one line:
 
 ```python
 client = metergraph.wrap(OpenAI(api_key=..., base_url="https://openrouter.ai/api/v1"))

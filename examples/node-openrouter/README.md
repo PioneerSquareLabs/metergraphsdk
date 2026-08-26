@@ -21,7 +21,7 @@ npm start
 
 Run the offline contract test (no credentials or network) with `npm test`.
 
-The integration is one line:
+Client instrumentation is one line:
 
 ```ts
 const client = mg.wrap(new OpenAI({ apiKey, baseURL: "https://openrouter.ai/api/v1" }));

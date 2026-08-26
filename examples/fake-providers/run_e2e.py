@@ -61,7 +61,6 @@ def main():
     with metergraph.route("receipt-parser", unit="receipt"):
         parse_receipt()
         parse_receipt_stream()
-    metergraph.flush()
     metergraph.shutdown()
     print("sent 7 calls across 4 tracked functions")
 

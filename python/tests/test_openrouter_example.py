@@ -170,8 +170,6 @@ def test_python_openrouter_example_offline_contract(monkeypatch):
         monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-PLACEHOLDER")
         monkeypatch.setenv("METERGRAPH_APP_TOKEN", "mg_test")
         monkeypatch.setenv("METERGRAPH_INGEST_URL", f"http://127.0.0.1:{port}")
-        monkeypatch.setenv("METERGRAPH_FLUSH_SECONDS", "1")
-        monkeypatch.setenv("METERGRAPH_CONFIG_POLL_SECONDS", "60")
         _reset_metergraph()
         example = _load_example()
         summary = example.main()
@@ -179,13 +177,11 @@ def test_python_openrouter_example_offline_contract(monkeypatch):
         # Native OpenAI results survive the wrapper unchanged.
         assert summary["nonstream"]["served_model"] == SERVED_MODEL
         assert "Cache-aware" in summary["nonstream"]["content"]
-        assert summary["nonstream"]["reported_cost_usd"] == REPORTED_COST
         assert summary["stream"]["served_model"] == SERVED_MODEL
         assert "Streaming keeps usage final." == summary["stream"]["content"]
         assert summary["stream"]["chunk_count"] >= 3
-        assert summary["stream"]["reported_cost_usd"] == REPORTED_COST
 
-        # Captured wire rows carry the gateway evidence.
+        # shutdown() delivers captured wire rows with the gateway evidence.
         rows = [row for batch in batches for row in batch.get("rows", [])]
         gateway_rows = [r for r in rows if r.get("gateway") == "openrouter"]
         # Exactly two: one non-stream, one stream. No duplicate capture.

@@ -14,14 +14,6 @@ from openai import OpenAI
 import metergraph
 
 
-def _reported_cost(usage):
-    # Application helper (example output only): read OpenRouter's reported account
-    # charge from usage.cost for display. This is not part of the MeterGraph
-    # integration — MeterGraph captures the same field independently.
-    cost = getattr(usage, "cost", None)
-    return cost if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None
-
-
 def build_client():
     api_key = os.environ.get("OPENROUTER_API_KEY", "sk-or-REPLACE_WITH_YOUR_KEY")
     base_url = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
@@ -42,52 +34,41 @@ def main():
     client = build_client()
     requested_model = "anthropic/claude-sonnet-4.6"
     try:
-        # MeterGraph integration (route): names the captured call. The create()
-        # call it wraps is ordinary, unchanged application code.
-        with metergraph.route("openrouter-nonstream"):
-            response = client.chat.completions.create(
-                model=requested_model,
-                messages=[{"role": "user", "content": "Explain cache-aware pricing in one sentence."}],
-            )
+        # Application code: an ordinary non-streaming call.
+        response = client.chat.completions.create(
+            model=requested_model,
+            messages=[{"role": "user", "content": "Explain cache-aware pricing in one sentence."}],
+        )
         nonstream = {
             "served_model": response.model,
             "content": response.choices[0].message.content,
-            "reported_cost_usd": _reported_cost(response.usage),
         }
 
-        # MeterGraph integration (route): names the streaming call. The streaming
-        # create() and the iteration below are ordinary application code;
+        # Application code: an ordinary streaming call and its iteration.
         # OpenRouter sends the final usage event and MeterGraph leaves it visible.
-        with metergraph.route("openrouter-stream"):
-            stream = client.chat.completions.create(
-                model=requested_model,
-                messages=[{"role": "user", "content": "Stream a short note about metered clouds."}],
-                stream=True,
-            )
-            parts = []
-            chunk_count = 0
-            served_model = None
-            reported_cost = None
-            for chunk in stream:
-                chunk_count += 1
-                served_model = served_model or getattr(chunk, "model", None)
-                choices = getattr(chunk, "choices", None) or []
-                if choices and getattr(choices[0].delta, "content", None):
-                    parts.append(choices[0].delta.content)
-                usage = getattr(chunk, "usage", None)
-                if usage is not None:
-                    reported_cost = _reported_cost(usage)
+        stream = client.chat.completions.create(
+            model=requested_model,
+            messages=[{"role": "user", "content": "Stream a short note about metered clouds."}],
+            stream=True,
+        )
+        parts = []
+        chunk_count = 0
+        served_model = None
+        for chunk in stream:
+            chunk_count += 1
+            served_model = served_model or getattr(chunk, "model", None)
+            choices = getattr(chunk, "choices", None) or []
+            if choices and getattr(choices[0].delta, "content", None):
+                parts.append(choices[0].delta.content)
         stream_summary = {
             "served_model": served_model,
             "content": "".join(parts),
             "chunk_count": chunk_count,
-            "reported_cost_usd": reported_cost,
         }
         return {"nonstream": nonstream, "stream": stream_summary}
     finally:
-        # MeterGraph integration (flush/shutdown): deliver captured rows and stop
+        # MeterGraph integration (shutdown): deliver captured rows and stop
         # background work.
-        metergraph.flush()
         metergraph.shutdown()
 
 
@@ -95,12 +76,10 @@ if __name__ == "__main__":
     result = main()
     print(
         "non-streaming "
-        f"served_model={result['nonstream']['served_model']} "
-        f"reported_cost_usd={result['nonstream']['reported_cost_usd']}"
+        f"served_model={result['nonstream']['served_model']}"
     )
     print(
         "streaming "
         f"served_model={result['stream']['served_model']} "
-        f"reported_cost_usd={result['stream']['reported_cost_usd']} "
         f"chunks={result['stream']['chunk_count']}"
     )

@@ -11,6 +11,12 @@ export METERGRAPH_INGEST_URL=http://localhost:8787   # your self-hosted server
 export METERGRAPH_APP_TOKEN=dev-token                # one of MG_TOKENS
 ```
 
+The one-shot examples call `shutdown()` when they finish. `shutdown()` delivers
+queued events and stops MeterGraph's background work, so a separate `flush()` is
+not needed. In a long-running service, call `shutdown()` from the application's
+normal process-shutdown hook. Use `flush()` only when you need to deliver queued
+events while keeping MeterGraph running.
+
 | Example | Needs |
 |---|---|
 | `fake-providers/run_e2e.py` | nothing — offline demo traffic |
