@@ -500,7 +500,7 @@ test("wrap captures gemini usage from non-stream and cumulative stream responses
     status: "requested",
     idempotency: "non_idempotent",
   });
-  assert.equal(row.sdk_version, "0.6.4");
+  assert.equal(row.sdk_version, "0.6.5");
   assert.equal(streamed.provider, "google");
   assert.equal(streamed.endpoint, "models.generate_content.stream");
   assert.equal(streamed.stream, true);
