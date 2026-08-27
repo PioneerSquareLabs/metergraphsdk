@@ -1,0 +1,24 @@
+name: OpenAI v4 compatibility
+
+on:
+  workflow_dispatch:
+
+jobs:
+  openai-v4:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+        working-directory: typescript
+      - name: Install latest OpenAI v4
+        run: npm install --no-save "openai-v4@npm:openai@4"
+        working-directory: typescript
+      - name: Run OpenAI v4 qualification
+        run: npm run test:openai-v4
+        working-directory: typescript
+      - name: Record qualified version
+        run: node -e 'const fs=require("node:fs"); const p=JSON.parse(fs.readFileSync("node_modules/openai-v4/package.json")); fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "Qualified openai " + p.version + "\n")'
+        working-directory: typescript

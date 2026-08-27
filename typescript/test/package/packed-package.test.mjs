@@ -110,6 +110,7 @@ assert.deepEqual(Object.keys(required).sort(), Object.keys(imported).sort());
       ),
     );
     assert.equal(installedPackage.engines.node, ">=18");
+    assert.equal(installedPackage.peerDependencies.openai, ">=4 <8");
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
