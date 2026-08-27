@@ -5,6 +5,10 @@ provider-independent Vercel AI SDK language models on Node 18+, including AWS
 Lambda. Worker-style `waitUntil` hooks are present but are not part of the v1
 public-package qualification contract.
 
+Metergraph supports OpenAI JavaScript SDK majors 4 through 7. The current
+major is tested in normal CI; the oldest supported major is qualified with a
+manually triggered compatibility workflow.
+
 Initialize Metergraph once, then wrap each provider client. `init()` reads the
 token and other omitted options from the environment.
 
