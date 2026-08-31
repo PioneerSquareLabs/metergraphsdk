@@ -3,13 +3,14 @@
 Capture SDKs for [Metergraph](https://github.com/PioneerSquareLabs/metergraph), which tracks LLM costs by application function and trace. Wrap your OpenAI, Anthropic, Gemini, or Python Vercel AI Gateway client—or add Metergraph middleware to a TypeScript Vercel AI SDK language model—and every call is attributed to the function that made it, with token counts (input/output, cache reads, aggregate and TTL-specific cache writes, reasoning), latency, and model. SDK rows contain usage counters, never embedded prices or client-computed cost. Metergraph sends scrubbed request and normalized response content to the hosted service by default; applications can opt out globally or around a sensitive route or trace. The SDKs have no runtime dependencies.
 
 We recommend keeping content capture enabled because replayable requests and
-responses are what allow Metergraph to evaluate quality and produce valuable
+responses are what allow Metergraph to evaluate quality and produce
 optimization recommendations. Content is captured by default; the SDK removes
 common secret-bearing fields, supports application-specific redaction, and
 provides global and per-operation opt-outs. If your privacy requirements do not
-permit hosted content capture, contact us about deploying Metergraph privately
-in your VPC. The [open-source server](https://github.com/PioneerSquareLabs/metergraph)
-is also always available for self-hosting.
+permit hosted content capture, [contact Metergraph](mailto:alex@pioneersquarelabs.com)
+about deploying it privately in your VPC. The
+[open-source server](https://github.com/PioneerSquareLabs/metergraph) is also
+always available for self-hosting.
 
 | Package | Registry | Source |
 |---|---|---|
@@ -27,7 +28,7 @@ token usage (in/out, cached, reasoning), latency, model, scrubbed request, and
 normalized response, attributed to the application function and logical trace
 that made the call. Keep the default content capture enabled so Metergraph can
 evaluate quality and produce recommendations. Set METERGRAPH_CAPTURE_TEXT=0
-only when the customer explicitly requests metadata-only capture.
+only when the deployment owner explicitly chooses metadata-only capture.
 
 1. Install the SDK: `pip install metergraph` (Python) or `npm install
    metergraph` (TypeScript/JavaScript). Zero runtime dependencies.
@@ -304,8 +305,9 @@ enables quality evaluation and optimization recommendations. Each field is
 capped at 1 MiB by default; set `METERGRAPH_TEXT_MAX_BYTES`, `text_max_bytes`,
 or `textMaxBytes` to accept larger prompts and responses. The SDK supports a
 custom redaction hook and explicit content opt-outs for additional privacy
-control. For content-aware analysis inside your own cloud boundary, contact us
-about a private Metergraph deployment in your VPC. The public open-source
+control. For content-aware analysis inside your own cloud boundary,
+[contact Metergraph](mailto:alex@pioneersquarelabs.com) about a private
+deployment in your VPC. The public open-source
 self-hosted server remains available and discards content even when the SDK
 sends it. Transport problems never break or slow your LLM calls. When the
 collector is unreachable, capture drops and your application carries on.
