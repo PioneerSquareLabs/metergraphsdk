@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExportResult
+from opentelemetry.sdk.util.instrumentation import InstrumentationScope
 from opentelemetry.trace import SpanContext, Status, StatusCode, TraceFlags
 
 import metergraph
@@ -237,4 +239,257 @@ def test_maps_otel_error_status_without_raising(monkeypatch):
     assert rows.rows[0]["status_code"] == "error"
     assert rows.rows[0]["error"] is True
     assert rows.rows[0]["error_type"] == "OpenTelemetrySpanError"
+    _capture.set_runtime(None)
+
+
+def _scoped_span(
+    attributes: dict,
+    *,
+    scope_name: str | None = None,
+    status: Status | None = None,
+) -> ReadableSpan:
+    scope = (
+        InstrumentationScope(scope_name) if scope_name is not None else None
+    )
+    return ReadableSpan(
+        name="chat claude-opus-5",
+        context=SpanContext(
+            trace_id=int("12" * 16, 16),
+            span_id=int("34" * 8, 16),
+            is_remote=False,
+            trace_flags=TraceFlags(TraceFlags.SAMPLED),
+        ),
+        parent=SpanContext(
+            trace_id=int("12" * 16, 16),
+            span_id=int("56" * 8, 16),
+            is_remote=False,
+            trace_flags=TraceFlags(TraceFlags.SAMPLED),
+        ),
+        resource=Resource.create({"service.name": "synthetic-genai-app"}),
+        attributes=attributes,
+        status=status or Status(StatusCode.OK),
+        start_time=1_786_496_400_000_000_000,
+        end_time=1_786_496_400_125_000_000,
+        instrumentation_scope=scope,
+    )
+
+
+def _scope_traffic_attributes() -> dict:
+    """A minimal eligible gen_ai span, for tests that vary only the scope."""
+    return {
+        "gen_ai.request.model": "gpt-5-mini",
+        "gen_ai.provider.name": "openai",
+        "gen_ai.usage.input_tokens": 4,
+        "gen_ai.usage.output_tokens": 1,
+    }
+def _openinference_attributes() -> dict:
+    return {
+        "openinference.span.kind": "LLM",
+        "llm.model_name": "gpt-5-mini",
+        "llm.provider": "openai",
+        "llm.token_count.prompt": 30,
+        "llm.token_count.completion": 12,
+        "llm.token_count.prompt_details.cache_read": 5,
+        "llm.token_count.prompt_details.cache_write": 3,
+        "llm.token_count.completion_details.reasoning": 7,
+        "llm.input_messages.0.message.role": "user",
+        "llm.input_messages.0.message.content": "Synthetic input",
+        "llm.output_messages.0.message.role": "assistant",
+        "llm.output_messages.0.message.content": "Synthetic result",
+    }
+def _langfuse_attributes() -> dict:
+    return {
+        "langfuse.observation.type": "generation",
+        "langfuse.observation.model.name": "claude-opus-5",
+        "langfuse.observation.usage_details": json.dumps(
+            {"input": 11, "output": 4, "total": 15}
+        ),
+        "langfuse.observation.input": json.dumps(
+            [{"role": "user", "content": "Synthetic input"}]
+        ),
+        "langfuse.observation.output": json.dumps(
+            {"role": "assistant", "content": "Synthetic reply"}
+        ),
+        "session.id": "sess-1",
+        "langfuse.trace.name": "synthetic-trace",
+    }
+
+
+def test_genai_span_without_provider_falls_back_to_dialect(monkeypatch):
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root="")))
+    monkeypatch.setattr(metergraph, "init", lambda: None)
+    exporter = MetergraphGenAIExporter()
+
+    exporter.export(
+        [
+            _span(
+                {
+                    "gen_ai.operation.name": "chat",
+                    "gen_ai.request.model": "gpt-5-mini",
+                }
+            )
+        ]
+    )
+
+    assert len(rows.rows) == 1
+    assert rows.rows[0]["provider"] == "gen_ai"
+    assert rows.rows[0]["model"] == "gpt-5-mini"
+    _capture.set_runtime(None)
+
+
+def test_exclude_scopes_skips_without_logging(monkeypatch, caplog):
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root="")))
+    monkeypatch.setattr(metergraph, "init", lambda: None)
+    exporter = MetergraphGenAIExporter(exclude_scopes=["noisy.scope"])
+
+    with caplog.at_level(logging.DEBUG, logger="metergraph"):
+        result = exporter.export(
+            [
+                _scoped_span(
+                    _scope_traffic_attributes(), scope_name="noisy.scope"
+                )
+            ]
+        )
+
+    assert result is SpanExportResult.SUCCESS
+    assert rows.rows == []
+    assert exporter.skipped["scope"] == 1
+    assert [r for r in caplog.records if r.name == "metergraph"] == []
+    _capture.set_runtime(None)
+
+
+def test_include_scopes_passes_only_listed(monkeypatch):
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root="")))
+    monkeypatch.setattr(metergraph, "init", lambda: None)
+    exporter = MetergraphGenAIExporter(include_scopes=["good.scope"])
+
+    exporter.export(
+        [
+            _scoped_span(_scope_traffic_attributes(), scope_name="good.scope"),
+            _scoped_span(_scope_traffic_attributes(), scope_name="other.scope"),
+        ]
+    )
+
+    assert len(rows.rows) == 1
+    assert exporter.skipped["scope"] == 1
+    _capture.set_runtime(None)
+
+
+def test_exclude_scopes_wins_over_include_scopes(monkeypatch):
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root="")))
+    monkeypatch.setattr(metergraph, "init", lambda: None)
+    exporter = MetergraphGenAIExporter(
+        include_scopes=["both.scope"], exclude_scopes=["both.scope"]
+    )
+
+    exporter.export(
+        [_scoped_span(_scope_traffic_attributes(), scope_name="both.scope")]
+    )
+
+    assert rows.rows == []
+    assert exporter.skipped["scope"] == 1
+    _capture.set_runtime(None)
+
+
+def test_default_scope_filter_captures_all_eligible(monkeypatch):
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root="")))
+    monkeypatch.setattr(metergraph, "init", lambda: None)
+    exporter = MetergraphGenAIExporter()
+
+    exporter.export(
+        [
+            _scoped_span(_scope_traffic_attributes(), scope_name="any.scope"),
+            _scoped_span(_scope_traffic_attributes(), scope_name="other.scope"),
+        ]
+    )
+
+    assert len(rows.rows) == 2
+    assert "scope" not in exporter.skipped
+    _capture.set_runtime(None)
+
+
+def test_ordinary_span_skipped_silently(monkeypatch, caplog):
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root="")))
+    monkeypatch.setattr(metergraph, "init", lambda: None)
+    exporter = MetergraphGenAIExporter()
+
+    with caplog.at_level(logging.DEBUG, logger="metergraph"):
+        exporter.export([_span({"http.request.method": "GET"})])
+
+    assert rows.rows == []
+    assert [r for r in caplog.records if r.name == "metergraph"] == []
+    assert "no-model" not in exporter.skipped
+    _capture.set_runtime(None)
+
+
+def test_no_model_span_logs_once_without_attribute_values(monkeypatch, caplog):
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root="")))
+    monkeypatch.setattr(metergraph, "init", lambda: None)
+    exporter = MetergraphGenAIExporter()
+    span = _scoped_span(
+        {
+            "gen_ai.operation.name": "chat",
+            "gen_ai.system_instructions": "SECRET-VALUE",
+        },
+        scope_name="synthetic.scope",
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="metergraph"):
+        exporter.export([span])
+        exporter.export([span])
+
+    assert rows.rows == []
+    assert exporter.skipped["no-model"] == 2
+    records = [r for r in caplog.records if r.name == "metergraph"]
+    assert len(records) == 1
+    assert "SECRET-VALUE" not in records[0].getMessage()
+    assert "synthetic.scope" in records[0].getMessage()
+    _capture.set_runtime(None)
+
+
+def test_capture_text_disabled_yields_metadata_only_rows(monkeypatch):
+    rows = Rows()
+    _capture.set_runtime(
+        Runtime(rows, Options(app_root="", capture_text=False))
+    )
+    monkeypatch.setattr(metergraph, "init", lambda: None)
+    exporter = MetergraphGenAIExporter()
+    genai_messages = json.dumps(
+        [
+            {
+                "role": "user",
+                "parts": [{"type": "text", "content": "Synthetic input"}],
+            }
+        ]
+    )
+
+    exporter.export(
+        [
+            _span(
+                {
+                    "gen_ai.operation.name": "chat",
+                    "gen_ai.provider.name": "anthropic",
+                    "gen_ai.request.model": "claude-opus-5",
+                    "gen_ai.input.messages": genai_messages,
+                    "gen_ai.usage.input_tokens": 9,
+                    "gen_ai.usage.output_tokens": 2,
+                }
+            ),
+            _span(_scope_traffic_attributes()),
+        ]
+    )
+
+    assert len(rows.rows) == 2
+    for row in rows.rows:
+        assert row["request_json"] is None
+        assert row["response_text"] is None
+        assert row["content_opted_in"] is False
+        assert row["input_tokens"] is not None
     _capture.set_runtime(None)
