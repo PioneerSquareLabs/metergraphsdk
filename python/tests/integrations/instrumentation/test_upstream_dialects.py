@@ -23,8 +23,15 @@ import datetime
 
 import pytest
 
+httpx = pytest.importorskip("httpx", reason="upstream-dialects extras not installed")
+openai = pytest.importorskip("openai", reason="upstream-dialects extras not installed")
+pytest.importorskip(
+    "openinference.instrumentation.openai",
+    reason="upstream-dialects extras not installed",
+)
 pytest.importorskip("langfuse", reason="upstream-dialects extras not installed")
 
+from openinference.instrumentation.openai import OpenAIInstrumentor  # noqa: E402
 from opentelemetry.sdk.trace import TracerProvider  # noqa: E402
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor  # noqa: E402
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import (  # noqa: E402
@@ -33,6 +40,28 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (  # noqa: E4
 
 from metergraph._genai_attrs import SkipReason, map_span_attributes  # noqa: E402
 
+CHAT_RESPONSE = {
+    "id": "chatcmpl-upstream",
+    "object": "chat.completion",
+    "created": 1735689600,
+    "model": "gpt-4o-mini-2024-07-18",
+    "choices": [
+        {
+            "index": 0,
+            "message": {"role": "assistant", "content": "Synthetic result"},
+            "finish_reason": "stop",
+        }
+    ],
+    "usage": {
+        "prompt_tokens": 30,
+        "completion_tokens": 12,
+        "total_tokens": 42,
+        "prompt_tokens_details": {"cached_tokens": 5},
+        "completion_tokens_details": {"reasoning_tokens": 7},
+    },
+}
+
+
 def _memory_provider() -> tuple[InMemorySpanExporter, TracerProvider]:
     memory = InMemorySpanExporter()
     provider = TracerProvider()
@@ -40,10 +69,41 @@ def _memory_provider() -> tuple[InMemorySpanExporter, TracerProvider]:
     return memory, provider
 
 
-# Module-scoped on purpose: the Langfuse client is a process-wide singleton, so
+# Both fixtures are module-scoped on purpose. OpenAIInstrumentor patches the
+# openai package globally, and the Langfuse client is a process-wide singleton:
 # a second Langfuse(...) returns the cached client still bound to the FIRST
-# tracer provider, and a function-scoped fixture captures zero spans on every
-# test after the first.
+# tracer provider, so a function-scoped fixture would capture zero spans on
+# every test after the first.
+@pytest.fixture(scope="module")
+def openinference_spans():
+    """Spans openinference-instrumentation-openai really emits for one call."""
+    memory, provider = _memory_provider()
+    OpenAIInstrumentor().instrument(tracer_provider=provider)
+    try:
+        client = openai.OpenAI(
+            api_key="sk-not-a-real-key",
+            http_client=httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(200, json=CHAT_RESPONSE)
+                )
+            ),
+        )
+        client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are terse."},
+                {"role": "user", "content": "Synthetic input"},
+            ],
+            temperature=0.2,
+        )
+    finally:
+        OpenAIInstrumentor().uninstrument()
+    return [
+        (span.instrumentation_scope.name, dict(span.attributes or {}))
+        for span in memory.get_finished_spans()
+    ]
+
+
 @pytest.fixture(scope="module")
 def langfuse_spans():
     """Spans the Langfuse SDK really emits for a good and a failed generation."""
@@ -83,6 +143,56 @@ def langfuse_spans():
         (span.instrumentation_scope.name, dict(span.attributes or {}))
         for span in memory.get_finished_spans()
     ]
+
+
+# --- OpenInference (Arize Phoenix) -----------------------------------------
+
+
+def test_openinference_scope_name_is_what_the_readme_documents(openinference_spans):
+    assert [scope for scope, _ in openinference_spans] == [
+        "openinference.instrumentation.openai"
+    ]
+
+
+def test_openinference_llm_span_maps_to_a_complete_call(openinference_spans):
+    (_, attributes), = openinference_spans
+    mapped = map_span_attributes(attributes)
+    assert not isinstance(mapped, SkipReason), "eligibility gate stopped matching"
+
+    assert mapped.dialects == ("openinference",)
+    # llm.request.model_name is not emitted by this instrumentor; the mapper
+    # falls back to llm.model_name, which carries the RESOLVED model.
+    assert mapped.model == "gpt-4o-mini-2024-07-18"
+    assert mapped.provider == "openai"
+    assert mapped.response["usage"] == {
+        "input_tokens": 30,
+        "output_tokens": 12,
+        "cache_read_input_tokens": 5,
+        "completion_tokens_details": {"reasoning_tokens": 7},
+    }
+    assert mapped.response["finish_reason"] == "stop"
+    assert mapped.response_text == "Synthetic result"
+    assert mapped.request["messages"] == [
+        {"role": "system", "content": "You are terse."},
+        {"role": "user", "content": "Synthetic input"},
+    ]
+    assert mapped.request["parameters"]["temperature"] == 0.2
+    assert not mapped.parse_degraded
+    assert not mapped.usage_absent
+
+
+def test_openinference_still_reports_no_cost(openinference_spans):
+    """Phoenix computes cost server-side, so llm.cost.total is absent.
+
+    If this ever starts failing the instrumentor began reporting cost and the
+    OPENINFERENCE_SPAN_COST evidence contract goes live -- update the docs,
+    which currently say Phoenix cost evidence does not flow on the tee.
+    """
+    (_, attributes), = openinference_spans
+    assert "llm.cost.total" not in attributes
+    mapped = map_span_attributes(attributes)
+    assert mapped.cost is None
+    assert mapped.cost_source is None
 
 
 # --- Langfuse ---------------------------------------------------------------

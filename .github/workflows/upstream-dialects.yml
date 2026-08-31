@@ -26,10 +26,12 @@ jobs:
         with:
           python-version: "3.12"
       # Unpinned on purpose: pinning these would defeat the whole job.
-      - run: pip install -e "python[otel]" pytest langfuse
+      - run: >
+          pip install -e "python[otel]" pytest
+          openinference-instrumentation-openai openai langfuse httpx
       - name: Record the versions this run actually tested
-        run: pip list | grep -Ei "langfuse|opentelemetry-sdk"
-      - name: Langfuse still emits the attributes the mapper reads
+        run: pip list | grep -Ei "openinference|langfuse|^openai|opentelemetry-sdk"
+      - name: Phoenix and Langfuse still emit the attributes the mapper reads
         run: >
           pytest python/tests/integrations/instrumentation/test_upstream_dialects.py
           -q -rs
