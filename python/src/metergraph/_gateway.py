@@ -43,6 +43,16 @@ OPENROUTER = GatewayContract(
 # Registry of supported gateways, keyed by canonical name.
 GATEWAYS: dict[str, GatewayContract] = {OPENROUTER.name: OPENROUTER}
 
+# Evidence-only cost provenance. Unlike a GatewayContract these assert no
+# gateway identity -- rows never gain a "gateway" key -- and qualify every
+# endpoint. Each string is SDK-fixed and doubles as its own registry entry, so
+# only these exact values can ever appear as reported_cost_source. Kept out of
+# GATEWAYS so detect_gateway() and resolve_gateway() never accept them: an
+# explicit wrap(..., gateway=...) override names a gateway contract only.
+LANGFUSE_SPAN_COST = "langfuse.observation.cost_details.total"
+
+EVIDENCE_COST_SOURCES = frozenset({LANGFUSE_SPAN_COST})
+
 # Model/provider identifiers are bounded to the same practical limit the rest of
 # the SDK applies to those strings.
 _MAX_IDENTIFIER_LEN = 512
@@ -115,6 +125,22 @@ def _billing_amount(value: Any) -> float | None:
     return number
 
 
+def evidence_for_mapped_cost(cost: Any, cost_source: Any) -> dict[str, Any]:
+    """Build capture-row cost evidence from a mapped vendor-reported cost.
+
+    ``cost_source`` must be one of the SDK-fixed provenance strings in
+    EVIDENCE_COST_SOURCES (e.g. a ``MappedCall.cost_source``); anything else
+    emits nothing, so provenance stays SDK-controlled. Malformed amounts are
+    omitted. The result never contains a ``gateway`` key.
+    """
+    if cost_source not in EVIDENCE_COST_SOURCES:
+        return {}
+    amount = _billing_amount(cost)
+    if amount is None:
+        return {}
+    return {"reported_cost_usd": amount, "reported_cost_source": cost_source}
+
+
 def gateway_evidence(
     gateway: str | None, endpoint: str, response: Any
 ) -> dict[str, Any]:
@@ -125,12 +151,18 @@ def gateway_evidence(
     emitted only on the gateway's qualified endpoints. A provenance source
     appears only alongside the value it describes. The served provider is never
     inferred.
+
+    ``gateway`` may also name an evidence-only contract by its SDK-fixed
+    provenance string (see EVIDENCE_COST_SOURCES).
     """
     if gateway is None:
         return {}
     contract = GATEWAYS.get(gateway)
     if contract is None:
-        return {}
+        # An evidence-only provenance string: every endpoint qualifies, the
+        # observed scalar is read from the response's "cost" field, and the
+        # result carries only cost evidence -- never a "gateway" key.
+        return evidence_for_mapped_cost(_get(response, "cost"), gateway)
 
     evidence: dict[str, Any] = {"gateway": contract.name}
 
