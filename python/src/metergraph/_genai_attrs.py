@@ -4,7 +4,7 @@ Turns a plain span-attribute mapping into the request/response shapes the
 capture layer expects, so usage and finish_reason are re-derived the same way
 for every telemetry dialect: a detection pass, an extractor per dialect, and a
 per-field merge in the order ``langfuse.*`` > ``gen_ai.*`` > OpenInference.
-``gen_ai.*`` and ``langfuse.*`` have extractors today.
+All three have extractors.
 
 This module is a stdlib-only leaf: it must not import ``_capture`` or
 ``opentelemetry``. Usage keys emitted here are deliberately spelled in the
@@ -252,6 +252,144 @@ def _extract_genai(attributes: Mapping[str, Any]) -> _Fields:
     return fields
 
 
+def _flattened_messages(
+    attributes: Mapping[str, Any], prefix: str
+) -> list[dict[str, Any]]:
+    """Reassemble OpenInference index-flattened messages into dicts."""
+    flat: dict[int, dict[str, Any]] = {}
+    contents: dict[int, dict[int, dict[str, Any]]] = {}
+    lead = prefix + "."
+    for key, value in attributes.items():
+        if not key.startswith(lead):
+            continue
+        parts = key[len(lead) :].split(".")
+        if len(parts) < 3 or not parts[0].isdigit() or parts[1] != "message":
+            continue
+        index = int(parts[0])
+        tail = parts[2:]
+        if tail == ["role"] or tail == ["content"]:
+            flat.setdefault(index, {})[tail[0]] = value
+        elif (
+            len(tail) == 4
+            and tail[0] == "contents"
+            and tail[1].isdigit()
+            and tail[2] == "message_content"
+        ):
+            contents.setdefault(index, {}).setdefault(int(tail[1]), {})[
+                tail[3]
+            ] = value
+    messages: list[dict[str, Any]] = []
+    for index in sorted(set(flat) | set(contents)):
+        message = dict(flat.get(index, {}))
+        if "content" not in message and index in contents:
+            parts_list = [contents[index][j] for j in sorted(contents[index])]
+            texts = [
+                part.get("text")
+                for part in parts_list
+                if part.get("type") == "text" and isinstance(part.get("text"), str)
+            ]
+            if texts and len(texts) == len(parts_list):
+                message["content"] = "".join(texts)
+            else:
+                message["content"] = parts_list
+        messages.append(message)
+    return messages
+
+
+def _message_text(message: Mapping[str, Any]) -> str | None:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts = [
+            part.get("text")
+            for part in content
+            if isinstance(part, Mapping) and isinstance(part.get("text"), str)
+        ]
+        if texts:
+            return "".join(texts)
+    return None
+
+
+def _extract_openinference(attributes: Mapping[str, Any]) -> _Fields:
+    fields = _Fields()
+    fields.model = _string(attributes.get("llm.request.model_name")) or _string(
+        attributes.get("llm.model_name")
+    )
+    fields.response_model = _string(attributes.get("llm.response.model_name"))
+    fields.provider = _string(attributes.get("llm.provider")) or _string(
+        attributes.get("llm.system")
+    )
+    fields.finish_reason = _string(attributes.get("llm.finish_reason"))
+
+    usage_pairs = (
+        ("llm.token_count.prompt", "input_tokens"),
+        ("llm.token_count.completion", "output_tokens"),
+        ("llm.token_count.prompt_details.cache_read", "cache_read_input_tokens"),
+        (
+            "llm.token_count.prompt_details.cache_write",
+            "cache_creation_input_tokens",
+        ),
+        ("llm.token_count.completion_details.reasoning", "reasoning_tokens"),
+    )
+    for attr, canonical in usage_pairs:
+        value = attributes.get(attr)
+        if value is not None:
+            fields.usage[canonical] = value
+
+    cost = _number(attributes.get("llm.cost.total"))
+    if cost is not None:
+        fields.cost = cost
+        fields.cost_source = "openinference.llm.cost.total"
+
+    messages = _flattened_messages(attributes, "llm.input_messages")
+    if messages:
+        fields.request["messages"] = messages
+    else:
+        raw_input = attributes.get("input.value")
+        if isinstance(raw_input, str):
+            if attributes.get("input.mime_type") == "application/json":
+                decoded, ok = _load_json(raw_input)
+                if ok:
+                    fields.request["input"] = decoded
+                else:
+                    fields.request["input"] = raw_input
+                    fields.parse_degraded = True
+            else:
+                fields.request["input"] = raw_input
+
+    parameters = attributes.get("llm.invocation_parameters")
+    if isinstance(parameters, str):
+        decoded, ok = _load_json(parameters)
+        if ok and isinstance(decoded, Mapping):
+            fields.request["parameters"] = dict(decoded)
+        else:
+            fields.parse_degraded = True
+
+    output_messages = _flattened_messages(attributes, "llm.output_messages")
+    if output_messages:
+        for message in output_messages:
+            text = _message_text(message)
+            if text is not None:
+                fields.response_text = text
+                break
+    else:
+        raw_output = attributes.get("output.value")
+        if isinstance(raw_output, str):
+            if attributes.get("output.mime_type") == "application/json":
+                decoded, ok = _load_json(raw_output)
+                if not ok:
+                    fields.response_text = raw_output
+                    fields.parse_degraded = True
+                elif isinstance(decoded, str):
+                    fields.response_text = decoded
+                else:
+                    fields.output_structure = decoded
+            else:
+                fields.response_text = raw_output
+    return fields
+
+
 def _extract_langfuse(attributes: Mapping[str, Any]) -> _Fields:
     fields = _Fields()
     fields.model = _string(attributes.get("langfuse.observation.model.name"))
@@ -342,12 +480,16 @@ def _detected_dialects(attributes: Mapping[str, Any]) -> dict[str, bool]:
     ):
         # The value says whether the dialect marks this span as an LLM call.
         detected[DIALECT_GENAI] = True
+    kind = attributes.get("openinference.span.kind")
+    if kind is not None:
+        detected[DIALECT_OPENINFERENCE] = isinstance(kind, str) and kind.upper() == "LLM"
     return detected
 
 
 _EXTRACTORS = {
     DIALECT_LANGFUSE: _extract_langfuse,
     DIALECT_GENAI: _extract_genai,
+    DIALECT_OPENINFERENCE: _extract_openinference,
 }
 _PRECEDENCE = (DIALECT_LANGFUSE, DIALECT_GENAI, DIALECT_OPENINFERENCE)
 

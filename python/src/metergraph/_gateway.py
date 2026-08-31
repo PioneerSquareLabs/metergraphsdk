@@ -48,8 +48,9 @@ GATEWAYS: dict[str, GatewayContract] = {OPENROUTER.name: OPENROUTER}
 # detect_gateway() and resolve_gateway() never accept them -- an explicit
 # wrap(..., gateway=...) override names a gateway contract only.
 LANGFUSE_SPAN_COST = "langfuse.observation.cost_details.total"
+OPENINFERENCE_SPAN_COST = "openinference.llm.cost.total"
 
-EVIDENCE_COST_SOURCES = frozenset({LANGFUSE_SPAN_COST})
+EVIDENCE_COST_SOURCES = frozenset({LANGFUSE_SPAN_COST, OPENINFERENCE_SPAN_COST})
 
 # Model/provider identifiers are bounded to the same practical limit the rest of
 # the SDK applies to those strings.
