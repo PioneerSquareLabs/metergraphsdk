@@ -1,9 +1,8 @@
 """OpenTelemetry GenAI span export through MeterGraph's existing transport.
 
 Captures spans emitted in any telemetry dialect the attribute mapper
-understands — OpenTelemetry ``gen_ai.*`` semantic conventions, OpenInference
-(Arize Phoenix), and the Langfuse SDK — with optional instrumentation-scope
-filtering and rate-limited skip observability.
+understands, with optional instrumentation-scope filtering and rate-limited
+skip observability.
 """
 
 from __future__ import annotations
@@ -34,6 +33,20 @@ def _hex_id(value: int, width: int) -> str | None:
     return f"{value:0{width}x}" if value else None
 
 
+def _iso_epoch_seconds(value: str) -> float | None:
+    """Parse an ISO-8601 timestamp to epoch seconds, or None."""
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
 class MetergraphGenAIExporter(SpanExporter):
     """Export completed OpenTelemetry GenAI spans through MeterGraph.
 
@@ -41,8 +54,10 @@ class MetergraphGenAIExporter(SpanExporter):
     ``span.instrumentation_scope.name``: exclude always wins, and when
     ``include_scopes`` is set only the listed scopes pass. Spans that produce
     no capture row are counted per reason in the public ``skipped`` dict
-    (keys: ``"scope"`` plus the ``SkipReason`` values ``"not-genai"`` and
-    ``"no-model"``). Dialects added later contribute further keys.
+    (keys: ``"scope"`` plus the ``SkipReason`` values ``"not-genai"``,
+    ``"ineligible-kind"``, ``"no-model"``). The ``"parse-degraded"`` key is a
+    diagnostic counter, not a skip: it tallies spans that captured despite
+    malformed JSON in one or more attributes.
     """
 
     def __init__(
@@ -87,8 +102,9 @@ class MetergraphGenAIExporter(SpanExporter):
         mapped = map_span_attributes(attributes)
         if isinstance(mapped, SkipReason):
             self._count_skip(mapped.value)
-            # NOT_GENAI covers every ordinary span on a shared
-            # TracerProvider, so it stays silent. Only an eligible-but-unusable
+            # NOT_GENAI covers every ordinary span on a shared TracerProvider
+            # and INELIGIBLE_KIND covers expected non-LLM observations (spans,
+            # events, tools): both stay silent. Only an eligible-but-unusable
             # span warrants a diagnostic — and it names no attribute values.
             if mapped is SkipReason.NO_MODEL:
                 span_kind = getattr(span.kind, "name", None)
@@ -120,7 +136,27 @@ class MetergraphGenAIExporter(SpanExporter):
         span_id = _hex_id(context.span_id, 16) if context is not None else None
         parent_span_id = _hex_id(parent.span_id, 16) if parent is not None else None
 
+        if mapped.parse_degraded:
+            # Diagnostic counter, not a skip: the span still captures with
+            # whatever parsed. The log names scope and dialect only — never
+            # attribute values.
+            self._count_skip("parse-degraded")
+            dialects = ",".join(mapped.dialects) or "unknown"
+            self._failure_log.report(
+                "otel_span_parse_degraded",
+                "captured a GenAI span with malformed JSON in one or more "
+                f"attributes (scope={scope_name!r}, dialects={dialects}); "
+                "some fields may be incomplete",
+            )
+
         response = dict(mapped.response)
+        gateway: str | None = None
+        if mapped.cost is not None and mapped.cost_source is not None:
+            # An evidence-contract source string passed as ``gateway`` makes
+            # CallState.finish() read ``response["cost"]`` and emit
+            # reported_cost_usd/reported_cost_source without a gateway key.
+            response["cost"] = mapped.cost
+            gateway = mapped.cost_source
 
         call = runtime.call_state(
             provider,
@@ -128,12 +164,14 @@ class MetergraphGenAIExporter(SpanExporter):
             mapped.request,
             context=CaptureContext(
                 route=mapped.operation,
+                session_id=mapped.session_id,
                 trace_id=trace_id,
-                trace_name=span.name,
+                trace_name=mapped.trace_name or span.name,
                 parent_span_id=parent_span_id,
                 func_name=function_name,
                 func_module=function_module,
             ),
+            gateway=gateway,
         )
         if span_id is not None:
             call.span_id = span_id
@@ -145,13 +183,28 @@ class MetergraphGenAIExporter(SpanExporter):
                 duration = max(0, span.end_time - span.start_time) / 1_000_000_000
                 call.started = time.perf_counter() - duration
 
+        ttft_ms: int | None = None
+        if mapped.completion_start_time is not None and span.start_time is not None:
+            completion_epoch = _iso_epoch_seconds(mapped.completion_start_time)
+            if completion_epoch is not None:
+                delta_ms = round(completion_epoch * 1000 - span.start_time / 1_000_000)
+                if delta_ms >= 0:
+                    ttft_ms = delta_ms
+
         error: OpenTelemetrySpanError | None = None
         if span.status.status_code is StatusCode.ERROR:
             error = OpenTelemetrySpanError(
                 span.status.description or "OpenTelemetry GenAI span failed"
             )
+        elif mapped.error_message is not None:
+            error = OpenTelemetrySpanError(mapped.error_message)
         # finish() treats error=None exactly as an omitted error.
-        call.finish(response, error=error, response_text=mapped.response_text)
+        call.finish(
+            response,
+            error=error,
+            response_text=mapped.response_text,
+            ttft_ms=ttft_ms,
+        )
 
     def force_flush(self, timeout_millis: int = 30_000) -> bool:
         return metergraph.flush(max(0, timeout_millis) / 1000)

@@ -5,11 +5,10 @@ dict, metadata) shapes ``MetergraphGenAIExporter._export_span`` builds, so the
 capture layer re-derives usage and finish_reason the same way for every
 telemetry dialect.
 
-This module ships the dialect framework and the OpenTelemetry ``gen_ai.*``
-semantic conventions — the vocabulary the exporter already understood, moved
-here unchanged. The OpenInference (Arize Phoenix) and Langfuse dialects are
-added by follow-up changes; each contributes an extractor and the fields it
-alone populates. When a span carries more than one dialect, every field falls
+This module ships the dialect framework, the OpenTelemetry ``gen_ai.*``
+semantic conventions, and the Langfuse SDK dialect. OpenInference (Arize
+Phoenix) is added by a follow-up change; each dialect contributes an extractor
+and the fields it alone populates. When a span carries more than one dialect, every field falls
 back per-field in the order ``langfuse.*`` > ``gen_ai.*`` > OpenInference,
 which is why the merge exists before there is anything to merge.
 
@@ -36,6 +35,7 @@ class SkipReason(enum.Enum):
     """Why a span produced no mapped call."""
 
     NOT_GENAI = "not-genai"
+    INELIGIBLE_KIND = "ineligible-kind"
     NO_MODEL = "no-model"
 
 
@@ -49,13 +49,76 @@ class MappedCall:
     request: dict[str, Any]
     response: dict[str, Any]
     response_text: str | None
+    cost: float | None
+    cost_source: str | None
+    session_id: str | None
+    trace_name: str | None
+    completion_start_time: str | None
+    error_message: str | None
     dialects: tuple[str, ...]
+    parse_degraded: bool
     usage_absent: bool
+    dropped_usage_keys: tuple[str, ...]
 
 
 # Top-level usage keys _capture._usage understands, verbatim.
+_USAGE_TOP_KEYS = frozenset(
+    {
+        "prompt_tokens",
+        "input_tokens",
+        "prompt_token_count",
+        "promptTokenCount",
+        "completion_tokens",
+        "output_tokens",
+        "candidates_token_count",
+        "candidatesTokenCount",
+        "cache_read_input_tokens",
+        "cached_content_token_count",
+        "cachedContentTokenCount",
+        "cache_creation_input_tokens",
+        "cacheCreationInputTokens",
+        "thoughts_token_count",
+        "thoughtsTokenCount",
+    }
+)
+
+# Langfuse usage_details spellings that translate onto that vocabulary.
+_LANGFUSE_USAGE_RENAMES = {"input": "input_tokens", "output": "output_tokens"}
+
+
+def map_usage_details(
+    decoded: Mapping[str, Any],
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Map Langfuse usage-details keys onto the ``_usage`` alias vocabulary.
+
+    Returns ``(usage, dropped_keys)``: the renamed keys the capture layer
+    understands, plus the sorted source keys that did not translate. The
+    derived ``"total"`` key is skipped silently (it is neither mapped nor
+    reported as dropped).
+    """
+    usage: dict[str, Any] = {}
+    dropped: list[str] = []
+    for key, value in decoded.items():
+        if key == "total":
+            continue
+        canonical = _LANGFUSE_USAGE_RENAMES.get(key, key)
+        if canonical in _USAGE_TOP_KEYS:
+            usage[canonical] = value
+        else:
+            dropped.append(key)
+    return usage, tuple(sorted(dropped))
+
+
 def _string(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
 
 
 def _load_json(value: Any) -> tuple[Any, bool]:
@@ -147,6 +210,15 @@ class _Fields:
     usage: dict[str, Any] = field(default_factory=dict)
     finish_reason: str | None = None
     response_text: str | None = None
+    output_structure: Any = None
+    cost: float | None = None
+    cost_source: str | None = None
+    session_id: str | None = None
+    trace_name: str | None = None
+    completion_start_time: str | None = None
+    error_message: str | None = None
+    parse_degraded: bool = False
+    dropped_usage_keys: tuple[str, ...] = ()
 
 
 def _extract_genai(attributes: Mapping[str, Any]) -> _Fields:
@@ -181,9 +253,90 @@ def _extract_genai(attributes: Mapping[str, Any]) -> _Fields:
     return fields
 
 
+def _extract_langfuse(attributes: Mapping[str, Any]) -> _Fields:
+    fields = _Fields()
+    fields.model = _string(attributes.get("langfuse.observation.model.name"))
+    # Session is one of the trace-level fields the Langfuse SDK spells WITHOUT
+    # its own prefix: both v3 and v4 define TRACE_SESSION_ID = "session.id"
+    # and propagate it through baggage. There has never been a
+    # langfuse.session.id, so do not "helpfully" add one.
+    fields.session_id = _string(attributes.get("session.id"))
+    fields.trace_name = _string(attributes.get("langfuse.trace.name"))
+    completion_start = attributes.get("langfuse.observation.completion_start_time")
+    if isinstance(completion_start, str):
+        # Langfuse JSON-encodes this timestamp, so the attribute value arrives
+        # wrapped in literal quote characters. Decode before it reaches the
+        # exporter's ISO parser, which rejects the quoted form and would drop
+        # time-to-first-token for every Langfuse span without a word.
+        decoded, ok = _load_json(completion_start)
+        fields.completion_start_time = (
+            decoded if ok and isinstance(decoded, str) else completion_start
+        )
+    level = _string(attributes.get("langfuse.observation.level"))
+    if level is not None and level.upper() == "ERROR":
+        fields.error_message = (
+            _string(attributes.get("langfuse.observation.status_message"))
+            or "Langfuse observation reported an error"
+        )
+
+    parameters = attributes.get("langfuse.observation.model.parameters")
+    if isinstance(parameters, str):
+        decoded, ok = _load_json(parameters)
+        if ok and isinstance(decoded, Mapping):
+            fields.request["parameters"] = dict(decoded)
+        else:
+            fields.parse_degraded = True
+
+    usage_details = attributes.get("langfuse.observation.usage_details")
+    if isinstance(usage_details, str):
+        decoded, ok = _load_json(usage_details)
+        if ok and isinstance(decoded, Mapping):
+            mapped_usage, fields.dropped_usage_keys = map_usage_details(decoded)
+            fields.usage.update(mapped_usage)
+        else:
+            fields.parse_degraded = True
+
+    cost_details = attributes.get("langfuse.observation.cost_details")
+    if isinstance(cost_details, str):
+        decoded, ok = _load_json(cost_details)
+        if ok and isinstance(decoded, Mapping):
+            total = _number(decoded.get("total"))
+            if total is not None:
+                fields.cost = total
+                fields.cost_source = "langfuse.observation.cost_details.total"
+        else:
+            fields.parse_degraded = True
+
+    raw_input = attributes.get("langfuse.observation.input")
+    if isinstance(raw_input, str):
+        decoded, ok = _load_json(raw_input)
+        value = decoded if ok else raw_input
+        if isinstance(value, list):
+            fields.request["messages"] = value
+        else:
+            fields.request["input"] = value
+
+    raw_output = attributes.get("langfuse.observation.output")
+    if isinstance(raw_output, str):
+        decoded, ok = _load_json(raw_output)
+        value = decoded if ok else raw_output
+        if isinstance(value, str):
+            fields.response_text = value
+        elif isinstance(value, Mapping) and isinstance(value.get("content"), str):
+            fields.response_text = value["content"]
+        elif isinstance(value, Mapping) and isinstance(value.get("text"), str):
+            fields.response_text = value["text"]
+        else:
+            fields.output_structure = value
+    return fields
+
+
 def _detected_dialects(attributes: Mapping[str, Any]) -> dict[str, bool]:
     """Detected dialects mapped to whether they mark the span as an LLM call."""
     detected: dict[str, bool] = {}
+    if any(key.startswith("langfuse.observation.") for key in attributes):
+        observation_type = _string(attributes.get("langfuse.observation.type"))
+        detected[DIALECT_LANGFUSE] = observation_type == "generation"
     if (
         attributes.get("gen_ai.request.model") is not None
         or attributes.get("gen_ai.operation.name") is not None
@@ -195,6 +348,7 @@ def _detected_dialects(attributes: Mapping[str, Any]) -> dict[str, bool]:
 
 
 _EXTRACTORS = {
+    DIALECT_LANGFUSE: _extract_langfuse,
     DIALECT_GENAI: _extract_genai,
 }
 # Field-level precedence order: langfuse > gen_ai > OpenInference.
@@ -217,6 +371,8 @@ def map_span_attributes(
     if not detected:
         return SkipReason.NOT_GENAI
     eligible = [name for name in _PRECEDENCE if detected.get(name)]
+    if not eligible:
+        return SkipReason.INELIGIBLE_KIND
 
     contributions = [_EXTRACTORS[name](attributes) for name in eligible]
     model = _first_value(contributions, "model")
@@ -253,6 +409,15 @@ def map_span_attributes(
         ),
     }
     response_text = _first_value(contributions, "response_text")
+    output_structure = _first_value(contributions, "output_structure")
+    if output_structure is not None and response_text is None:
+        response["output"] = output_structure
+
+    priced = next((c for c in contributions if c.cost is not None), None)
+
+    dropped: set[str] = set()
+    for contribution in contributions:
+        dropped.update(contribution.dropped_usage_keys)
 
     return MappedCall(
         provider=_first_value(contributions, "provider"),
@@ -261,8 +426,18 @@ def map_span_attributes(
         request=request,
         response=response,
         response_text=response_text,
+        cost=priced.cost if priced is not None else None,
+        cost_source=priced.cost_source if priced is not None else None,
+        session_id=_first_value(contributions, "session_id"),
+        trace_name=_first_value(contributions, "trace_name"),
+        completion_start_time=_first_value(contributions, "completion_start_time"),
+        error_message=_first_value(contributions, "error_message"),
         dialects=tuple(name for name in _PRECEDENCE if name in detected),
+        parse_degraded=any(
+            contribution.parse_degraded for contribution in contributions
+        ),
         usage_absent=usage_absent,
+        dropped_usage_keys=tuple(sorted(dropped)),
     )
 
 
