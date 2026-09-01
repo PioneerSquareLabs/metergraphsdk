@@ -310,7 +310,13 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from metergraph.opentelemetry import MetergraphGenAIExporter
 
 tracer_provider = register(project_name="my-app")  # existing Phoenix setup
-tracer_provider.add_span_processor(BatchSpanProcessor(MetergraphGenAIExporter()))
+tracer_provider.add_span_processor(
+    BatchSpanProcessor(MetergraphGenAIExporter()),
+    # Required. phoenix.otel's TracerProvider shuts down ITS OWN exporter on
+    # the first add_span_processor unless told otherwise, so without this
+    # adding MeterGraph silently turns off your Phoenix tracing.
+    replace_default_processor=False,
+)
 ```
 
 For the Langfuse Python SDK (v3/v4):
