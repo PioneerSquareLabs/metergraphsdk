@@ -38,9 +38,17 @@ from metergraph.opentelemetry import MetergraphGenAIExporter
 
 tracer_provider = register(project_name="my-app")  # existing Phoenix setup
 tracer_provider.add_span_processor(
-    BatchSpanProcessor(MetergraphGenAIExporter())
+    BatchSpanProcessor(MetergraphGenAIExporter()),
+    # Required. phoenix.otel's TracerProvider shuts down ITS OWN exporter on
+    # the first add_span_processor unless told otherwise, so without this
+    # adding MeterGraph silently turns off your Phoenix tracing.
+    replace_default_processor=False,
 )
 ```
+
+Verified end-to-end against `arizephoenix/phoenix` in Docker: the same span
+reaches both, carrying the same `trace_id` and `span_id`, so a MeterGraph row
+cross-references to the exact Phoenix span.
 
 Both destinations now receive every span: Phoenix keeps its full traces, and
 MeterGraph captures the LLM spans (OpenInference `openinference.span.kind:
