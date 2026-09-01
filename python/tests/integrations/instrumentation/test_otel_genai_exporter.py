@@ -282,6 +282,8 @@ def _scope_traffic_attributes() -> dict:
         "gen_ai.usage.input_tokens": 4,
         "gen_ai.usage.output_tokens": 1,
     }
+
+
 def _openinference_attributes() -> dict:
     return {
         "openinference.span.kind": "LLM",
@@ -297,6 +299,8 @@ def _openinference_attributes() -> dict:
         "llm.output_messages.0.message.role": "assistant",
         "llm.output_messages.0.message.content": "Synthetic result",
     }
+
+
 def _langfuse_attributes() -> dict:
     return {
         "langfuse.observation.type": "generation",

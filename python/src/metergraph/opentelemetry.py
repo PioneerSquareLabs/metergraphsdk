@@ -1,9 +1,7 @@
 """OpenTelemetry GenAI span export through MeterGraph's existing transport.
 
-Captures spans emitted in any telemetry dialect the attribute mapper
-understands — OpenTelemetry ``gen_ai.*`` semantic conventions, OpenInference
-(Arize Phoenix), and the Langfuse SDK — with optional instrumentation-scope
-filtering and rate-limited skip observability.
+Span attributes are translated by ``_genai_attrs``; this module does the span
+plumbing, instrumentation-scope filtering, and skip accounting.
 """
 
 from __future__ import annotations
@@ -22,7 +20,6 @@ from ._context import CaptureContext
 from ._failure_log import FailureLogger
 from ._genai_attrs import SkipReason, map_span_attributes
 
-# Skip-counter key for spans filtered by include_scopes/exclude_scopes.
 _SKIP_SCOPE = "scope"
 
 
@@ -41,8 +38,7 @@ class MetergraphGenAIExporter(SpanExporter):
     ``span.instrumentation_scope.name``: exclude always wins, and when
     ``include_scopes`` is set only the listed scopes pass. Spans that produce
     no capture row are counted per reason in the public ``skipped`` dict
-    (keys: ``"scope"`` plus the ``SkipReason`` values ``"not-genai"`` and
-    ``"no-model"``). Dialects added later contribute further keys.
+    (keys: ``"scope"`` plus the ``SkipReason`` values).
     """
 
     def __init__(
@@ -87,9 +83,9 @@ class MetergraphGenAIExporter(SpanExporter):
         mapped = map_span_attributes(attributes)
         if isinstance(mapped, SkipReason):
             self._count_skip(mapped.value)
-            # NOT_GENAI covers every ordinary span on a shared
-            # TracerProvider, so it stays silent. Only an eligible-but-unusable
-            # span warrants a diagnostic — and it names no attribute values.
+            # Ordinary spans on a shared TracerProvider all land in
+            # NOT_GENAI, so only an eligible-but-unusable span is worth a
+            # diagnostic. The message names no attribute values.
             if mapped is SkipReason.NO_MODEL:
                 span_kind = getattr(span.kind, "name", None)
                 self._failure_log.report(

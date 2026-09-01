@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 
-from metergraph._capture import _usage
 from metergraph._genai_attrs import MappedCall, SkipReason, map_span_attributes
 
 

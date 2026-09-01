@@ -1,17 +1,10 @@
 """Cross-dialect GenAI span-attribute translation.
 
-Turns a plain span-attribute mapping into the exact (request dict, response
-dict, metadata) shapes ``MetergraphGenAIExporter._export_span`` builds, so the
-capture layer re-derives usage and finish_reason the same way for every
-telemetry dialect.
-
-This module ships the dialect framework and the OpenTelemetry ``gen_ai.*``
-semantic conventions — the vocabulary the exporter already understood, moved
-here unchanged. The OpenInference (Arize Phoenix) and Langfuse dialects are
-added by follow-up changes; each contributes an extractor and the fields it
-alone populates. When a span carries more than one dialect, every field falls
-back per-field in the order ``langfuse.*`` > ``gen_ai.*`` > OpenInference,
-which is why the merge exists before there is anything to merge.
+Turns a plain span-attribute mapping into the request/response shapes the
+capture layer expects, so usage and finish_reason are re-derived the same way
+for every telemetry dialect: a detection pass, an extractor per dialect, and a
+per-field merge in the order ``langfuse.*`` > ``gen_ai.*`` > OpenInference.
+Only ``gen_ai.*`` has an extractor today.
 
 This module is a stdlib-only leaf: it must not import ``_capture`` or
 ``opentelemetry``. Usage keys emitted here are deliberately spelled in the
@@ -25,8 +18,6 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
-# The merge order is fixed here, ahead of the dialects that populate it, so
-# adding one is a new extractor rather than a reshuffle of existing behavior.
 DIALECT_LANGFUSE = "langfuse"
 DIALECT_GENAI = "gen_ai"
 DIALECT_OPENINFERENCE = "openinference"
@@ -53,7 +44,6 @@ class MappedCall:
     usage_absent: bool
 
 
-# Top-level usage keys _capture._usage understands, verbatim.
 def _string(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
@@ -107,7 +97,7 @@ def _text_from_output_messages(value: Any) -> str | None:
 def _genai_request_content(
     attributes: Mapping[str, Any],
 ) -> tuple[str | None, str | None]:
-    """Split gen_ai request content exactly like the exporter does today."""
+    """Split gen_ai request content into (system_instructions, messages)."""
     system = attributes.get("gen_ai.system_instructions")
     messages = attributes.get("gen_ai.input.messages")
     if not isinstance(messages, str):
@@ -188,8 +178,7 @@ def _detected_dialects(attributes: Mapping[str, Any]) -> dict[str, bool]:
         attributes.get("gen_ai.request.model") is not None
         or attributes.get("gen_ai.operation.name") is not None
     ):
-        # A gen_ai span is always an LLM call; dialects that also describe
-        # non-LLM work (chains, tools, retrievers) report False here instead.
+        # The value says whether the dialect marks this span as an LLM call.
         detected[DIALECT_GENAI] = True
     return detected
 
@@ -197,7 +186,6 @@ def _detected_dialects(attributes: Mapping[str, Any]) -> dict[str, bool]:
 _EXTRACTORS = {
     DIALECT_GENAI: _extract_genai,
 }
-# Field-level precedence order: langfuse > gen_ai > OpenInference.
 _PRECEDENCE = (DIALECT_LANGFUSE, DIALECT_GENAI, DIALECT_OPENINFERENCE)
 
 
