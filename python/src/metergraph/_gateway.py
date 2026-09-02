@@ -43,12 +43,10 @@ OPENROUTER = GatewayContract(
 # Registry of supported gateways, keyed by canonical name.
 GATEWAYS: dict[str, GatewayContract] = {OPENROUTER.name: OPENROUTER}
 
-# Evidence-only cost provenance. Unlike a GatewayContract these assert no
-# gateway identity -- rows never gain a "gateway" key -- and qualify every
-# endpoint. Each string is SDK-fixed and doubles as its own registry entry, so
-# only these exact values can ever appear as reported_cost_source. Kept out of
-# GATEWAYS so detect_gateway() and resolve_gateway() never accept them: an
-# explicit wrap(..., gateway=...) override names a gateway contract only.
+# Evidence-only cost provenance: unlike a GatewayContract these assert no
+# gateway identity, qualify every endpoint, and are kept out of GATEWAYS so
+# detect_gateway() and resolve_gateway() never accept them -- an explicit
+# wrap(..., gateway=...) override names a gateway contract only.
 LANGFUSE_SPAN_COST = "langfuse.observation.cost_details.total"
 
 EVIDENCE_COST_SOURCES = frozenset({LANGFUSE_SPAN_COST})
@@ -159,9 +157,8 @@ def gateway_evidence(
         return {}
     contract = GATEWAYS.get(gateway)
     if contract is None:
-        # An evidence-only provenance string: every endpoint qualifies, the
-        # observed scalar is read from the response's "cost" field, and the
-        # result carries only cost evidence -- never a "gateway" key.
+        # An evidence-only provenance string: the observed scalar is read
+        # from the response's "cost" field.
         return evidence_for_mapped_cost(_get(response, "cost"), gateway)
 
     evidence: dict[str, Any] = {"gateway": contract.name}

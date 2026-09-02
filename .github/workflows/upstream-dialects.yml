@@ -1,14 +1,11 @@
-# Drift watch for the telemetry dialects the GenAI exporter maps.
-#
-# Every other mapper test hand-writes span attributes, so it only proves the
-# mapper handles a vocabulary we wrote down. This job drives the REAL Phoenix
-# and Langfuse libraries and asserts on the spans they actually produce, so an
-# upstream rename surfaces here instead of as silent capture loss in the field.
+# Drift watch for the telemetry dialects the GenAI exporter maps. Drives the
+# real upstream libraries and asserts on the spans they actually produce, so a
+# rename surfaces here instead of as silent capture loss in the field.
 #
 # Deliberately NOT part of ci.yml and NOT a required check: the dependencies
 # are unpinned so the job can see drift, which means an upstream release can
-# turn it red without any change on our side. That is news worth having, not a
-# reason to block an unrelated merge.
+# turn it red with no change on our side. See the rationale in
+# python/tests/integrations/instrumentation/test_upstream_dialects.py.
 name: upstream-dialects
 
 on:

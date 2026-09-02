@@ -37,9 +37,8 @@ def test_langfuse_example_captures_generation_span(monkeypatch):
     assert row["input_tokens"] == 11
     assert row["output_tokens"] == 4
     assert row["session_id"] == "sess-1"
-    # "user.id" is on the span (real Langfuse spans carry it) and the mapper
-    # reads it, but the capture row model has no user field, so it lands
-    # nowhere on the tee path.
+    # "user.id" is on the span (real Langfuse spans carry it), but nothing
+    # reads it: the capture row model has no user field, so it is dropped.
     assert "user_id" not in row
     assert row["trace_name"] == "synthetic-trace"
     assert json.loads(row["response_text"])["content"] == "Synthetic reply"

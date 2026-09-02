@@ -1,20 +1,20 @@
-"""Ground-truth check: do the REAL instrumentation libraries still emit the
-attributes the mapper reads?
+"""Ground-truth check: does the REAL Langfuse SDK still emit the attributes
+the mapper reads?
 
-Every other mapper test hand-writes span attributes, so it asserts that the
-mapper handles a vocabulary *we* wrote down. If Phoenix or Langfuse renames or
-drops an attribute, those tests stay green while live capture silently loses a
-field -- exactly how a `langfuse.session.id` that never existed in any shipped
-SDK survived review.
+Every other mapper test hand-writes span attributes, so it asserts only that
+the mapper handles a vocabulary *we* wrote down. If Langfuse renames or drops
+an attribute those tests stay green while live capture silently loses a field
+-- exactly how a `langfuse.session.id` that never existed in any shipped SDK
+survived review.
 
-This module inverts the direction: it drives the real libraries, reads back
-whatever attributes that installed version actually produced, and asserts on
-the MappedCall they yield. It is meaningful only when its dependencies float,
-so it runs from the scheduled `upstream-dialects` workflow (unpinned, weekly),
-not as a required pull-request check.
+This module inverts the direction: it drives the real SDK, reads back whatever
+attributes the installed version actually produced, and asserts on the
+MappedCall they yield. It is meaningful only when its dependency floats, so it
+runs from the scheduled `upstream-dialects` workflow (unpinned, weekly), not as
+a required pull-request check.
 
-No credentials and no network: the OpenAI call goes through an httpx
-MockTransport, and the Langfuse client is given a local TracerProvider.
+No credentials and no network: the Langfuse client is given dummy keys and a
+local TracerProvider.
 """
 
 from __future__ import annotations
