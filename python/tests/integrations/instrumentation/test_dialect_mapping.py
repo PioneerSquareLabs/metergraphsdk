@@ -237,6 +237,34 @@ def test_non_llm_kinds_are_skipped_with_reason():
     )
 
 
+def test_vetoing_dialect_is_left_out_of_the_dialects_tuple():
+    """Langfuse wraps foreign instrumentation, so a `type="span"` observation
+    can sit on a span that also carries real gen_ai.* attributes. Langfuse
+    vetoes here -- it says this is not a generation -- so only gen_ai marks it
+    an LLM call and only gen_ai contributes a field. Leaving the vetoing
+    dialect in `dialects` puts it first by precedence, and `dialects[0]` is
+    the exporter's provider fallback: the identical call would report
+    "gen_ai" un-nested and "langfuse" once wrapped."""
+    mapped = map_span_attributes(
+        {
+            "langfuse.observation.type": "span",
+            "langfuse.observation.input": json.dumps({"tool": "search"}),
+            "gen_ai.operation.name": "chat",
+            "gen_ai.request.model": "gpt-5-mini",
+            "gen_ai.usage.input_tokens": 10,
+            "gen_ai.usage.output_tokens": 2,
+        }
+    )
+
+    assert isinstance(mapped, MappedCall)
+    assert mapped.dialects == ("gen_ai",)
+    # No provider attribute anywhere: dialects[0] is what the exporter falls
+    # back to.
+    assert mapped.provider is None
+    # The vetoing dialect's extractor never ran, so none of its fields leaked.
+    assert "input" not in mapped.request
+
+
 def test_total_only_usage_yields_usage_absent_record():
     mapped = map_span_attributes(
         {

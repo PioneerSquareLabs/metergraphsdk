@@ -47,6 +47,13 @@ class MappedCall:
     trace_name: str | None
     completion_start_time: str | None
     error_message: str | None
+    # Only the dialects that marked this span an LLM call, in precedence
+    # order -- a dialect present but *vetoing* is excluded. These are the
+    # dialects whose extractors actually ran, so dialects[0] is what the
+    # exporter falls back to when no vendor attribute is present. Leaving a
+    # vetoing dialect in relabels a call it explicitly disclaimed: the same
+    # gen_ai span reports "gen_ai" on its own and "langfuse" as soon as a
+    # Langfuse type="span" workflow observation happens to wrap it.
     dialects: tuple[str, ...]
     parse_degraded: bool
     usage_absent: bool
@@ -422,7 +429,7 @@ def map_span_attributes(
         trace_name=_first_value(contributions, "trace_name"),
         completion_start_time=_first_value(contributions, "completion_start_time"),
         error_message=_first_value(contributions, "error_message"),
-        dialects=tuple(name for name in _PRECEDENCE if name in detected),
+        dialects=tuple(eligible),
         parse_degraded=any(
             contribution.parse_degraded for contribution in contributions
         ),

@@ -520,6 +520,43 @@ def test_langfuse_generation_span_falls_back_to_langfuse_provider(monkeypatch):
     _capture.set_runtime(None)
 
 
+def test_mixed_dialect_span_falls_back_to_the_eligible_dialect(monkeypatch):
+    """A Langfuse `type="span"` observation wrapping a real gen_ai LLM call.
+
+    Langfuse only vetoes here; gen_ai is what makes the span eligible and is
+    the only dialect that contributes a field. The row must go out as
+    provider="gen_ai" -- the same value the identical span reports without the
+    Langfuse wrapper. Reporting "langfuse" would split one call across two
+    provider buckets on nothing but instrumentation nesting.
+    """
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root="")))
+    monkeypatch.setattr(metergraph, "init", lambda: None)
+    exporter = MetergraphGenAIExporter()
+
+    exporter.export(
+        [
+            _span(
+                {
+                    "langfuse.observation.type": "span",
+                    "gen_ai.operation.name": "chat",
+                    "gen_ai.request.model": "gpt-5-mini",
+                    "gen_ai.usage.input_tokens": 10,
+                    "gen_ai.usage.output_tokens": 2,
+                }
+            )
+        ]
+    )
+
+    assert len(rows.rows) == 1
+    row = rows.rows[0]
+    assert row["provider"] == "gen_ai"
+    assert row["model"] == "gpt-5-mini"
+    assert row["input_tokens"] == 10
+    assert row["output_tokens"] == 2
+    _capture.set_runtime(None)
+
+
 def test_langfuse_completion_start_time_sets_ttft(monkeypatch):
     rows = Rows()
     _capture.set_runtime(Runtime(rows, Options(app_root="")))
