@@ -112,6 +112,14 @@ part types retain their model, usage, timing, and status metadata, but those
 parts are not replayable yet. See the runnable
 [`python-litellm-otel` example](../examples/python-litellm-otel/).
 
+On a tracer provider shared with other instrumentation,
+`MetergraphGenAIExporter(include_scopes=[...], exclude_scopes=[...])` filters on
+`span.instrumentation_scope.name` (exclude wins; with `include_scopes` set, only
+the listed scopes pass), so one call is never captured twice. The public
+`exporter.skipped` dict counts spans that produced no row, keyed by reason
+(`"scope"`, `"not-genai"`, `"no-model"`) — the first thing to check when a tee
+shows nothing.
+
 Configuration:
 
 - `METERGRAPH_APP_TOKEN` — required bearer token

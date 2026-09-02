@@ -1,11 +1,14 @@
-"""OpenTelemetry GenAI span export through MeterGraph's existing transport."""
+"""OpenTelemetry GenAI span export through MeterGraph's existing transport.
+
+Span attributes are translated by ``_genai_attrs``; this module does the span
+plumbing, instrumentation-scope filtering, and skip accounting.
+"""
 
 from __future__ import annotations
 
-import json
 import time
 from datetime import datetime, timezone
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Sequence
 
 import metergraph
 from opentelemetry.sdk.trace import ReadableSpan
@@ -14,87 +17,14 @@ from opentelemetry.trace import StatusCode
 
 from ._capture import _get_runtime
 from ._context import CaptureContext
+from ._failure_log import FailureLogger
+from ._genai_attrs import SkipReason, map_span_attributes
+
+_SKIP_SCOPE = "scope"
 
 
 class OpenTelemetrySpanError(Exception):
     """Internal marker used to preserve an exported span's error status."""
-
-
-def _attribute(attributes: Mapping[str, Any], name: str) -> Any:
-    return attributes.get(name)
-
-
-def _first_string(value: Any) -> str | None:
-    if isinstance(value, str):
-        try:
-            decoded = json.loads(value)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            decoded = None
-        if isinstance(decoded, list) and decoded:
-            return str(decoded[0])
-        return value
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        return str(value[0]) if value else None
-    return None
-
-
-def _text_from_output_messages(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        messages = json.loads(value)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return None
-    if not isinstance(messages, list):
-        return None
-    for message in messages:
-        if not isinstance(message, Mapping):
-            continue
-        parts = message.get("parts")
-        if not isinstance(parts, list):
-            continue
-        texts: list[str] = []
-        for part in parts:
-            if (
-                isinstance(part, Mapping)
-                and part.get("type") == "text"
-                and isinstance(part.get("content"), str)
-            ):
-                texts.append(part["content"])
-        if texts:
-            return "".join(texts)
-    return None
-
-
-def _request_content(attributes: Mapping[str, Any]) -> tuple[str | None, str | None]:
-    system = _attribute(attributes, "gen_ai.system_instructions")
-    messages = _attribute(attributes, "gen_ai.input.messages")
-    if not isinstance(messages, str):
-        return system if isinstance(system, str) else None, None
-    if isinstance(system, str):
-        return system, messages
-    try:
-        decoded = json.loads(messages)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return None, messages
-    if not isinstance(decoded, list):
-        return None, messages
-
-    system_parts: list[Any] = []
-    conversation: list[Any] = []
-    for message in decoded:
-        if isinstance(message, Mapping) and message.get("role") == "system":
-            parts = message.get("parts")
-            if isinstance(parts, list):
-                system_parts.extend(parts)
-            continue
-        conversation.append(message)
-    if not system_parts:
-        return None, messages
-    return (
-        json.dumps(system_parts, separators=(",", ":"), ensure_ascii=False),
-        json.dumps(conversation, separators=(",", ":"), ensure_ascii=False),
-    )
 
 
 def _hex_id(value: int, width: int) -> str | None:
@@ -102,10 +32,27 @@ def _hex_id(value: int, width: int) -> str | None:
 
 
 class MetergraphGenAIExporter(SpanExporter):
-    """Export completed OpenTelemetry GenAI spans through MeterGraph."""
+    """Export completed OpenTelemetry GenAI spans through MeterGraph.
 
-    def __init__(self) -> None:
+    ``include_scopes``/``exclude_scopes`` filter on
+    ``span.instrumentation_scope.name``: exclude always wins, and when
+    ``include_scopes`` is set only the listed scopes pass. Spans that produce
+    no capture row are counted per reason in the public ``skipped`` dict
+    (keys: ``"scope"`` plus the ``SkipReason`` values).
+    """
+
+    def __init__(
+        self,
+        include_scopes: Iterable[str] | None = None,
+        exclude_scopes: Iterable[str] | None = None,
+    ) -> None:
         metergraph.init()
+        self._include_scopes = (
+            frozenset(include_scopes) if include_scopes is not None else None
+        )
+        self._exclude_scopes = frozenset(exclude_scopes or ())
+        self.skipped: dict[str, int] = {}
+        self._failure_log = FailureLogger()
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         runtime = _get_runtime()
@@ -119,46 +66,64 @@ class MetergraphGenAIExporter(SpanExporter):
                 continue
         return SpanExportResult.SUCCESS
 
+    def _count_skip(self, reason: str) -> None:
+        self.skipped[reason] = self.skipped.get(reason, 0) + 1
+
     def _export_span(self, runtime: Any, span: ReadableSpan) -> None:
-        attributes = span.attributes or {}
-        model = _attribute(attributes, "gen_ai.request.model")
-        provider = _attribute(attributes, "gen_ai.provider.name") or _attribute(
-            attributes, "gen_ai.system"
-        )
-        if not isinstance(model, str) or not isinstance(provider, str):
+        scope = getattr(span, "instrumentation_scope", None)
+        scope_name = getattr(scope, "name", None)
+        if scope_name in self._exclude_scopes or (
+            self._include_scopes is not None
+            and scope_name not in self._include_scopes
+        ):
+            self._count_skip(_SKIP_SCOPE)
             return
 
-        operation = _attribute(attributes, "gen_ai.operation.name")
-        operation = operation if isinstance(operation, str) else "inference"
-        request: dict[str, Any] = {"model": model}
-        system, messages = _request_content(attributes)
-        if system is not None:
-            request["system_instructions"] = system
-        if messages is not None:
-            request["messages"] = messages
+        attributes = span.attributes or {}
+        mapped = map_span_attributes(attributes)
+        if isinstance(mapped, SkipReason):
+            self._count_skip(mapped.value)
+            # Ordinary spans on a shared TracerProvider all land in
+            # NOT_GENAI, so only an eligible-but-unusable span is worth a
+            # diagnostic. The message names no attribute values.
+            if mapped is SkipReason.NO_MODEL:
+                span_kind = getattr(span.kind, "name", None)
+                self._failure_log.report(
+                    "otel_span_no_model",
+                    "skipped an eligible GenAI span with no model attribute "
+                    f"(scope={scope_name!r}, span_kind={span_kind}, "
+                    f"skip={mapped.value})",
+                )
+            return
 
+        provider = mapped.provider or (
+            mapped.dialects[0] if mapped.dialects else "gen_ai"
+        )
         context = span.context
         parent = span.parent
         resource_attributes = (
             span.resource.attributes if span.resource is not None else {}
         )
-        function_name = _attribute(attributes, "code.function.name")
+        function_name = attributes.get("code.function.name")
         if not isinstance(function_name, str) or not function_name:
             function_name = span.name
-        function_module = _attribute(attributes, "code.namespace") or _attribute(
-            resource_attributes, "service.name"
+        function_module = attributes.get("code.namespace") or resource_attributes.get(
+            "service.name"
         )
         if not isinstance(function_module, str):
             function_module = None
         trace_id = _hex_id(context.trace_id, 32) if context is not None else None
         span_id = _hex_id(context.span_id, 16) if context is not None else None
         parent_span_id = _hex_id(parent.span_id, 16) if parent is not None else None
+
+        response = dict(mapped.response)
+
         call = runtime.call_state(
             provider,
-            operation,
-            request,
+            mapped.operation,
+            mapped.request,
             context=CaptureContext(
-                route=operation,
+                route=mapped.operation,
                 trace_id=trace_id,
                 trace_name=span.name,
                 parent_span_id=parent_span_id,
@@ -172,44 +137,17 @@ class MetergraphGenAIExporter(SpanExporter):
             call.ts = datetime.fromtimestamp(
                 span.start_time / 1_000_000_000, tz=timezone.utc
             ).isoformat()
-        if span.start_time is not None and span.end_time is not None:
-            duration_seconds = max(0, span.end_time - span.start_time) / 1_000_000_000
-            call.started = time.perf_counter() - duration_seconds
+            if span.end_time is not None:
+                duration = max(0, span.end_time - span.start_time) / 1_000_000_000
+                call.started = time.perf_counter() - duration
 
-        response_model = _attribute(attributes, "gen_ai.response.model")
-        finish_reason = _first_string(
-            _attribute(attributes, "gen_ai.response.finish_reasons")
-        )
-        response = {
-            "model": response_model if isinstance(response_model, str) else model,
-            "usage": {
-                "input_tokens": _attribute(
-                    attributes, "gen_ai.usage.input_tokens"
-                ),
-                "output_tokens": _attribute(
-                    attributes, "gen_ai.usage.output_tokens"
-                ),
-            },
-            "finish_reason": finish_reason,
-            "choices": (
-                [{"finish_reason": finish_reason}]
-                if finish_reason is not None
-                else []
-            ),
-        }
-        output_text = _text_from_output_messages(
-            _attribute(attributes, "gen_ai.output.messages")
-        )
+        error: OpenTelemetrySpanError | None = None
         if span.status.status_code is StatusCode.ERROR:
-            call.finish(
-                response,
-                error=OpenTelemetrySpanError(
-                    span.status.description or "OpenTelemetry GenAI span failed"
-                ),
-                response_text=output_text,
+            error = OpenTelemetrySpanError(
+                span.status.description or "OpenTelemetry GenAI span failed"
             )
-        else:
-            call.finish(response, response_text=output_text)
+        # finish() treats error=None exactly as an omitted error.
+        call.finish(response, error=error, response_text=mapped.response_text)
 
     def force_flush(self, timeout_millis: int = 30_000) -> bool:
         return metergraph.flush(max(0, timeout_millis) / 1000)
