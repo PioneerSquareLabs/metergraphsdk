@@ -3,7 +3,13 @@ from __future__ import annotations
 import json
 
 from metergraph._capture import _usage
-from metergraph._genai_attrs import MappedCall, SkipReason, map_span_attributes
+from metergraph._genai_attrs import (
+    DIALECT_GENAI,
+    MappedCall,
+    SkipReason,
+    _vetoed,
+    map_span_attributes,
+)
 
 
 def test_eligible_span_without_model_is_skipped_with_reason():
@@ -404,3 +410,31 @@ def test_field_level_merge_across_gen_ai_and_openinference():
     # ...while fields only OpenInference carries still land.
     assert mapped.cost == 0.0123
     assert mapped.cost_source == "openinference.llm.cost.total"
+# --- span-kind eligibility ---------------------------------------------------
+#
+# _vetoed is a pure predicate over verdicts, so it is tested directly on
+# verdict dicts rather than through span attributes. That keeps these cases
+# independent of which dialects happen to be registered: each dialect asserts
+# its own end-to-end eligibility against real attributes in its own tests.
+
+
+def test_abstaining_dialects_alone_do_not_veto():
+    assert _vetoed({DIALECT_GENAI: None}) is False
+
+
+def test_no_dialects_do_not_veto():
+    assert _vetoed({}) is False
+
+
+def test_a_lone_denial_vetoes_the_span():
+    assert _vetoed({"some-dialect": False}) is True
+
+
+def test_a_claim_outvotes_a_denial():
+    assert _vetoed({"some-dialect": False, "other-dialect": True}) is False
+
+
+def test_a_denial_is_not_rescued_by_an_abstention():
+    """The bug this guards: an abstaining gen_ai.* must not revive a span its
+    own producer labelled a chain."""
+    assert _vetoed({DIALECT_GENAI: None, "some-dialect": False}) is True

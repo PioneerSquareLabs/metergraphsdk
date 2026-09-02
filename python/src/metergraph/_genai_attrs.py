@@ -468,9 +468,14 @@ def _extract_langfuse(attributes: Mapping[str, Any]) -> _Fields:
     return fields
 
 
-def _detected_dialects(attributes: Mapping[str, Any]) -> dict[str, bool]:
-    """Detected dialects mapped to whether they mark the span as an LLM call."""
-    detected: dict[str, bool] = {}
+def _detected_dialects(attributes: Mapping[str, Any]) -> dict[str, bool | None]:
+    """Detected dialects mapped to their verdict on whether this is an LLM call.
+
+    ``True`` claims the span, ``False`` denies it, and ``None`` means the
+    dialect is present but carries no span-kind attribute to judge by. See
+    ``_vetoed`` for how the verdicts combine.
+    """
+    detected: dict[str, bool | None] = {}
     if any(key.startswith("langfuse.observation.") for key in attributes):
         observation_type = _string(attributes.get("langfuse.observation.type"))
         detected[DIALECT_LANGFUSE] = observation_type == "generation"
@@ -478,13 +483,26 @@ def _detected_dialects(attributes: Mapping[str, Any]) -> dict[str, bool]:
         attributes.get("gen_ai.request.model") is not None
         or attributes.get("gen_ai.operation.name") is not None
     ):
-        # A gen_ai span is always an LLM call; dialects that also describe
-        # non-LLM work (chains, tools, retrievers) report False here instead.
-        detected[DIALECT_GENAI] = True
+        # No opinion, not a claim. The gen_ai conventions have no span-kind
+        # attribute, and producers that emit gen_ai.* for chains, tools and
+        # retrievers alongside their own dialect say so there. Asserting True
+        # here would let those spans outvote the dialect that knows better.
+        detected[DIALECT_GENAI] = None
     kind = attributes.get("openinference.span.kind")
     if kind is not None:
         detected[DIALECT_OPENINFERENCE] = isinstance(kind, str) and kind.upper() == "LLM"
     return detected
+
+
+def _vetoed(detected: Mapping[str, bool | None]) -> bool:
+    """Whether a dialect denies this span and no other dialect claims it.
+
+    Abstaining dialects (``None``) never decide the outcome: a span described
+    only by dialects with no span-kind opinion stays eligible, which is what
+    keeps a bare ``gen_ai.*`` span capturing.
+    """
+    verdicts = [verdict for verdict in detected.values() if verdict is not None]
+    return bool(verdicts) and not any(verdicts)
 
 
 _EXTRACTORS = {
@@ -511,11 +529,12 @@ def map_span_attributes(
     detected = _detected_dialects(attributes)
     if not detected:
         return SkipReason.NOT_GENAI
-    eligible = [name for name in _PRECEDENCE if detected.get(name)]
-    if not eligible:
+    if _vetoed(detected):
         return SkipReason.INELIGIBLE_KIND
 
-    contributions = [_EXTRACTORS[name](attributes) for name in eligible]
+    contributions = [
+        _EXTRACTORS[name](attributes) for name in _PRECEDENCE if name in detected
+    ]
     model = _first_value(contributions, "model")
     if model is None:
         return SkipReason.NO_MODEL
