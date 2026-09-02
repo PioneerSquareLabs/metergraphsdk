@@ -18,10 +18,10 @@ No credentials and no network. Dummy keys, a mock transport and a local
 TracerProvider are not enough on their own -- the Langfuse client also installs
 its own OTLP processor on whatever provider it is handed, which used to export
 to cloud.langfuse.com and print `401 Unauthorized` after these assertions had
-already passed. Its transport is replaced with a local exporter, and every
-outbound connection is blocked and recorded so a future version that reaches
-the network turns this job red instead of depending on what a remote host
-answers.
+already passed. Its transport is replaced with a local exporter, and both
+fixtures run with every outbound connection blocked and recorded, so a future
+version of either library that reaches the network turns this job red instead
+of depending on what a remote host answers.
 """
 from __future__ import annotations
 
@@ -147,7 +147,7 @@ def _blocked_network() -> Iterator[list[str]]:
 
 
 @dataclass(frozen=True)
-class _LangfuseRun:
+class _DialectRun:
     spans: list[tuple[str, dict]]
     outbound: tuple[str, ...]
 
@@ -158,37 +158,47 @@ class _LangfuseRun:
 # tracer provider, so a function-scoped fixture would capture zero spans on
 # every test after the first.
 @pytest.fixture(scope="module")
-def openinference_spans():
-    """Spans openinference-instrumentation-openai really emits for one call."""
+def openinference_run() -> _DialectRun:
+    """Drive the real instrumentor once, under a closed network, and keep the spans."""
     memory, provider = _memory_provider()
-    OpenAIInstrumentor().instrument(tracer_provider=provider)
-    try:
-        client = openai.OpenAI(
-            api_key="sk-not-a-real-key",
-            http_client=httpx.Client(
-                transport=httpx.MockTransport(
-                    lambda request: httpx.Response(200, json=CHAT_RESPONSE)
-                )
-            ),
-        )
-        client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are terse."},
-                {"role": "user", "content": "Synthetic input"},
-            ],
-            temperature=0.2,
-        )
-    finally:
-        OpenAIInstrumentor().uninstrument()
-    return [
-        (span.instrumentation_scope.name, dict(span.attributes or {}))
-        for span in memory.get_finished_spans()
-    ]
+    with _blocked_network() as outbound:
+        OpenAIInstrumentor().instrument(tracer_provider=provider)
+        try:
+            client = openai.OpenAI(
+                api_key="sk-not-a-real-key",
+                http_client=httpx.Client(
+                    transport=httpx.MockTransport(
+                        lambda request: httpx.Response(200, json=CHAT_RESPONSE)
+                    )
+                ),
+            )
+            client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are terse."},
+                    {"role": "user", "content": "Synthetic input"},
+                ],
+                temperature=0.2,
+            )
+        finally:
+            OpenAIInstrumentor().uninstrument()
+    return _DialectRun(
+        spans=[
+            (span.instrumentation_scope.name, dict(span.attributes or {}))
+            for span in memory.get_finished_spans()
+        ],
+        outbound=tuple(outbound),
+    )
 
 
 @pytest.fixture(scope="module")
-def langfuse_run() -> _LangfuseRun:
+def openinference_spans(openinference_run: _DialectRun) -> list[tuple[str, dict]]:
+    """Spans openinference-instrumentation-openai really emits for one call."""
+    return openinference_run.spans
+
+
+@pytest.fixture(scope="module")
+def langfuse_run() -> _DialectRun:
     """Drive the real SDK once, under a closed network, and keep what it emitted."""
     from langfuse import Langfuse, propagate_attributes
 
@@ -207,7 +217,7 @@ def langfuse_run() -> _LangfuseRun:
         # happens here rather than at interpreter exit, unguarded and after
         # the assertions have already reported green.
         client.shutdown()
-    return _LangfuseRun(
+    return _DialectRun(
         spans=[
             (span.instrumentation_scope.name, dict(span.attributes or {}))
             for span in memory.get_finished_spans()
@@ -217,7 +227,7 @@ def langfuse_run() -> _LangfuseRun:
 
 
 @pytest.fixture(scope="module")
-def langfuse_spans(langfuse_run: _LangfuseRun) -> list[tuple[str, dict]]:
+def langfuse_spans(langfuse_run: _DialectRun) -> list[tuple[str, dict]]:
     """Spans the Langfuse SDK really emits for a good and a failed generation."""
     return langfuse_run.spans
 
@@ -249,6 +259,16 @@ def _emit_observations(client, propagate_attributes) -> None:
 
 
 # --- OpenInference (Arize Phoenix) -----------------------------------------
+
+
+def test_openinference_stays_off_the_network(openinference_run):
+    """The MockTransport carries the call; nothing may reach a real endpoint.
+
+    Asserted rather than assumed: the instrumentor and the OpenAI client are
+    both unpinned here, and a version that adds its own outbound request has
+    to fail this weekly job rather than quietly depend on a remote host.
+    """
+    assert openinference_run.outbound == ()
 
 
 def test_openinference_scope_name_is_what_the_readme_documents(openinference_spans):
