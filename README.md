@@ -136,9 +136,10 @@ gateway-reported `reported_cost_usd`. A trusted custom domain uses
 [Python OpenRouter example](examples/python-openrouter/).
 
 MeterGraph provides a standard OpenTelemetry GenAI span exporter that also
-reads OpenInference (Arize Phoenix) and Langfuse SDK spans, so an app already
-instrumented for either captures by registering one exporter — see
-[Capture from existing telemetry](#capture-from-existing-telemetry-phoenix-langfuse)
+reads OpenInference (Arize Phoenix), Langfuse SDK and LangSmith spans, so an
+app already instrumented for any of them captures by registering one exporter
+— see
+[Capture from existing telemetry](#capture-from-existing-telemetry-phoenix-langfuse-langsmith)
 below. LiteLLM is
 the currently qualified integration and can attach the exporter without
 changing individual model calls. See the
@@ -294,13 +295,13 @@ Point `METERGRAPH_INGEST_URL` at a [self-hosted Metergraph server](https://githu
 See [`examples/`](examples) for runnable per-provider examples, including an offline fake-provider demo that needs no API keys.
 
 
-## Capture from existing telemetry (Phoenix, Langfuse)
+## Capture from existing telemetry (Phoenix, Langfuse, LangSmith)
 
 Python applications that already trace LLM calls do not need `wrap()`.
 `metergraph.opentelemetry.MetergraphGenAIExporter` (`pip install
-'metergraph[otel]'`) reads OpenInference and `langfuse.observation.*` spans
-directly: attach it as one more span processor on the tracer provider that
-carries them.
+'metergraph[otel]'`) reads OpenInference, `langfuse.observation.*` and
+LangSmith spans directly: attach it as one more span processor on the tracer
+provider that carries them.
 
 For Phoenix, that is the provider `phoenix.otel.register()` returns:
 
@@ -335,6 +336,32 @@ Verify the attachment against your installed Langfuse SDK version — whether
 Langfuse uses the global provider has changed across releases, and the client
 is a process-wide singleton, so the exporter must be on the provider the first
 `Langfuse(...)` was built with. Make one traced call and confirm a row arrives.
+
+For the LangSmith SDK, set the tracer provider before the first traced call and
+turn on OTel export -- LangSmith's default tracing mode posts runs to its own
+API and emits no spans at all:
+
+```python
+import os
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from metergraph.opentelemetry import MetergraphGenAIExporter
+
+os.environ["LANGSMITH_TRACING_MODE"] = "otel"  # or "hybrid" to keep LangSmith
+
+provider = TracerProvider()
+provider.add_span_processor(BatchSpanProcessor(MetergraphGenAIExporter()))
+# Install it BEFORE the first LangSmith client is built. LangSmith reuses an
+# existing global provider, but builds its own private one if none is set --
+# and spans on that provider never reach this exporter.
+trace.set_tracer_provider(provider)
+```
+
+LangSmith exports every run as a GenAI span -- chains, tools and retrievers
+included -- so the exporter counts only those whose `langsmith.span.kind` is
+`llm`. It reports no cost (LangSmith prices server-side), and its spans carry
+no time-to-first-token.
 
 **Use exactly one capture path per call.** Do not both `wrap()` a client and
 capture its spans through this exporter, or the call is counted twice. On a

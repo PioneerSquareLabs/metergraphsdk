@@ -410,6 +410,174 @@ def test_field_level_merge_across_gen_ai_and_openinference():
     # ...while fields only OpenInference carries still land.
     assert mapped.cost == 0.0123
     assert mapped.cost_source == "openinference.llm.cost.total"
+# --- LangSmith ---------------------------------------------------------------
+#
+# LangSmith emits gen_ai.* on every run it exports, so these spans always carry
+# two dialects. The attribute values below are the shapes the real SDK
+# produces; test_upstream_dialects.py pins that against the installed version.
+
+
+def _langsmith_llm_span() -> dict[str, object]:
+    return {
+        "langsmith.span.kind": "llm",
+        "langsmith.trace.name": "my-chat-call",
+        "langsmith.trace.session_id": "sess-1",
+        "gen_ai.operation.name": "chat",
+        "gen_ai.system": "openai",
+        "gen_ai.request.model": "gpt-4o-mini",
+        "gen_ai.response.model": "gpt-4o-mini-2024-07-18",
+        "gen_ai.response.finish_reasons": "stop",
+        "gen_ai.usage.input_tokens": 11,
+        "gen_ai.usage.output_tokens": 4,
+        # str(dict), not JSON -- see _load_repr_mapping.
+        "gen_ai.usage.input_token_details": "{'cache_read': 8}",
+        "gen_ai.usage.output_token_details": "{'reasoning': 2}",
+        "gen_ai.prompt": json.dumps(
+            {"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "Hi"}]}
+        ),
+        "gen_ai.completion": json.dumps(
+            {
+                "model": "gpt-4o-mini-2024-07-18",
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "Hello there!"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        ),
+    }
+
+
+def test_langsmith_llm_span_maps_to_a_complete_call():
+    mapped = map_span_attributes(_langsmith_llm_span())
+
+    assert isinstance(mapped, MappedCall)
+    assert mapped.dialects == ("langsmith", "gen_ai")
+    assert mapped.model == "gpt-4o-mini"
+    assert mapped.provider == "openai"
+    assert mapped.operation == "chat"
+    assert mapped.request["messages"] == [{"role": "user", "content": "Hi"}]
+    assert mapped.response["model"] == "gpt-4o-mini-2024-07-18"
+    assert mapped.response["usage"] == {
+        "input_tokens": 11,
+        "output_tokens": 4,
+        "cache_read_input_tokens": 8,
+        "completion_tokens_details": {"reasoning_tokens": 2},
+    }
+    assert mapped.response["finish_reason"] == "stop"
+    assert mapped.response_text == "Hello there!"
+    assert mapped.session_id == "sess-1"
+    assert mapped.trace_name == "my-chat-call"
+    assert not mapped.parse_degraded
+    assert not mapped.usage_absent
+
+
+def test_langsmith_reports_no_cost():
+    """LangSmith prices runs server-side; no cost attribute reaches the span."""
+    mapped = map_span_attributes(_langsmith_llm_span())
+
+    assert isinstance(mapped, MappedCall)
+    assert mapped.cost is None
+    assert mapped.cost_source is None
+
+
+def test_langsmith_chain_span_is_not_a_billable_call():
+    """The double-count guard: a chain span carries gen_ai.* and, through
+    metadata inheritance, its child's model and tokens. Only langsmith.span.kind
+    tells them apart."""
+    attributes = _langsmith_llm_span() | {
+        "langsmith.span.kind": "chain",
+        "gen_ai.operation.name": "chain",
+    }
+
+    assert map_span_attributes(attributes) is SkipReason.INELIGIBLE_KIND
+
+
+def test_langsmith_tool_span_is_not_a_billable_call():
+    attributes = _langsmith_llm_span() | {
+        "langsmith.span.kind": "tool",
+        "gen_ai.operation.name": "execute_tool",
+    }
+
+    assert map_span_attributes(attributes) is SkipReason.INELIGIBLE_KIND
+
+
+def test_langsmith_without_a_span_kind_abstains_rather_than_denying():
+    """Only langsmith.span.kind carries a verdict. A span with other langsmith
+    attributes and no kind must not be vetoed into silence."""
+    attributes = _langsmith_llm_span()
+    del attributes["langsmith.span.kind"]
+
+    mapped = map_span_attributes(attributes)
+
+    assert isinstance(mapped, MappedCall)
+    assert mapped.trace_name == "my-chat-call"
+
+
+def test_langsmith_token_details_drop_keys_with_no_home_in_the_vocabulary():
+    attributes = _langsmith_llm_span() | {
+        "gen_ai.usage.input_token_details": "{'cache_read': 8, 'audio': 3}",
+    }
+
+    mapped = map_span_attributes(attributes)
+
+    assert isinstance(mapped, MappedCall)
+    assert mapped.response["usage"]["cache_read_input_tokens"] == 8
+    assert "audio" in mapped.dropped_usage_keys
+    assert not mapped.parse_degraded
+
+
+def test_langsmith_token_details_also_accept_json():
+    """literal_eval is the fallback, not the only path: a future upstream
+    switch to real JSON must keep working."""
+    attributes = _langsmith_llm_span() | {
+        "gen_ai.usage.output_token_details": '{"reasoning": 2}',
+    }
+
+    mapped = map_span_attributes(attributes)
+
+    assert isinstance(mapped, MappedCall)
+    assert mapped.response["usage"]["completion_tokens_details"] == {
+        "reasoning_tokens": 2
+    }
+
+
+def test_langsmith_unparseable_token_details_degrade_without_dropping_the_call():
+    attributes = _langsmith_llm_span() | {
+        "gen_ai.usage.input_token_details": "<not a literal>",
+    }
+
+    mapped = map_span_attributes(attributes)
+
+    assert isinstance(mapped, MappedCall)
+    assert mapped.parse_degraded
+    assert "cache_read_input_tokens" not in mapped.response["usage"]
+    assert mapped.response["usage"]["input_tokens"] == 11
+
+
+def test_langsmith_unparseable_content_is_kept_verbatim_and_flagged():
+    attributes = _langsmith_llm_span() | {"gen_ai.completion": "{not json"}
+
+    mapped = map_span_attributes(attributes)
+
+    assert isinstance(mapped, MappedCall)
+    assert mapped.parse_degraded
+    assert mapped.response_text == "{not json"
+
+
+def test_langsmith_non_chat_output_keeps_its_structure():
+    attributes = _langsmith_llm_span() | {
+        "gen_ai.completion": json.dumps({"output": ["a", "b"]})
+    }
+
+    mapped = map_span_attributes(attributes)
+
+    assert isinstance(mapped, MappedCall)
+    assert mapped.response_text is None
+    assert mapped.response["output"] == {"output": ["a", "b"]}
+
+
 # --- span-kind eligibility ---------------------------------------------------
 #
 # _vetoed is a pure predicate over verdicts, so it is tested directly on

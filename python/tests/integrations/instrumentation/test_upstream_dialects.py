@@ -2,10 +2,10 @@
 attributes the mapper reads?
 
 Every other mapper test hand-writes span attributes, so it asserts that the
-mapper handles a vocabulary *we* wrote down. If Phoenix or Langfuse renames or
-drops an attribute, those tests stay green while live capture silently loses a
-field -- exactly how a `langfuse.session.id` that never existed in any shipped
-SDK survived review.
+mapper handles a vocabulary *we* wrote down. If Phoenix, Langfuse or LangSmith
+renames or drops an attribute, those tests stay green while live capture
+silently loses a field -- exactly how a `langfuse.session.id` that never
+existed in any shipped SDK survived review.
 
 This module inverts the direction: it drives the real libraries, reads back
 whatever attributes that installed version actually produced, and asserts on
@@ -14,7 +14,8 @@ so it runs from the scheduled `upstream-dialects` workflow (unpinned, weekly),
 not as a required pull-request check.
 
 No credentials and no network: the OpenAI call goes through an httpx
-MockTransport, and the Langfuse client is given a local TracerProvider.
+MockTransport, and the Langfuse and LangSmith clients are given dummy keys and
+a local TracerProvider.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ pytest.importorskip(
     reason="upstream-dialects extras not installed",
 )
 pytest.importorskip("langfuse", reason="upstream-dialects extras not installed")
+pytest.importorskip("langsmith", reason="upstream-dialects extras not installed")
 
 from openinference.instrumentation.openai import OpenAIInstrumentor  # noqa: E402
 from opentelemetry.sdk.trace import TracerProvider  # noqa: E402
@@ -143,6 +145,75 @@ def langfuse_spans():
         (span.instrumentation_scope.name, dict(span.attributes or {}))
         for span in memory.get_finished_spans()
     ]
+
+
+@pytest.fixture(scope="module")
+def langsmith_spans():
+    """Spans the LangSmith SDK really emits for an llm, a chain and a tool run.
+
+    tracing_mode="otel" is what makes LangSmith export OTel spans at all; its
+    default mode posts runs to the LangSmith API and emits none. The client
+    reuses the already-installed global provider, which is the attachment the
+    README documents.
+    """
+    import os
+
+    from opentelemetry import trace as otel_trace
+
+    memory, provider = _memory_provider()
+    otel_trace.set_tracer_provider(provider)
+    os.environ.update(
+        LANGSMITH_TRACING="true",
+        LANGSMITH_TRACING_MODE="otel",
+        LANGSMITH_API_KEY="lsv2-not-a-real-key",
+        LANGSMITH_PROJECT="upstream-dialects",
+    )
+
+    from langsmith import traceable
+    from langsmith.run_trees import get_cached_client
+
+    client = get_cached_client()
+
+    @traceable(
+        run_type="llm",
+        name="good-generation",
+        metadata={"ls_model_name": "gpt-4o-mini", "ls_provider": "openai"},
+    )
+    def generation(messages, model="gpt-4o-mini"):
+        return CHAT_RESPONSE | {
+            "usage_metadata": {
+                "input_tokens": 30,
+                "output_tokens": 12,
+                "total_tokens": 42,
+                "input_token_details": {"cache_read": 5},
+                "output_token_details": {"reasoning": 7},
+            }
+        }
+
+    # The chain carries the model name its child run also sees: this is the
+    # shape that double-counts if span-kind stops being read.
+    @traceable(
+        run_type="chain", name="outer-chain", metadata={"ls_model_name": "gpt-4o-mini"}
+    )
+    def outer(question):
+        return generation([{"role": "user", "content": question}])
+
+    @traceable(
+        run_type="tool", name="a-tool", metadata={"ls_model_name": "gpt-4o-mini"}
+    )
+    def a_tool(argument):
+        return "tool result"
+
+    outer("Synthetic input")
+    a_tool("Synthetic input")
+    client.flush()
+    provider.force_flush()
+    spans = {}
+    for span in memory.get_finished_spans():
+        attributes = dict(span.attributes or {})
+        kind = attributes.get("langsmith.span.kind")
+        spans[kind] = (span.instrumentation_scope.name, attributes)
+    return spans
 
 
 # --- OpenInference (Arize Phoenix) -----------------------------------------
@@ -261,3 +332,71 @@ def test_langfuse_error_generation_carries_status_message(langfuse_spans):
     assert mapped.error_message == "upstream 500"
     # A failed call legitimately reports no usage.
     assert mapped.usage_absent
+
+
+# --- LangSmith ---------------------------------------------------------------
+
+
+def test_langsmith_scope_name_is_what_the_readme_documents(langsmith_spans):
+    assert {scope for scope, _ in langsmith_spans.values()} == {"langsmith"}
+
+
+def test_langsmith_llm_run_maps_to_a_complete_call(langsmith_spans):
+    _, attributes = langsmith_spans["llm"]
+    mapped = map_span_attributes(attributes)
+    assert not isinstance(mapped, SkipReason), "eligibility gate stopped matching"
+
+    assert mapped.dialects == ("langsmith", "gen_ai")
+    assert mapped.model == "gpt-4o-mini"
+    assert mapped.provider == "openai"
+    assert mapped.response["usage"] == {
+        "input_tokens": 30,
+        "output_tokens": 12,
+        "cache_read_input_tokens": 5,
+        "completion_tokens_details": {"reasoning_tokens": 7},
+    }
+    assert mapped.response_text == "Synthetic result"
+    assert mapped.request["messages"] == [
+        {"role": "user", "content": "Synthetic input"}
+    ]
+    assert mapped.trace_name == "good-generation"
+    assert not mapped.parse_degraded
+    assert not mapped.usage_absent
+
+
+def test_langsmith_still_emits_gen_ai_on_non_llm_runs(langsmith_spans):
+    """The premise the span-kind gate exists for. If this ever fails LangSmith
+    stopped labelling chains and tools as gen_ai spans, and the veto could be
+    relaxed -- but do not relax it while this passes."""
+    for kind in ("chain", "tool"):
+        _, attributes = langsmith_spans[kind]
+        assert attributes.get("gen_ai.operation.name") is not None
+
+
+def test_langsmith_chain_and_tool_runs_are_not_billable_calls(langsmith_spans):
+    """Both carry a model name and the chain carries its child's tokens, so
+    only langsmith.span.kind keeps them from being counted as calls."""
+    for kind in ("chain", "tool"):
+        _, attributes = langsmith_spans[kind]
+        assert map_span_attributes(attributes) is SkipReason.INELIGIBLE_KIND
+
+
+def test_langsmith_token_details_are_still_repr_encoded(langsmith_spans):
+    """_load_repr_mapping exists only because these are str(dict), not JSON.
+    If this starts failing upstream switched to JSON and the fallback can go."""
+    import json as _json
+
+    _, attributes = langsmith_spans["llm"]
+    raw = attributes["gen_ai.usage.input_token_details"]
+    assert isinstance(raw, str)
+    with pytest.raises(ValueError):
+        _json.loads(raw)
+
+
+def test_langsmith_still_reports_no_cost(langsmith_spans):
+    """LangSmith prices runs server-side, like Phoenix. If this fails the SDK
+    began putting cost on spans and a cost evidence contract can be added."""
+    _, attributes = langsmith_spans["llm"]
+    mapped = map_span_attributes(attributes)
+    assert mapped.cost is None
+    assert mapped.cost_source is None
