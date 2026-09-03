@@ -643,3 +643,81 @@ def test_parse_degraded_span_captures_counts_and_logs_without_values(
     assert "langfuse" in message
     assert "SECRET-NOT-JSON" not in message
     _capture.set_runtime(None)
+
+
+def _openinference_attributes() -> dict:
+    return {
+        "openinference.span.kind": "LLM",
+        "llm.model_name": "gpt-5-mini",
+        "llm.provider": "openai",
+        "llm.token_count.prompt": 30,
+        "llm.token_count.completion": 12,
+        "llm.token_count.prompt_details.cache_read": 5,
+        "llm.token_count.prompt_details.cache_write": 3,
+        "llm.token_count.completion_details.reasoning": 7,
+        "llm.input_messages.0.message.role": "user",
+        "llm.input_messages.0.message.content": "Synthetic input",
+        "llm.output_messages.0.message.role": "assistant",
+        "llm.output_messages.0.message.content": "Synthetic result",
+    }
+
+
+def test_exports_openinference_llm_span(monkeypatch):
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root="")))
+    monkeypatch.setattr(metergraph, "init", lambda: None)
+    exporter = MetergraphGenAIExporter()
+
+    result = exporter.export([_span(_openinference_attributes())])
+
+    assert result is SpanExportResult.SUCCESS
+    assert len(rows.rows) == 1
+    row = rows.rows[0]
+    assert row["provider"] == "openai"
+    assert row["model"] == "gpt-5-mini"
+    assert row["input_tokens"] == 30
+    assert row["output_tokens"] == 12
+    assert row["cache_read_tokens"] == 5
+    assert row["cache_write_tokens"] == 3
+    assert row["reasoning_tokens"] == 7
+    # Trace identity, latency and ts are dialect-independent row shaping,
+    # asserted once by the gen_ai export test at the top of this module. This
+    # test owns only what the OpenInference dialect itself adds.
+    response = json.loads(row["response_text"])
+    assert response["content"] == "Synthetic result"
+    _capture.set_runtime(None)
+
+
+def test_openinference_cost_becomes_reported_cost_evidence(monkeypatch):
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root="")))
+    monkeypatch.setattr(metergraph, "init", lambda: None)
+    exporter = MetergraphGenAIExporter()
+    attributes = _openinference_attributes()
+    attributes["llm.cost.total"] = 0.0125
+
+    exporter.export([_span(attributes)])
+
+    assert len(rows.rows) == 1
+    row = rows.rows[0]
+    assert row["reported_cost_usd"] == 0.0125
+    assert row["reported_cost_source"] == "openinference.llm.cost.total"
+    assert "gateway" not in row
+    _capture.set_runtime(None)
+
+
+def test_non_llm_openinference_kind_skipped(monkeypatch, caplog):
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root="")))
+    monkeypatch.setattr(metergraph, "init", lambda: None)
+    exporter = MetergraphGenAIExporter()
+
+    with caplog.at_level(logging.DEBUG, logger="metergraph"):
+        exporter.export(
+            [_span({"openinference.span.kind": "TOOL", "llm.model_name": "x"})]
+        )
+
+    assert rows.rows == []
+    assert exporter.skipped["ineligible-kind"] == 1
+    assert [r for r in caplog.records if r.name == "metergraph"] == []
+    _capture.set_runtime(None)

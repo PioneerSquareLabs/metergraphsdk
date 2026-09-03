@@ -484,6 +484,16 @@ def test_gateway_extraction_fault_is_fail_open():
 # SDK-fixed provenance string and never asserts gateway identity.
 
 _LF_SPAN_SOURCE = "langfuse.observation.cost_details.total"
+_OI_SOURCE = "openinference.llm.cost.total"
+
+
+def test_evidence_openinference_float_cost_lands_without_gateway_key():
+    evidence = _gateway.evidence_for_mapped_cost(0.0125, _OI_SOURCE)
+    assert evidence == {
+        "reported_cost_usd": 0.0125,
+        "reported_cost_source": _OI_SOURCE,
+    }
+    assert "gateway" not in evidence
 
 
 def test_evidence_langfuse_float_cost_lands_without_gateway_key():
@@ -522,7 +532,7 @@ def test_evidence_langfuse_span_cost_source_is_fixed():
         {"total": 0.1},
     ],
 )
-@pytest.mark.parametrize("source", [_LF_SPAN_SOURCE])
+@pytest.mark.parametrize("source", [_LF_SPAN_SOURCE, _OI_SOURCE])
 def test_evidence_malformed_costs_are_omitted(bad, source):
     assert _gateway.evidence_for_mapped_cost(bad, source) == {}
 
@@ -565,7 +575,7 @@ def test_evidence_contract_without_cost_emits_no_cost_fields():
 
 @pytest.mark.parametrize(
     "name",
-    ["langfuse", "openinference", "Langfuse", _LF_SPAN_SOURCE],
+    ["langfuse", "openinference", "Langfuse", _LF_SPAN_SOURCE, _OI_SOURCE],
 )
 def test_evidence_contract_names_are_not_gateways(name):
     with pytest.raises(ValueError) as excinfo:
