@@ -342,6 +342,9 @@ def test_openinference_full_token_details_use_usage_alias_spellings():
     assert isinstance(mapped, MappedCall)
     assert mapped.provider == "openai"
     assert mapped.model == "gpt-5-mini"
+    # No llm.request.model_name and no llm.response.model_name here, so this
+    # also covers both falling back to llm.model_name.
+    assert mapped.response["model"] == "gpt-5-mini"
     assert mapped.dialects == ("openinference",)
     assert mapped.request["messages"] == [
         {"role": "user", "content": "Synthetic input"}
@@ -371,16 +374,6 @@ def test_openinference_prefers_request_and_response_model_names():
     assert isinstance(mapped, MappedCall)
     assert mapped.model == "gpt-5-mini"
     assert mapped.response["model"] == "gpt-5-mini-2026-01-01"
-
-
-def test_openinference_falls_back_to_llm_model_name():
-    mapped = map_span_attributes(
-        {"openinference.span.kind": "LLM", "llm.model_name": "legacy-name"}
-    )
-
-    assert isinstance(mapped, MappedCall)
-    assert mapped.model == "legacy-name"
-    assert mapped.response["model"] == "legacy-name"
 
 
 def test_openinference_provider_precedes_system():
