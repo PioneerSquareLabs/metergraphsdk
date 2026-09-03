@@ -30,14 +30,13 @@ def test_phoenix_example_captures_openinference_llm_span(monkeypatch):
 
     exporter = module.run_example()
 
+    # Attribute-level mapping is owned by the mapper and exporter tests; this
+    # asserts only that the example's wiring delivers a row at all and routes
+    # the two span kinds differently.
     assert len(rows.rows) == 1
     row = rows.rows[0]
     assert row["provider"] == "openai"
     assert row["model"] == "gpt-5-mini"
-    assert row["input_tokens"] == 30
-    assert row["output_tokens"] == 12
-    assert row["cache_read_tokens"] == 5
-    assert row["reasoning_tokens"] == 7
     assert json.loads(row["response_text"])["content"] == "Synthetic result"
     # The chain span on the same provider is skipped, not captured.
     assert exporter.skipped["ineligible-kind"] == 1

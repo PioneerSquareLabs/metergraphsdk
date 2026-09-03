@@ -680,13 +680,9 @@ def test_exports_openinference_llm_span(monkeypatch):
     assert row["cache_read_tokens"] == 5
     assert row["cache_write_tokens"] == 3
     assert row["reasoning_tokens"] == 7
-    assert row["latency_ms"] == 125
-    assert row["trace_id"] == "12" * 16
-    assert row["span_id"] == "34" * 8
-    assert row["parent_span_id"] == "56" * 8
-    assert row["ts"] == datetime.fromtimestamp(
-        1_786_496_400, tz=timezone.utc
-    ).isoformat()
+    # Trace identity, latency and ts are dialect-independent row shaping,
+    # asserted once by the gen_ai export test at the top of this module. This
+    # test owns only what the OpenInference dialect itself adds.
     response = json.loads(row["response_text"])
     assert response["content"] == "Synthetic result"
     _capture.set_runtime(None)
