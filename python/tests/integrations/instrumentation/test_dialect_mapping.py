@@ -223,6 +223,12 @@ def test_langfuse_bare_string_input_stays_a_string():
 
 
 def test_non_llm_kinds_are_skipped_with_reason():
+    for kind in ("CHAIN", "RETRIEVER", "TOOL", "AGENT", "EMBEDDING"):
+        result = map_span_attributes(
+            {"openinference.span.kind": kind, "llm.model_name": "gpt-5-mini"}
+        )
+        assert result is SkipReason.INELIGIBLE_KIND
+
     assert (
         map_span_attributes(
             {
@@ -312,3 +318,110 @@ def test_langfuse_error_level_maps_to_error_message():
 
     assert isinstance(mapped, MappedCall)
     assert mapped.error_message == "synthetic failure"
+
+
+def test_openinference_full_token_details_use_usage_alias_spellings():
+    mapped = map_span_attributes(
+        {
+            "openinference.span.kind": "LLM",
+            "llm.model_name": "gpt-5-mini",
+            "llm.provider": "openai",
+            "llm.token_count.prompt": 120,
+            "llm.token_count.completion": 30,
+            "llm.token_count.total": 150,
+            "llm.token_count.prompt_details.cache_read": 64,
+            "llm.token_count.prompt_details.cache_write": 16,
+            "llm.token_count.completion_details.reasoning": 8,
+            "llm.input_messages.0.message.role": "user",
+            "llm.input_messages.0.message.content": "Synthetic input",
+            "llm.output_messages.0.message.role": "assistant",
+            "llm.output_messages.0.message.content": "Synthetic result",
+        }
+    )
+
+    assert isinstance(mapped, MappedCall)
+    assert mapped.provider == "openai"
+    assert mapped.model == "gpt-5-mini"
+    # No llm.request.model_name and no llm.response.model_name here, so this
+    # also covers both falling back to llm.model_name.
+    assert mapped.response["model"] == "gpt-5-mini"
+    assert mapped.dialects == ("openinference",)
+    assert mapped.request["messages"] == [
+        {"role": "user", "content": "Synthetic input"}
+    ]
+    assert mapped.response_text == "Synthetic result"
+    assert mapped.usage_absent is False
+    # The response usage block must speak the exact alias vocabulary the
+    # capture layer already understands.
+    usage = _usage(mapped.response)
+    assert usage["input_tokens"] == 120
+    assert usage["output_tokens"] == 30
+    assert usage["cache_read_tokens"] == 64
+    assert usage["cache_write_tokens"] == 16
+    assert usage["reasoning_tokens"] == 8
+
+
+def test_openinference_prefers_request_and_response_model_names():
+    mapped = map_span_attributes(
+        {
+            "openinference.span.kind": "LLM",
+            "llm.model_name": "legacy-name",
+            "llm.request.model_name": "gpt-5-mini",
+            "llm.response.model_name": "gpt-5-mini-2026-01-01",
+        }
+    )
+
+    assert isinstance(mapped, MappedCall)
+    assert mapped.model == "gpt-5-mini"
+    assert mapped.response["model"] == "gpt-5-mini-2026-01-01"
+
+
+def test_openinference_provider_precedes_system():
+    both = map_span_attributes(
+        {
+            "openinference.span.kind": "LLM",
+            "llm.model_name": "gpt-5-mini",
+            "llm.provider": "azure",
+            "llm.system": "openai",
+        }
+    )
+    system_only = map_span_attributes(
+        {
+            "openinference.span.kind": "LLM",
+            "llm.model_name": "gpt-5-mini",
+            "llm.system": "openai",
+        }
+    )
+
+    assert isinstance(both, MappedCall)
+    assert both.provider == "azure"
+    assert isinstance(system_only, MappedCall)
+    assert system_only.provider == "openai"
+
+
+def test_field_level_merge_across_gen_ai_and_openinference():
+    mapped = map_span_attributes(
+        {
+            "gen_ai.operation.name": "chat",
+            "gen_ai.provider.name": "anthropic",
+            "gen_ai.request.model": "claude-opus-5",
+            "gen_ai.usage.input_tokens": 12,
+            "gen_ai.usage.output_tokens": 5,
+            "openinference.span.kind": "LLM",
+            "llm.model_name": "other-model",
+            "llm.cost.total": 0.0123,
+            "llm.token_count.prompt": 999,
+        }
+    )
+
+    assert isinstance(mapped, MappedCall)
+    assert set(mapped.dialects) == {"gen_ai", "openinference"}
+    # gen_ai outranks OpenInference for every field it carries...
+    assert mapped.model == "claude-opus-5"
+    assert mapped.provider == "anthropic"
+    assert mapped.operation == "chat"
+    assert mapped.response["usage"]["input_tokens"] == 12
+    assert mapped.response["usage"]["output_tokens"] == 5
+    # ...while fields only OpenInference carries still land.
+    assert mapped.cost == 0.0123
+    assert mapped.cost_source == "openinference.llm.cost.total"
