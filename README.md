@@ -378,6 +378,41 @@ Vendor-reported cost lands on rows as `reported_cost_usd` with a fixed
 computes cost server-side — its instrumentors do not put `llm.cost.total` on
 spans — so in practice this evidence arrives from Langfuse.
 
+### Braintrust and other OTLP backends
+
+Phoenix and Langfuse need their own dialects because they *emit* spans in a
+private vocabulary. A backend that only *receives* OTLP needs nothing: the
+spans on the provider are whatever the application's instrumentation emitted,
+and if that is `gen_ai.*` or OpenInference the exporter already reads it.
+
+Braintrust is that second case. `BraintrustSpanProcessor` ships spans from a
+standard tracer provider to Braintrust, which implements the OpenTelemetry
+GenAI semantic conventions; the emitters it recommends are OpenLLMetry, the
+Vercel AI SDK, and raw OTLP. So an application already tracing to Braintrust
+captures by adding one more processor to the provider it has:
+
+```python
+provider.add_span_processor(BraintrustSpanProcessor())  # existing, to Braintrust
+provider.add_span_processor(BatchSpanProcessor(MetergraphGenAIExporter()))
+```
+
+The same reasoning applies to any OTLP backend. Two limits are worth knowing:
+
+- **Cache tokens need a dialect.** The `gen_ai.*` extractor reads input and
+  output tokens only, so `gen_ai.usage.cache_read.input_tokens` and
+  `gen_ai.usage.cache_creation.input_tokens` do not reach the row. An
+  OpenInference or Langfuse span carries cache counts; a pure `gen_ai.*` span
+  does not.
+- **The `braintrust.*` attribute namespace is not read.** It is an input
+  convention for hand-written spans (`braintrust.input_json`,
+  `braintrust.metrics`), not something an instrumentor emits, and a span
+  carrying only those attributes is skipped as `not-genai`.
+
+Applications using Braintrust's **native** SDK — `wrap_openai()`, `@traced`,
+`start_span()` — log straight to Braintrust's API and put nothing on a tracer
+provider, so there is no span to tee. Import those after the fact with
+`metergraphrelay pull braintrust` instead.
+
 ## Batch-first execution (opt-in, not part of default capture)
 
 Both SDKs also expose an explicit, separately opt-in `batchFirst()` / `batch_first()` API: submit one request through a provider's Batch API, wait up to a caller-chosen deadline, and fall back to exactly one direct call if the batch hasn't finished in time. This is a distinct code path from `wrap()`/capture — never enabled by `wrap()`, by default configuration, or by any environment variable — and it carries real cost and behavioral consequences a caller must accept explicitly before any provider call is made:
