@@ -1,0 +1,32 @@
+# Drift watch for the telemetry dialects the GenAI exporter maps. Drives the
+# real upstream libraries and asserts on the spans they actually produce, so a
+# rename surfaces here instead of as silent capture loss in the field.
+#
+# Deliberately NOT part of ci.yml and NOT a required check: the dependencies
+# are unpinned so the job can see drift, which means an upstream release can
+# turn it red with no change on our side. See the rationale in
+# python/tests/integrations/instrumentation/test_upstream_dialects.py.
+name: upstream-dialects
+
+on:
+  schedule:
+    # Mondays, 07:00 UTC.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+jobs:
+  upstream-dialects:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Unpinned on purpose: pinning these would defeat the whole job.
+      - run: pip install -e "python[otel]" pytest langfuse
+      - name: Record the versions this run actually tested
+        run: pip list | grep -Ei "langfuse|opentelemetry-sdk"
+      - name: Langfuse still emits the attributes the mapper reads
+        run: >
+          pytest python/tests/integrations/instrumentation/test_upstream_dialects.py
+          -q -rs

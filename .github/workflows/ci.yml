@@ -43,6 +43,16 @@ jobs:
       - run: pip install -e "python[otel]" "litellm[proxy]>=1.96.2,<2" pytest
       - run: pytest examples/python-litellm-otel/test_example.py -q
 
+  python-langfuse-otel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e "python[otel]" pytest
+      - run: pytest examples/python-langfuse-otel/test_example.py -q
+
   typescript:
     runs-on: ubuntu-latest
     strategy:

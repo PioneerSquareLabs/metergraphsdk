@@ -147,7 +147,10 @@ gateway-reported `reported_cost_usd`. A trusted custom domain uses
 `metergraph.wrap(client, gateway="openrouter")`. See the runnable
 [Python OpenRouter example](examples/python-openrouter/).
 
-MeterGraph provides a standard OpenTelemetry GenAI span exporter. LiteLLM is
+MeterGraph provides a standard OpenTelemetry GenAI span exporter that also
+reads Langfuse SDK spans, so an app already instrumented for Langfuse captures
+by registering one exporter — see
+[Capture from Langfuse](#capture-from-langfuse) below. LiteLLM is
 the currently qualified integration and can attach the exporter without
 changing individual model calls. See the
 [LiteLLM OpenTelemetry example](examples/python-litellm-otel/).
@@ -313,6 +316,42 @@ sends it. Transport problems never break or slow your LLM calls. When the
 collector is unreachable, capture drops and your application carries on.
 
 See [`examples/`](examples) for runnable per-provider examples, including an offline fake-provider demo that needs no API keys.
+
+
+## Capture from Langfuse
+
+Python applications that already trace LLM calls through the Langfuse SDK do
+not need `wrap()`. `metergraph.opentelemetry.MetergraphGenAIExporter` (`pip
+install 'metergraph[otel]'`) reads `langfuse.observation.*` spans directly:
+attach it as one more span processor on the provider Langfuse uses.
+
+```python
+from opentelemetry import trace
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from metergraph.opentelemetry import MetergraphGenAIExporter
+
+trace.get_tracer_provider().add_span_processor(
+    BatchSpanProcessor(MetergraphGenAIExporter())
+)
+```
+
+Verify the attachment against your installed Langfuse SDK version — whether
+Langfuse uses the global provider has changed across releases, and the client
+is a process-wide singleton, so the exporter must be on the provider the first
+`Langfuse(...)` was built with. Make one traced call and confirm a row arrives.
+
+**Use exactly one capture path per call.** Do not both `wrap()` a client and
+capture its spans through this exporter, or the call is counted twice. On a
+shared tracer provider, `MetergraphGenAIExporter(include_scopes=[...],
+exclude_scopes=[...])` filters on `span.instrumentation_scope.name` (exclude
+wins); the Langfuse SDK publishes everything under the single scope
+`langfuse-sdk`. When nothing arrives, read the exporter's public
+`exporter.skipped` counters (`"scope"`, `"not-genai"`, `"ineligible-kind"`,
+`"no-model"`, plus the `"parse-degraded"` diagnostic). Runnable offline
+example: [`examples/python-langfuse-otel/`](examples/python-langfuse-otel/).
+
+Langfuse's own reported cost lands on rows as `reported_cost_usd` with a fixed
+`reported_cost_source`; the SDK never computes cost itself.
 
 ## Batch-first execution (opt-in, not part of default capture)
 

@@ -478,3 +478,158 @@ def test_gateway_extraction_fault_is_fail_open():
         assert "reported_cost_usd" not in row
     finally:
         _capture.set_runtime(None)
+
+
+# Evidence-only cost contracts: vendor-reported cost is transported with an
+# SDK-fixed provenance string and never asserts gateway identity.
+
+_LF_SPAN_SOURCE = "langfuse.observation.cost_details.total"
+
+
+def test_evidence_langfuse_float_cost_lands_without_gateway_key():
+    evidence = _gateway.evidence_for_mapped_cost(0.0125, _LF_SPAN_SOURCE)
+    assert evidence == {
+        "reported_cost_usd": 0.0125,
+        "reported_cost_source": _LF_SPAN_SOURCE,
+    }
+    assert "gateway" not in evidence
+
+
+def test_evidence_langfuse_span_cost_source_is_fixed():
+    evidence = _gateway.evidence_for_mapped_cost(0.5, _LF_SPAN_SOURCE)
+    assert evidence == {
+        "reported_cost_usd": 0.5,
+        "reported_cost_source": _LF_SPAN_SOURCE,
+    }
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "abc",
+        "-1",
+        "",
+        "nan",
+        "inf",
+        -0.5,
+        -1,
+        float("nan"),
+        float("inf"),
+        True,
+        False,
+        None,
+        [0.1],
+        {"total": 0.1},
+    ],
+)
+@pytest.mark.parametrize("source", [_LF_SPAN_SOURCE])
+def test_evidence_malformed_costs_are_omitted(bad, source):
+    assert _gateway.evidence_for_mapped_cost(bad, source) == {}
+
+
+def test_evidence_unknown_source_emits_nothing():
+    # Provenance strings are SDK-fixed; arbitrary caller strings emit nothing.
+    assert _gateway.evidence_for_mapped_cost(0.5, "vendor.custom.cost") == {}
+    assert _gateway.evidence_for_mapped_cost(0.5, None) == {}
+
+
+@pytest.mark.parametrize("endpoint", ["inference", "chat", "spans.export", "anything"])
+def test_evidence_contract_qualifies_every_endpoint(endpoint):
+    evidence = _gateway.gateway_evidence(
+        _LF_SPAN_SOURCE, endpoint, SimpleNamespace(cost=0.25)
+    )
+    assert evidence == {
+        "reported_cost_usd": 0.25,
+        "reported_cost_source": _LF_SPAN_SOURCE,
+    }
+    assert "gateway" not in evidence
+
+
+def test_evidence_contract_row_through_call_state_seam():
+    rows = Rows()
+    runtime = Runtime(rows, Options(app_root=_APP_ROOT))
+    call = runtime.call_state(
+        "openai", "inference", {"model": "gpt-test"}, gateway=_LF_SPAN_SOURCE
+    )
+    call.finish(SimpleNamespace(cost=0.001234, model="gpt-test"))
+    row = rows.rows[0]
+    assert row["reported_cost_usd"] == 0.001234
+    assert row["reported_cost_source"] == _LF_SPAN_SOURCE
+    assert "gateway" not in row
+    assert "served_model" not in row
+
+
+def test_evidence_contract_without_cost_emits_no_cost_fields():
+    assert _gateway.gateway_evidence(_LF_SPAN_SOURCE, "inference", SimpleNamespace()) == {}
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["langfuse", "openinference", "Langfuse", _LF_SPAN_SOURCE],
+)
+def test_evidence_contract_names_are_not_gateways(name):
+    with pytest.raises(ValueError) as excinfo:
+        _gateway.resolve_gateway(name)
+    message = str(excinfo.value)
+    assert "openrouter" in message       # accepted set unchanged
+    assert "langfuse" not in message     # evidence names never enumerated
+    assert "openinference" not in message
+
+
+def test_wrap_rejects_evidence_contract_name_like_any_unknown_gateway():
+    client = openrouter_client()
+    with pytest.raises(ValueError):
+        metergraph.wrap(client, gateway="langfuse")
+
+
+def test_evidence_contracts_do_not_auto_detect():
+    client = SimpleNamespace(
+        base_url="https://cloud.langfuse.com/api", chat=SimpleNamespace()
+    )
+    assert _gateway.detect_gateway(client) is None
+
+
+# OpenRouter regression: the qualified gateway contract is unchanged — float
+# cost still lands, string cost is still rejected there.
+
+def test_openrouter_float_cost_still_lands_and_string_cost_still_rejected():
+    ok = _gateway.gateway_evidence(
+        "openrouter",
+        "chat.completions",
+        SimpleNamespace(model="m", usage=SimpleNamespace(cost=0.5)),
+    )
+    assert ok["gateway"] == "openrouter"
+    assert ok["reported_cost_usd"] == 0.5
+    assert ok["reported_cost_source"] == "openrouter.usage.cost"
+
+    stringy = _gateway.gateway_evidence(
+        "openrouter",
+        "chat.completions",
+        SimpleNamespace(model="m", usage=SimpleNamespace(cost="0.5")),
+    )
+    assert stringy["gateway"] == "openrouter"
+    assert "reported_cost_usd" not in stringy
+    assert "reported_cost_source" not in stringy
+
+
+def test_every_cost_source_the_mapper_emits_is_a_registered_contract():
+    """The mapper writes provenance strings; _gateway decides which are real.
+
+    They are deliberately not shared by import -- _genai_attrs is a leaf that
+    the capture path must be able to load on its own -- so this guards the
+    seam instead. Without it, editing a string on one side silently returns {}
+    from evidence_for_mapped_cost and cost vanishes from rows with no error.
+    """
+    import re
+    from pathlib import Path
+
+    from metergraph import _genai_attrs
+
+    emitted = set(
+        re.findall(
+            r'cost_source = "([^"]+)"',
+            Path(_genai_attrs.__file__).read_text(),
+        )
+    )
+    assert emitted, "expected the mapper to emit at least one cost source"
+    assert emitted <= _gateway.EVIDENCE_COST_SOURCES

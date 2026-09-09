@@ -301,24 +301,6 @@ def _openinference_attributes() -> dict:
     }
 
 
-def _langfuse_attributes() -> dict:
-    return {
-        "langfuse.observation.type": "generation",
-        "langfuse.observation.model.name": "claude-opus-5",
-        "langfuse.observation.usage_details": json.dumps(
-            {"input": 11, "output": 4, "total": 15}
-        ),
-        "langfuse.observation.input": json.dumps(
-            [{"role": "user", "content": "Synthetic input"}]
-        ),
-        "langfuse.observation.output": json.dumps(
-            {"role": "assistant", "content": "Synthetic reply"}
-        ),
-        "session.id": "sess-1",
-        "langfuse.trace.name": "synthetic-trace",
-    }
-
-
 def test_genai_span_without_provider_falls_back_to_dialect(monkeypatch):
     rows = Rows()
     _capture.set_runtime(Runtime(rows, Options(app_root="")))
@@ -496,4 +478,168 @@ def test_capture_text_disabled_yields_metadata_only_rows(monkeypatch):
         assert row["response_text"] is None
         assert row["content_opted_in"] is False
         assert row["input_tokens"] is not None
+    _capture.set_runtime(None)
+
+
+def _langfuse_attributes() -> dict:
+    return {
+        "langfuse.observation.type": "generation",
+        "langfuse.observation.model.name": "claude-opus-5",
+        "langfuse.observation.usage_details": json.dumps(
+            {"input": 11, "output": 4, "total": 15}
+        ),
+        "langfuse.observation.input": json.dumps(
+            [{"role": "user", "content": "Synthetic input"}]
+        ),
+        "langfuse.observation.output": json.dumps(
+            {"role": "assistant", "content": "Synthetic reply"}
+        ),
+        "session.id": "sess-1",
+        "langfuse.trace.name": "synthetic-trace",
+    }
+
+
+def test_langfuse_generation_span_falls_back_to_langfuse_provider(monkeypatch):
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root="")))
+    monkeypatch.setattr(metergraph, "init", lambda: None)
+    exporter = MetergraphGenAIExporter()
+
+    exporter.export([_span(_langfuse_attributes())])
+
+    assert len(rows.rows) == 1
+    row = rows.rows[0]
+    assert row["provider"] == "langfuse"
+    assert row["model"] == "claude-opus-5"
+    assert row["input_tokens"] == 11
+    assert row["output_tokens"] == 4
+    assert row["session_id"] == "sess-1"
+    assert row["trace_name"] == "synthetic-trace"
+    response = json.loads(row["response_text"])
+    assert response["content"] == "Synthetic reply"
+    _capture.set_runtime(None)
+
+
+def test_mixed_dialect_span_falls_back_to_the_eligible_dialect(monkeypatch):
+    """A Langfuse `type="span"` observation wrapping a real gen_ai LLM call.
+
+    Langfuse only vetoes here; gen_ai is what makes the span eligible and is
+    the only dialect that contributes a field. The row must go out as
+    provider="gen_ai" -- the same value the identical span reports without the
+    Langfuse wrapper. Reporting "langfuse" would split one call across two
+    provider buckets on nothing but instrumentation nesting.
+    """
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root="")))
+    monkeypatch.setattr(metergraph, "init", lambda: None)
+    exporter = MetergraphGenAIExporter()
+
+    exporter.export(
+        [
+            _span(
+                {
+                    "langfuse.observation.type": "span",
+                    "gen_ai.operation.name": "chat",
+                    "gen_ai.request.model": "gpt-5-mini",
+                    "gen_ai.usage.input_tokens": 10,
+                    "gen_ai.usage.output_tokens": 2,
+                }
+            )
+        ]
+    )
+
+    assert len(rows.rows) == 1
+    row = rows.rows[0]
+    assert row["provider"] == "gen_ai"
+    assert row["model"] == "gpt-5-mini"
+    assert row["input_tokens"] == 10
+    assert row["output_tokens"] == 2
+    _capture.set_runtime(None)
+
+
+def test_langfuse_completion_start_time_sets_ttft(monkeypatch):
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root="")))
+    monkeypatch.setattr(metergraph, "init", lambda: None)
+    exporter = MetergraphGenAIExporter()
+    attributes = _langfuse_attributes()
+    attributes["langfuse.observation.completion_start_time"] = (
+        datetime.fromtimestamp(1_786_496_400.05, tz=timezone.utc).isoformat()
+    )
+
+    exporter.export([_span(attributes)])
+
+    assert len(rows.rows) == 1
+    assert rows.rows[0]["ttft_ms"] == 50
+    _capture.set_runtime(None)
+
+
+def test_langfuse_json_encoded_completion_start_time_still_sets_ttft(monkeypatch):
+    """The real SDK JSON-encodes this timestamp, so the attribute value arrives
+    wrapped in literal quotes. Feeding that straight to the ISO parser fails and
+    drops TTFT for every Langfuse span -- verified against langfuse 3.15/4.15."""
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root="")))
+    monkeypatch.setattr(metergraph, "init", lambda: None)
+    exporter = MetergraphGenAIExporter()
+    attributes = _langfuse_attributes()
+    attributes["langfuse.observation.completion_start_time"] = json.dumps(
+        datetime.fromtimestamp(1_786_496_400.05, tz=timezone.utc).isoformat()
+    )
+
+    exporter.export([_span(attributes)])
+
+    assert len(rows.rows) == 1
+    assert rows.rows[0]["ttft_ms"] == 50
+    _capture.set_runtime(None)
+
+
+def test_langfuse_error_level_marks_row_error(monkeypatch):
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root="")))
+    monkeypatch.setattr(metergraph, "init", lambda: None)
+    exporter = MetergraphGenAIExporter()
+    attributes = _langfuse_attributes()
+    attributes["langfuse.observation.level"] = "ERROR"
+    attributes["langfuse.observation.status_message"] = "synthetic Langfuse failure"
+
+    exporter.export([_span(attributes)])
+
+    assert len(rows.rows) == 1
+    row = rows.rows[0]
+    assert row["status_code"] == "error"
+    assert row["error"] is True
+    assert row["error_type"] == "OpenTelemetrySpanError"
+    _capture.set_runtime(None)
+
+
+def test_parse_degraded_span_captures_counts_and_logs_without_values(
+    monkeypatch, caplog
+):
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root="")))
+    monkeypatch.setattr(metergraph, "init", lambda: None)
+    exporter = MetergraphGenAIExporter()
+    attributes = _langfuse_attributes()
+    attributes["langfuse.observation.model.parameters"] = (
+        '{"temperature": SECRET-NOT-JSON'
+    )
+    span = _scoped_span(attributes, scope_name="synthetic.scope")
+
+    with caplog.at_level(logging.DEBUG, logger="metergraph"):
+        result = exporter.export([span])
+        exporter.export([span])
+
+    assert result is SpanExportResult.SUCCESS
+    # Degraded spans still capture: parse-degraded is a diagnostic counter,
+    # not a skip.
+    assert len(rows.rows) == 2
+    assert rows.rows[0]["model"] == "claude-opus-5"
+    assert exporter.skipped["parse-degraded"] == 2
+    records = [r for r in caplog.records if r.name == "metergraph"]
+    assert len(records) == 1  # rate-limited to one line
+    message = records[0].getMessage()
+    assert "synthetic.scope" in message
+    assert "langfuse" in message
+    assert "SECRET-NOT-JSON" not in message
     _capture.set_runtime(None)

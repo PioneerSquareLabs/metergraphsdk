@@ -16,7 +16,16 @@ materially changed. A wholesale reorganization is not required.
   recorded transports. It must not require live credentials or billable calls.
 - `integrations/instrumentation/` exercises MeterGraph with another telemetry
   or framework integration. Prefer in-memory exporters and deterministic local
-  fixtures.
+  fixtures. A few modules here need a library that is not a dev dependency and
+  `importorskip` themselves out of the default run; each has a CI job that
+  installs it (`python-ddtrace-anthropic`, `upstream-dialects`).
+  `test_upstream_dialects.py` is the one deliberate exception to the
+  "deterministic local fixtures" rule: it drives the real upstream telemetry
+  libraries *unpinned* to catch attribute drift, which is why it runs on a
+  weekly schedule rather than as a required check. The unpinned dependency is
+  the whole exception -- the network rule below still holds, and that module
+  enforces it by replacing the library's transport and failing on any outbound
+  connection.
 - `package/` verifies the built wheel and source distribution, their public
   shape, and release workflow gates.
 - `fixtures/` contains shared provider data and protocol doubles. Test-only
