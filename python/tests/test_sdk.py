@@ -412,6 +412,59 @@ def test_wrap_google_records_usage_and_endpoint(tmp_path):
     _capture.set_runtime(None)
 
 
+def test_wrap_google_serializes_native_content_models_as_json(tmp_path):
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root=str(tmp_path), capture_text=True)))
+
+    class Content:
+        def __init__(self, value):
+            self.value = value
+
+        def model_dump(self, *, mode, exclude_none):
+            assert mode == "json"
+            assert exclude_none is True
+            return self.value
+
+    class Models:
+        def generate_content(self, **kwargs):
+            return gemini_response()
+
+    client = SimpleNamespace(models=Models())
+    metergraph.wrap(client, provider="google")
+    client.models.generate_content(
+        model="gemini-test",
+        contents=[
+            Content({"role": "user", "parts": [{"text": "List files."}]}),
+            Content(
+                {
+                    "role": "model",
+                    "parts": [
+                        {
+                            "function_call": {"name": "list_directory", "args": {}},
+                            "thought_signature": "opaque-continuation",
+                        }
+                    ],
+                }
+            ),
+        ],
+    )
+
+    captured = json.loads(rows.rows[0]["request_json"])
+    assert captured["contents"] == [
+        {"role": "user", "parts": [{"text": "List files."}]},
+        {
+            "role": "model",
+            "parts": [
+                {
+                    "function_call": {"name": "list_directory", "args": {}},
+                    "thought_signature": "opaque-continuation",
+                }
+            ],
+        },
+    ]
+    _capture.set_runtime(None)
+
+
 def test_wrap_google_stream_takes_usage_from_cumulative_last_chunk(tmp_path):
     rows = Rows()
     _capture.set_runtime(

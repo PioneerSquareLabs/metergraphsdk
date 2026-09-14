@@ -43,6 +43,12 @@ def _normalize_text(value: str) -> str:
 
 
 def scrub(value: Any) -> Any:
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return scrub(model_dump(mode="json", exclude_none=True))
+        except Exception:
+            return repr(value)
     if isinstance(value, Mapping):
         return {
             str(k): scrub(v)
