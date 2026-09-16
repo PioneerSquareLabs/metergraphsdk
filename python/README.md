@@ -219,6 +219,11 @@ Instrument this codebase's LLM API costs with the `metergraph` PyPI package
 (https://github.com/PioneerSquareLabs/metergraphsdk): pip install metergraph,
 then wrap every OpenAI()/AsyncOpenAI(), Anthropic()/AsyncAnthropic(), and
 genai.Client() construction in place, e.g. client = metergraph.wrap(OpenAI()).
+Wrap only production code paths: skip tests, conftest.py, fixtures, mocks,
+fakes, stubs, vcrpy/respx/responses setups, benchmarks, notebooks and example
+scripts, and do not add init/track/route/trace to them. Set
+METERGRAPH_DISABLED=1 in the test configuration so a test run never sends
+telemetry.
 OpenAI or Anthropic clients pointed at https://ai-gateway.vercel.sh are Vercel
 AI Gateway clients and are detected automatically; keep their creator/model ID
 and AI_GATEWAY_API_KEY / VERCEL_OIDC_TOKEN configuration unchanged.
@@ -238,5 +243,6 @@ optionally pin stable names on key LLM-calling functions with
 @metergraph.track. On
 serverless, call metergraph.flush() before the handler returns. When done,
 list every client you wrapped and flag LLM calls made outside the official
-openai / anthropic / google-genai SDKs, since those are not captured.
+openai / anthropic / google-genai SDKs, since those are not captured, and
+confirm the test suite cannot emit telemetry.
 ```

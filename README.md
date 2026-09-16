@@ -49,6 +49,12 @@ only when the deployment owner explicitly chooses metadata-only capture.
    For Vercel AI SDK `generateText` / `streamText` calls, wrap each language
    model with `wrapLanguageModel({ model, middleware:
    mg.vercelAISDKMiddleware() })` instead of wrapping a provider client.
+   Wrap only production code paths. Skip tests, conftest.py, fixtures,
+   mocks, fakes, stubs, recorded-cassette or request-interception setups
+   (vcrpy, respx, nock, msw), benchmarks, notebooks and example scripts,
+   and do not add init/track/route/trace to them. If the test suite runs
+   the wrapped production code, set METERGRAPH_DISABLED=1 in the test
+   configuration so a test run can never send telemetry.
 3. METERGRAPH_APP_TOKEN is required; the SDK warns and disables capture when
    it is missing. METERGRAPH_INGEST_URL is only needed when
    self-hosting the server from https://github.com/PioneerSquareLabs/metergraph.
@@ -78,7 +84,8 @@ only when the deployment owner explicitly chooses metadata-only capture.
    do not add defensive try/except around wrapping or the wrapped calls.
 
 When done, list every client and Vercel AI SDK model you instrumented and where,
-and flag any LLM calls made through other paths, since those are not captured.
+flag any LLM calls made through other paths, since those are not captured, and
+confirm the test suite cannot emit telemetry.
 ```
 
 ## Python

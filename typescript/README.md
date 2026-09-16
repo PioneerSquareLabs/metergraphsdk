@@ -223,7 +223,13 @@ Instrument this codebase's LLM API costs with the `metergraph` npm package
 (https://github.com/PioneerSquareLabs/metergraphsdk): npm install metergraph,
 then wrap every new OpenAI(), new Anthropic(), and new GoogleGenAI()
 construction in place, e.g. const client = mg.wrap(new OpenAI()) after
-import * as mg from "metergraph". wrap() returns the same client and
+import * as mg from "metergraph".
+Wrap only production code paths: skip tests, test setup files, fixtures,
+mocks, fakes, stubs, msw/nock setups, stories, benchmarks and example
+scripts, and do not add init/track/route/trace to them. Set
+METERGRAPH_DISABLED=1 in the test configuration (vitest/jest setupFiles or
+.env.test) so a test run never sends telemetry.
+wrap() returns the same client and
 initializes itself from the environment. Before wrapping, call
 mg.init({ repository: "owner/repository" }) using the actual GitHub owner and
 repository name. METERGRAPH_APP_TOKEN is required; the SDK warns and disables
@@ -245,5 +251,6 @@ returning; long-running servers need nothing extra. For Vercel AI SDK calls,
 wrap each language model with wrapLanguageModel({ model, middleware:
 mg.vercelAISDKMiddleware() }); do not also wrap its internal provider transport.
 When done, list every client and AI SDK model you instrumented, and flag LLM
-calls made outside these supported paths.
+calls made outside these supported paths, and confirm the test suite cannot
+emit telemetry.
 ```
