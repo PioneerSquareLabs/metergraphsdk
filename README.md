@@ -1,16 +1,21 @@
 # Metergraph SDKs
 
-Capture SDKs for [Metergraph](https://github.com/PioneerSquareLabs/metergraph), which tracks LLM costs by application function and trace. Wrap your OpenAI, Anthropic, Gemini, or Python Vercel AI Gateway client—or add Metergraph middleware to a TypeScript Vercel AI SDK language model—and every call is attributed to the function that made it, with token counts (input/output, cache reads, aggregate and TTL-specific cache writes, reasoning), latency, and model. SDK rows contain usage counters, never embedded prices or client-computed cost. Metergraph sends scrubbed request and normalized response content to the hosted service by default; applications can opt out globally or around a sensitive route or trace. The SDKs have no runtime dependencies.
+Capture SDKs for [Metergraph](https://github.com/PioneerSquareLabs/metergraph), which tracks LLM costs by application function and trace. Wrap your OpenAI, Anthropic, Gemini, or Python Vercel AI Gateway client, or add Metergraph middleware to a TypeScript Vercel AI SDK language model, and every call is attributed to the function that made it, with token counts (input/output, cache reads, aggregate and TTL-specific cache writes, reasoning), latency, and model. SDK rows contain usage counters, never embedded prices or client-computed cost. By default, Metergraph removes common credential and header fields from the captured request and sends request and normalized response content to the hosted service; applications can opt out globally or around a sensitive route or trace. The SDKs have no runtime dependencies.
 
 We recommend keeping content capture enabled because replayable requests and
 responses are what allow Metergraph to evaluate quality and produce
-optimization recommendations. Content is captured by default; the SDK removes
-common secret-bearing fields, supports application-specific redaction, and
-provides global and per-operation opt-outs. If your privacy requirements do not
-permit hosted content capture, [contact Metergraph](mailto:alex@pioneersquarelabs.com)
-about deploying it privately in your VPC. The
-[open-source server](https://github.com/PioneerSquareLabs/metergraph) is also
-always available for self-hosting.
+optimization recommendations. Content is captured by default. The default key
+name filter applies to the captured request only. It is not a complete PII
+scrubber, and opt-in text scrubbing is
+pattern-based and best effort. It does not cover person names, postal addresses,
+free-form identifiers, @handles, government IDs, card numbers, IP addresses, or
+non-ASCII contact details. The SDK supports application-specific redaction and
+global and per-operation opt-outs. Import `scrub_text()` from
+`metergraph.scrub` when an application needs the same helper locally. If your
+privacy requirements do not permit hosted content capture, [contact
+Metergraph](mailto:alex@pioneersquarelabs.com) about deploying it privately in
+your VPC. The [open-source server](https://github.com/PioneerSquareLabs/metergraph)
+is also always available for self-hosting.
 
 | Package | Registry | Source |
 |---|---|---|
@@ -304,10 +309,18 @@ export METERGRAPH_APP_TOKEN=<token>
 Leave `METERGRAPH_INGEST_URL` unset to use the hosted service, or point it at a
 [self-hosted Metergraph server](https://github.com/PioneerSquareLabs/metergraph).
 Without a token, capture is off and the SDK emits a warning. Hosted capture
-includes scrubbed request and response content by default because that content
-enables quality evaluation and optimization recommendations. Each field is
-capped at 1 MiB by default; set `METERGRAPH_TEXT_MAX_BYTES`, `text_max_bytes`,
-or `textMaxBytes` to accept larger prompts and responses. The SDK supports a
+includes request and response content. The default key-name filter removes
+these fields from the captured request: `api-key`, `api_key`, `apikey`, `authorization`, `client_secret`,
+`cookie`, `headers`, `id_token`, `password`, `proxy-authorization`,
+`refresh_token`, `secret`, `set-cookie`, `token`, and `x-api-key`. Set
+`METERGRAPH_SCRUB_TEXT=1`, `scrub_text=True`, or `scrubText: true` to add
+pattern-based, best-effort scrubbing for secrets, LinkedIn profile URLs, email
+addresses, and phone numbers. It does not cover person names, postal addresses,
+free-form identifiers, @handles, government IDs, card numbers, IP addresses, or
+non-ASCII contact details. Import `scrub_text()` from `metergraph.scrub` or
+`scrubText()` from the TypeScript package for direct use. Each field is capped
+at 1 MiB by default; set `METERGRAPH_TEXT_MAX_BYTES`, `text_max_bytes`, or
+`textMaxBytes` to accept larger prompts and responses. The SDK supports a
 custom redaction hook and explicit content opt-outs for additional privacy
 control. For content-aware analysis inside your own cloud boundary,
 [contact Metergraph](mailto:alex@pioneersquarelabs.com) about a private

@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 from ._context import CaptureContext, snapshot
 from ._gateway import detect_gateway, gateway_evidence, resolve_gateway
 from ._template import scrub, template_hash
+from .scrub import remove_sensitive_keys, scrub_value
 from ._version import SDK_VERSION
 
 
@@ -655,6 +656,7 @@ def _capture_frames(
 @dataclass
 class Options:
     capture_text: bool = True
+    scrub_text: bool = False
     redact: Callable[[str, str], str] | None = None
     app_root: str = os.getcwd()
     repo_root: str | None = None
@@ -730,6 +732,28 @@ class Runtime:
         )
         return clipped + marker, True
 
+    def _scrub_value(
+        self,
+        value: Any,
+        *,
+        enabled: bool,
+        ensure_ascii: bool = True,
+    ) -> tuple[Any, bool]:
+        if not enabled or not self.options.scrub_text:
+            return value, False
+        try:
+            normalized = json.loads(
+                json.dumps(
+                    value,
+                    ensure_ascii=ensure_ascii,
+                    separators=(",", ":"),
+                    default=repr,
+                )
+            )
+            return scrub_value(normalized), False
+        except Exception:
+            return None, True
+
 
 @dataclass
 class CallState:
@@ -769,14 +793,27 @@ class CallState:
             if self.context.capture_text is not None
             else self.runtime.options.capture_text
         )
-        request_clean = scrub(self.request)
-        request_json, request_truncated = self.runtime._text(
-            json.dumps(request_clean, separators=(",", ":"), default=repr),
-            "request",
-            enabled=capture_text,
+        request_clean = remove_sensitive_keys(self.request)
+        request_captured, request_scrub_failed = self.runtime._scrub_value(
+            request_clean, enabled=capture_text
+        )
+        request_json, request_truncated = (
+            ("<redaction-failed>", False)
+            if request_scrub_failed
+            else self.runtime._text(
+                json.dumps(request_captured, separators=(",", ":"), default=repr),
+                "request",
+                enabled=capture_text,
+            )
         )
         full_tool_calls = _tool_events(request_clean, response, stream_chunks)
-        tool_calls = full_tool_calls
+        captured_tool_calls, tools_scrub_failed = self.runtime._scrub_value(
+            full_tool_calls, enabled=capture_text
+        )
+        captured_tool_calls = (
+            captured_tool_calls if isinstance(captured_tool_calls, list) else None
+        )
+        tool_calls = captured_tool_calls if capture_text else full_tool_calls
         tool_truncated = False
         if tool_calls and capture_text:
             encoded_tools, tool_truncated = self.runtime._text(
@@ -812,22 +849,54 @@ class CallState:
             if error or status == "error" or finish_reason == "error"
             else "unset"
         )
-        response_json, response_truncated = self.runtime._text(
-            json.dumps(
-                _response_envelope(
-                    response,
-                    aggregate_text=response_text,
-                    tool_calls=full_tool_calls if capture_text else None,
-                    error=error,
-                    status=effective_status,
+        if capture_text and self.runtime.options.scrub_text:
+            response_envelope = _response_envelope(
+                response,
+                aggregate_text=response_text,
+                tool_calls=(
+                    "<redaction-failed>"
+                    if tools_scrub_failed
+                    else captured_tool_calls
                 ),
+                error=error,
+                status=effective_status,
+            )
+            response_captured, response_scrub_failed = self.runtime._scrub_value(
+                response_envelope,
+                enabled=True,
                 ensure_ascii=False,
-                separators=(",", ":"),
-                default=repr,
-            ),
-            "response",
-            enabled=capture_text,
-        )
+            )
+            response_json, response_truncated = (
+                ("<redaction-failed>", False)
+                if response_scrub_failed
+                else self.runtime._text(
+                    json.dumps(
+                        response_captured,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        default=repr,
+                    ),
+                    "response",
+                    enabled=True,
+                )
+            )
+        else:
+            response_json, response_truncated = self.runtime._text(
+                json.dumps(
+                    _response_envelope(
+                        response,
+                        aggregate_text=response_text,
+                        tool_calls=full_tool_calls if capture_text else None,
+                        error=error,
+                        status=effective_status,
+                    ),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=repr,
+                ),
+                "response",
+                enabled=capture_text,
+            )
         row: dict[str, Any] = {
             "ts": self.ts,
             "route": self.context.route,

@@ -74,6 +74,7 @@ def init(
     token: str | None = None,
     ingest_url: str | None = None,
     capture_text: bool | None = None,
+    scrub_text: bool | None = None,
     redact: Callable[[str, str], str] | None = None,
     app_root: str | None = None,
     repository: str | None = None,
@@ -142,6 +143,11 @@ def init(
                 _env_bool("METERGRAPH_CAPTURE_TEXT", True)
                 if capture_text is None
                 else capture_text
+            ),
+            scrub_text=(
+                _env_bool("METERGRAPH_SCRUB_TEXT", False)
+                if scrub_text is None
+                else scrub_text
             ),
             redact=redact,
             app_root=app_root_resolved,
