@@ -112,6 +112,41 @@ function usage(response: unknown): Record<string, number | undefined> {
   );
 }
 
+function normalizedSearchContextSize(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  return ["low", "medium", "high"].includes(normalized) ? normalized : undefined;
+}
+
+function searchContextSize(
+  response: unknown,
+  request: Record<string, unknown>,
+  responseChunks: unknown[] = [],
+): Record<string, string> {
+  try {
+    const responseUsage = get(response, "usage");
+    let raw = get(responseUsage, "search_context_size");
+    if (raw == null) {
+      for (const chunk of [...responseChunks].reverse()) {
+        const chunkRaw = get(get(chunk, "usage"), "search_context_size");
+        if (chunkRaw != null) {
+          raw = chunkRaw;
+          break;
+        }
+      }
+    }
+    let normalized = normalizedSearchContextSize(raw);
+    if (normalized !== undefined) return { search_context_size: normalized };
+
+    normalized = normalizedSearchContextSize(
+      get(get(request, "web_search_options"), "search_context_size"),
+    );
+    return normalized === undefined ? {} : { search_context_size: normalized };
+  } catch {
+    return {};
+  }
+}
+
 function responseText(response: unknown): string | undefined {
   const direct = get(response, "output_text") ?? get(response, "text");
   if (typeof direct === "string") return direct;
@@ -651,6 +686,7 @@ export class CaptureRuntime {
       provider: state.provider,
       model: state.request.model,
       ...usage(response),
+      ...searchContextSize(response, state.request, extra.responseChunks),
       ...gatewayEvidence(state.gateway, state.endpoint, response),
       latency_ms: Math.round(performance.now() - state.started),
       status,
