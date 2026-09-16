@@ -77,6 +77,7 @@ function captureOpenAIBatchItem(
   sourceId: string,
   context: CaptureContext,
   stack?: string,
+  captureProvider = "openai",
 ): void {
   const response = get(item, "response");
   const error = get(item, "error");
@@ -99,7 +100,7 @@ function captureOpenAIBatchItem(
   const endpoint = get(body, "object") === "response"
     ? "batch.responses"
     : "batch.chat.completions";
-  const state = capture.start("openai", endpoint, request, stack, context);
+  const state = capture.start(captureProvider, endpoint, request, stack, context);
   const statusCode = Number(get(response, "status_code"));
   capture.finish(state, normalized, {
     status: error != null || (Number.isFinite(statusCode) && statusCode >= 400)
@@ -114,6 +115,7 @@ function captureOpenAIBatchContent(
   sourceId: string,
   context: CaptureContext,
   stack?: string,
+  captureProvider = "openai",
 ): void {
   try {
     for (const line of content.split(/\r?\n/)) {
@@ -122,7 +124,7 @@ function captureOpenAIBatchContent(
         const item = JSON.parse(line);
         if (item && typeof item === "object" && "custom_id" in item
           && ("response" in item || "error" in item)) {
-          captureOpenAIBatchItem(capture, item, sourceId, context, stack);
+          captureOpenAIBatchItem(capture, item, sourceId, context, stack, captureProvider);
         }
       } catch { /* a non-batch JSONL line is ignored */ }
     }
@@ -135,6 +137,7 @@ function wrapOpenAIFileResponse(
   sourceId: string,
   context: CaptureContext,
   stack?: string,
+  captureProvider = "openai",
 ): AnyRecord {
   if (!response || typeof response !== "object") return response;
   return new Proxy(response, {
@@ -142,7 +145,7 @@ function wrapOpenAIFileResponse(
       if (property === "text" && typeof target.text === "function") {
         return async () => {
           const text = await target.text();
-          captureOpenAIBatchContent(capture, text, sourceId, context, stack);
+          captureOpenAIBatchContent(capture, text, sourceId, context, stack, captureProvider);
           return text;
         };
       }
@@ -150,7 +153,7 @@ function wrapOpenAIFileResponse(
         return async () => {
           const value = await target.arrayBuffer();
           captureOpenAIBatchContent(
-            capture, new TextDecoder().decode(value), sourceId, context, stack,
+            capture, new TextDecoder().decode(value), sourceId, context, stack, captureProvider,
           );
           return value;
         };
@@ -158,7 +161,7 @@ function wrapOpenAIFileResponse(
       if (property === "blob" && typeof target.blob === "function") {
         return async () => {
           const value = await target.blob();
-          captureOpenAIBatchContent(capture, await value.text(), sourceId, context, stack);
+          captureOpenAIBatchContent(capture, await value.text(), sourceId, context, stack, captureProvider);
           return value;
         };
       }
@@ -217,7 +220,11 @@ function wrapAnthropicBatchResults(
   });
 }
 
-function patchOpenAIBatchContent(owner: AnyRecord | undefined, method: string): boolean {
+function patchOpenAIBatchContent(
+  owner: AnyRecord | undefined,
+  method: string,
+  captureProvider = "openai",
+): boolean {
   if (!owner || typeof owner[method] !== "function") return false;
   if (owner[method].__metergraph_batch__) return true;
   const original = owner[method];
@@ -230,10 +237,10 @@ function patchOpenAIBatchContent(owner: AnyRecord | undefined, method: string): 
     const result = original.apply(owner, args);
     if (result && typeof result.then === "function") {
       return result.then((response: AnyRecord) => (
-        wrapOpenAIFileResponse(response, capture, sourceId, context, stack)
+        wrapOpenAIFileResponse(response, capture, sourceId, context, stack, captureProvider)
       ));
     }
-    return wrapOpenAIFileResponse(result, capture, sourceId, context, stack);
+    return wrapOpenAIFileResponse(result, capture, sourceId, context, stack, captureProvider);
   };
   wrapped.__metergraph_batch__ = true;
   owner[method] = wrapped;
@@ -337,7 +344,7 @@ function streamProxy(
                 // injected stream_options.include_usage; a caller who asked for
                 // it keeps their chunk. Capture reads usage from it either way.
                 usageOnly = suppressUsageOnly
-                  && state.provider === "openai"
+                  && (state.provider === "openai" || state.provider === "perplexity")
                   && state.endpoint === "chat.completions"
                   && Array.isArray((chunk as AnyRecord)?.choices)
                   && (chunk as AnyRecord).choices.length === 0
@@ -448,6 +455,7 @@ function patch(
   provider: string,
   endpoint: string,
   gatewayName?: string,
+  captureProvider?: string,
 ): boolean {
   if (!owner || typeof owner[method] !== "function") return false;
   if (owner[method].__metergraph__) return true;
@@ -487,7 +495,13 @@ function patch(
       args = [{ ...incoming, stream_options: { include_usage: true } }, ...args.slice(1)];
       injectedUsage = true;
     }
-    const state = startCapture(capture, provider, endpoint, requestFrom(args), new Error().stack);
+    const state = startCapture(
+      capture,
+      captureProvider ?? provider,
+      endpoint,
+      requestFrom(args),
+      new Error().stack,
+    );
     if (state && gatewayName) state.gateway = gatewayName;
     if (!state) {
       // start faulted: invoke the provider once, return its result unwrapped.
@@ -594,6 +608,17 @@ function detectProvider(client: AnyRecord): "openai" | "anthropic" | "google" {
   return "anthropic";
 }
 
+function isPerplexityClient(client: AnyRecord): boolean {
+  const baseURL = client.baseURL ?? client.base_url;
+  if (typeof baseURL !== "string" || !baseURL.trim()) return false;
+  try {
+    const url = new URL(baseURL.trim());
+    return url.protocol === "https:" && url.hostname === "api.perplexity.ai";
+  } catch {
+    return false;
+  }
+}
+
 function resolveSeam(client: AnyRecord, path: string): AnyRecord | undefined {
   let obj: any = client;
   for (const part of path.split(".")) {
@@ -603,7 +628,12 @@ function resolveSeam(client: AnyRecord, path: string): AnyRecord | undefined {
   return obj;
 }
 
-function applySeams(client: AnyRecord, provider: string, gatewayName?: string): string[] {
+function applySeams(
+  client: AnyRecord,
+  provider: string,
+  gatewayName?: string,
+  captureProvider?: string,
+): string[] {
   const patched: string[] = [];
   for (const seam of SEAM_TABLES[provider] ?? []) {
     let owner: AnyRecord | undefined;
@@ -612,18 +642,24 @@ function applySeams(client: AnyRecord, provider: string, gatewayName?: string): 
     } catch {
       continue; // a pathological client property must never break wrap()
     }
-    if (owner !== undefined && patch(owner, seam.method, provider, seam.endpoint, gatewayName)) {
+    if (owner !== undefined && patch(
+      owner, seam.method, provider, seam.endpoint, gatewayName, captureProvider,
+    )) {
       patched.push(`${seam.path}.${seam.method}`);
     }
   }
   return patched;
 }
 
-function applyBatchExtras(client: AnyRecord, provider: string): number {
+function applyBatchExtras(
+  client: AnyRecord,
+  provider: string,
+  captureProvider?: string,
+): number {
   let patched = 0;
   if (provider === "openai") {
-    patched += Number(patchOpenAIBatchContent(client.files, "content"));
-    patched += Number(patchOpenAIBatchContent(client.files, "retrieveContent"));
+    patched += Number(patchOpenAIBatchContent(client.files, "content", captureProvider));
+    patched += Number(patchOpenAIBatchContent(client.files, "retrieveContent", captureProvider));
   } else if (provider === "anthropic") {
     patched += Number(patchAnthropicBatchResults(client.messages?.batches));
     patched += Number(patchAnthropicBatchResults(client.beta?.messages?.batches));
@@ -673,8 +709,13 @@ export function wrap<T extends AnyRecord>(client: T, providerOrOptions?: Provide
   try {
     const name = provider ?? detectProvider(client);
     const gatewayName = overrideGateway ?? (name === "openai" ? detectGateway(client) : undefined);
-    const patched = applySeams(client, name, gatewayName);
-    const patchedCount = patched.length + applyBatchExtras(client, name);
+    const captureProvider = provider === undefined
+      && name === "openai"
+      && isPerplexityClient(client)
+      ? "perplexity"
+      : undefined;
+    const patched = applySeams(client, name, gatewayName, captureProvider);
+    const patchedCount = patched.length + applyBatchExtras(client, name, captureProvider);
     const label = gatewayName ? `${gatewayName} gateway via ${name}` : name;
     if (!patchedCount) {
       console.warn(`Metergraph found no supported methods on ${label} client`);

@@ -184,6 +184,42 @@ def _usage(response: Any) -> dict[str, int | None]:
     }
 
 
+def _normalized_search_context_size(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized if normalized in {"low", "medium", "high"} else None
+
+
+def _search_context_size(
+    response: Any,
+    request: Mapping[str, Any],
+    stream_chunks: list[Any] | None = None,
+) -> dict[str, str]:
+    """Extract Perplexity's optional search context size without risking capture."""
+    try:
+        usage = _get(response, "usage")
+        raw = _get(usage, "search_context_size")
+        if raw is None:
+            for chunk in reversed(stream_chunks or []):
+                chunk_usage = _get(chunk, "usage")
+                chunk_raw = _get(chunk_usage, "search_context_size")
+                if chunk_raw is not None:
+                    raw = chunk_raw
+                    break
+        normalized = _normalized_search_context_size(raw)
+        if normalized is not None:
+            return {"search_context_size": normalized}
+
+        options = _get(request, "web_search_options")
+        normalized = _normalized_search_context_size(
+            _get(options, "search_context_size")
+        )
+        return {"search_context_size": normalized} if normalized is not None else {}
+    except Exception:
+        return {}
+
+
 def _response_text(response: Any) -> str | None:
     direct = _get(response, "output_text") or _get(response, "text")
     if isinstance(direct, str):
@@ -834,6 +870,7 @@ class CallState:
             "provider": self.provider,
             "model": self.request.get("model"),
             **_usage(response),
+            **_search_context_size(response, self.request, stream_chunks),
             **_gateway_evidence(self.gateway, self.endpoint, response),
             "latency_ms": round((time.perf_counter() - self.started) * 1000),
             "status": effective_status,
@@ -1176,6 +1213,7 @@ def _capture_openai_batch_item(
     *,
     source_id: str,
     context: CaptureContext,
+    provider: str = "openai",
 ) -> None:
     response = _get(item, "response")
     error = _get(item, "error")
@@ -1199,7 +1237,7 @@ def _capture_openai_batch_item(
     }
     object_type = str(_get(body, "object") or "")
     endpoint = "batch.responses" if object_type == "response" else "batch.chat.completions"
-    call = runtime.call_state("openai", endpoint, request, context=context)
+    call = runtime.call_state(provider, endpoint, request, context=context)
     status_code = _int(_get(response, "status_code"))
     failed = error is not None or (status_code is not None and status_code >= 400)
     call.finish(normalized, status="error" if failed else None)
@@ -1211,6 +1249,7 @@ def _capture_openai_batch_content(
     *,
     source_id: str,
     context: CaptureContext,
+    provider: str = "openai",
 ) -> None:
     try:
         content = result if isinstance(result, (str, bytes, bytearray)) else _get(result, "content")
@@ -1229,7 +1268,7 @@ def _capture_openai_batch_content(
                 "response" in item or "error" in item
             ):
                 _capture_openai_batch_item(
-                    runtime, item, source_id=source_id, context=context
+                    runtime, item, source_id=source_id, context=context, provider=provider
                 )
     except Exception:
         return
@@ -1326,7 +1365,9 @@ def _wrap_anthropic_batch_results(
     return result
 
 
-def _patch_openai_batch_content(owner: Any, method_name: str) -> bool:
+def _patch_openai_batch_content(
+    owner: Any, method_name: str, *, capture_provider: str = "openai"
+) -> bool:
     original = getattr(owner, method_name, None)
     if not callable(original):
         return False
@@ -1346,13 +1387,21 @@ def _patch_openai_batch_content(owner: Any, method_name: str) -> bool:
             async def await_result():
                 resolved = await result
                 _capture_openai_batch_content(
-                    runtime, resolved, source_id=source_id, context=context
+                    runtime,
+                    resolved,
+                    source_id=source_id,
+                    context=context,
+                    provider=capture_provider,
                 )
                 return resolved
 
             return await_result()
         _capture_openai_batch_content(
-            runtime, result, source_id=source_id, context=context
+            runtime,
+            result,
+            source_id=source_id,
+            context=context,
+            provider=capture_provider,
         )
         return result
 
@@ -1410,6 +1459,7 @@ def _patch(
     *,
     gateway: bool = False,
     gateway_name: str | None = None,
+    capture_provider: str | None = None,
 ) -> bool:
     original = getattr(owner, method_name, None)
     if not callable(original):
@@ -1437,9 +1487,13 @@ def _patch(
                     kwargs = {**kwargs, "stream_options": {"include_usage": True}}
         try:
             request = _request(args, kwargs)
-            capture_provider = _gateway_provider(request) if gateway else provider
+            capture_name = (
+                _gateway_provider(request)
+                if gateway
+                else capture_provider or provider
+            )
             call = runtime.call_state(
-                capture_provider, endpoint, request, gateway=gateway_name
+                capture_name, endpoint, request, gateway=gateway_name
             )
         except Exception:
             # Capture-state creation is telemetry-only. If it fails, invoke the
@@ -1563,6 +1617,7 @@ def _resolve(client: Any, path: str) -> Any:
 
 _VERCEL_GATEWAY_HOST = "ai-gateway.vercel.sh"
 _VERCEL_PROVIDER_ALIASES = {"gateway", "vercel", "vercel-ai-gateway"}
+_PERPLEXITY_HOST = "api.perplexity.ai"
 
 
 def _uses_vercel_gateway(client: Any) -> bool:
@@ -1574,6 +1629,20 @@ def _uses_vercel_gateway(client: Any) -> bool:
         return False
     try:
         return urlsplit(str(base_url).strip()).hostname == _VERCEL_GATEWAY_HOST
+    except (TypeError, ValueError):
+        return False
+
+
+def _uses_perplexity(client: Any) -> bool:
+    """Recognize direct Perplexity traffic on an exact HTTPS hostname."""
+    base_url = getattr(client, "base_url", None) or getattr(
+        client, "_base_url", None
+    )
+    if base_url is None:
+        return False
+    try:
+        parts = urlsplit(str(base_url).strip())
+        return parts.scheme == "https" and parts.hostname == _PERPLEXITY_HOST
     except (TypeError, ValueError):
         return False
 
@@ -1591,6 +1660,7 @@ def _apply_seams(
     *,
     gateway: bool = False,
     gateway_name: str | None = None,
+    capture_provider: str | None = None,
 ) -> list[str]:
     patched: list[str] = []
     for seam in SEAM_TABLES.get(provider, ()):
@@ -1605,18 +1675,25 @@ def _apply_seams(
             seam.endpoint,
             gateway=gateway,
             gateway_name=gateway_name,
+            capture_provider=capture_provider,
         ):
             patched.append(f"{seam.path}.{seam.method}")
     return patched
 
 
-def _apply_batch_extras(client: Any, provider: str) -> int:
+def _apply_batch_extras(
+    client: Any, provider: str, *, capture_provider: str | None = None
+) -> int:
     patched = 0
     if provider == "openai":
         files = getattr(client, "files", None)
         if files is not None:
-            patched += int(_patch_openai_batch_content(files, "content"))
-            patched += int(_patch_openai_batch_content(files, "retrieve_content"))
+            patched += int(_patch_openai_batch_content(
+                files, "content", capture_provider=capture_provider or provider
+            ))
+            patched += int(_patch_openai_batch_content(
+                files, "retrieve_content", capture_provider=capture_provider or provider
+            ))
     elif provider == "anthropic":
         messages = getattr(client, "messages", None)
         batch_owners = [getattr(messages, "batches", None)]
@@ -1657,22 +1734,41 @@ def wrap(
                 if isinstance(provider, str)
                 else _uses_vercel_gateway(client)
             )
+            detected_provider = _detect_provider(client)
             resolved_provider = (
-                _detect_provider(client)
+                detected_provider
                 if vercel
-                else provider or _detect_provider(client)
+                else provider or detected_provider
             )
             gateway_name = (
                 detect_gateway(client)
                 if not vercel and resolved_provider == "openai"
                 else None
             )
+        capture_provider = (
+            "perplexity"
+            if (
+                override_gateway is None
+                and not vercel
+                and provider is None
+                and resolved_provider == "openai"
+                and _uses_perplexity(client)
+            )
+            else None
+        )
+        seam_provider = "openai" if capture_provider == "perplexity" else resolved_provider
         patched = _apply_seams(
-            client, resolved_provider, gateway=vercel, gateway_name=gateway_name
+            client,
+            seam_provider,
+            gateway=vercel,
+            gateway_name=gateway_name,
+            capture_provider=capture_provider,
         )
         patched_count = len(patched)
         if not vercel:
-            patched_count += _apply_batch_extras(client, resolved_provider)
+            patched_count += _apply_batch_extras(
+                client, seam_provider, capture_provider=capture_provider
+            )
         if vercel:
             client_label = f"Vercel AI Gateway via {resolved_provider}"
         elif gateway_name is not None:
