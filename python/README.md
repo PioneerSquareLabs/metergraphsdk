@@ -126,6 +126,7 @@ Configuration:
 - `METERGRAPH_INGEST_URL` — optional override; defaults to the hosted HTTPS endpoint
 - `METERGRAPH_REPOSITORY` — optional `owner/repository` identity; used by [MeterGraph Bot](https://github.com/apps/metergraph)
 - `METERGRAPH_CAPTURE_TEXT=0` — opt out of content capture globally
+- `METERGRAPH_SCRUB_TEXT=1`: add pattern-based, best-effort scrubbing for secrets, LinkedIn profile URLs, email addresses, and phone numbers
 - `METERGRAPH_TEXT_MAX_BYTES` — per-field content limit; defaults to 1 MiB
 - `METERGRAPH_DISABLED=1` — process kill switch
 - `METERGRAPH_QUEUE_SIZE`, `METERGRAPH_BATCH_SIZE`, `METERGRAPH_FLUSH_SECONDS`
@@ -149,12 +150,21 @@ identity, it warns once and continues capture without repository attribution.
 Delivery is bounded and off the request path. Queue overflow or a collector
 outage drops capture and increments internal counters; it never changes the
 provider call. Each wire batch is bounded to 4 MiB after optional gzip.
-By default, Metergraph captures the scrubbed provider request and a normalized
-response envelope, including assistant content and tool calls. Provider
-credentials and transport headers are removed. Request and response are each
-limited to 1 MiB of UTF-8 by default with an explicit truncation marker. Set
-`METERGRAPH_TEXT_MAX_BYTES` or initialize with `text_max_bytes=...` to raise
-the per-field limit for larger prompts and responses.
+By default, Metergraph removes these sensitive key names from the captured
+request only: `api-key`, `api_key`,
+`apikey`, `authorization`, `client_secret`, `cookie`, `headers`, `id_token`,
+`password`, `proxy-authorization`, `refresh_token`, `secret`, `set-cookie`,
+`token`, and `x-api-key`. It then captures a normalized response envelope,
+including assistant content and tool calls. Set
+`METERGRAPH_SCRUB_TEXT=1` or initialize with `scrub_text=True` to add
+pattern-based, best-effort scrubbing for secrets, LinkedIn profile URLs, email
+addresses, and phone numbers. It does not cover person names, postal addresses,
+free-form identifiers, @handles, government IDs, card numbers, IP addresses, or
+non-ASCII contact details. The importable `metergraph.scrub.scrub_text()` helper
+uses the same rules. Request and response are each limited to 1 MiB of UTF-8 by
+default with an explicit truncation marker. Set `METERGRAPH_TEXT_MAX_BYTES` or
+initialize with `text_max_bytes=...` to raise the per-field limit for larger
+prompts and responses.
 `capture_text=False` on `route()` or `trace()` overrides the global content
 policy for a sensitive operation. The equivalent initialization option is
 `metergraph.init(capture_text=False)`. The public open-source server continues

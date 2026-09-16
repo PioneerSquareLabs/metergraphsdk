@@ -1,32 +1,7 @@
-const sensitive = new Set([
-  "api-key",
-  "api_key",
-  "apikey",
-  "authorization",
-  "client_secret",
-  "cookie",
-  "headers",
-  "id_token",
-  "password",
-  "proxy-authorization",
-  "refresh_token",
-  "secret",
-  "set-cookie",
-  "token",
-  "x-api-key",
-]);
+import { removeSensitiveKeys } from "./scrub.js";
 
-export function scrub(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(scrub);
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .filter(([key]) => !sensitive.has(key.trim().toLowerCase()))
-        .map(([key, item]) => [key, scrub(item)]),
-    );
-  }
-  return value;
-}
+export { removeSensitiveKeys } from "./scrub.js";
+export const scrub = removeSensitiveKeys;
 
 function normalized(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(normalized);
@@ -58,5 +33,5 @@ function fnv1a(value: string): string {
 }
 
 export function templateHash(request: Record<string, unknown>): string {
-  return fnv1a(JSON.stringify(normalized(scrub(request))));
+  return fnv1a(JSON.stringify(normalized(removeSensitiveKeys(request))));
 }

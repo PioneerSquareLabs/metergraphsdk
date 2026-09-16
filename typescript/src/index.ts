@@ -45,6 +45,7 @@ export interface MetergraphOptions {
   token?: string;
   ingestUrl?: string;
   captureText?: boolean;
+  scrubText?: boolean;
   redact?: (text: string, kind: "request" | "response") => string;
   appRoot?: string;
   repository?: string;
@@ -163,6 +164,7 @@ export function init(options: MetergraphOptions = {}): void {
     });
     setCaptureRuntime(new CaptureRuntime(transport, {
       captureText: options.captureText ?? envBool("METERGRAPH_CAPTURE_TEXT", true),
+      scrubText: options.scrubText ?? envBool("METERGRAPH_SCRUB_TEXT", false),
       redact: options.redact,
       appRoot,
       repoRoot: repoConfig?.repoRoot,
@@ -330,6 +332,13 @@ export type {
   VercelAISDKSpecificationVersion,
   WrapOptions,
 };
+
+export {
+  DEFAULT_SCRUB_CATEGORIES,
+  scrubText,
+  scrubValue,
+} from "./scrub.js";
+export type { ScrubCategory } from "./scrub.js";
 
 /**
  * Explicit, opt-in batch-first execution over a provider's Batch API —

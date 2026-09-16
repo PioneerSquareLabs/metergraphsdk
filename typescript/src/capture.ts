@@ -2,7 +2,8 @@ import { randomBytes } from "node:crypto";
 
 import { contextSnapshot, type CaptureContext } from "./context.js";
 import { gatewayEvidence } from "./gateway.js";
-import { scrub, templateHash } from "./template.js";
+import { removeSensitiveKeys, scrub, templateHash } from "./template.js";
+import { scrubValue } from "./scrub.js";
 import type { Transport } from "./transport.js";
 import { SDK_VERSION } from "./version.js";
 
@@ -10,6 +11,7 @@ export const DEFAULT_TEXT_MAX_BYTES = 1024 * 1024;
 
 export interface RuntimeOptions {
   captureText: boolean;
+  scrubText: boolean;
   redact?: (text: string, kind: "request" | "response") => string;
   appRoot: string;
   repoRoot?: string;
@@ -467,7 +469,7 @@ function responseContent(response: unknown, aggregate?: string): unknown {
 function responseEnvelope(
   response: unknown,
   aggregate: string | undefined,
-  tools: ToolEvent[] | undefined,
+  tools: ToolEvent[] | string | undefined,
   error: unknown,
   status: string,
 ): Record<string, unknown> {
@@ -570,6 +572,17 @@ export class CaptureRuntime {
     if (state.done) return;
     state.done = true;
     const captureText = state.context.captureText ?? this.options.captureText;
+    const scrubStructure = (value: unknown): { value: unknown; failed: boolean } => {
+      if (!captureText || !this.options.scrubText) return { value, failed: false };
+      try {
+        const serialized = JSON.stringify(value);
+        if (serialized === undefined) return { value: undefined, failed: false };
+        return { value: scrubValue(JSON.parse(serialized)), failed: false };
+      } catch {
+        return { value: undefined, failed: true };
+      }
+    };
+    const failedText = { value: "<redaction-failed>", truncated: false };
     const text = (value: string | undefined, kind: "request" | "response") => {
       if (!captureText || value == null) return { value: undefined, truncated: false };
       try {
@@ -593,12 +606,17 @@ export class CaptureRuntime {
       }
       return { value: `${clipped}${marker}`, truncated: true };
     };
-    const request = text(JSON.stringify(scrub(state.request)), "request");
+    const requestStructure = scrubStructure(removeSensitiveKeys(state.request));
+    const request = requestStructure.failed
+      ? failedText
+      : text(JSON.stringify(requestStructure.value), "request");
     const fullTools = toolEvents(
-      scrub(state.request) as Record<string, unknown>,
+      removeSensitiveKeys(state.request) as Record<string, unknown>,
       response,
       extra.responseChunks,
     );
+    const toolsStructure = scrubStructure(fullTools);
+    const capturedTools = toolsStructure.value as ToolEvent[] | undefined;
     const status = extra.status ?? (
       extra.error ? "error" : stopReason(response) ?? "success"
     );
@@ -606,22 +624,36 @@ export class CaptureRuntime {
     const statusCode = extra.error || extra.status === "error" || finishReason === "error"
       ? "error"
       : "unset";
-    const output = text(
-      JSON.stringify(
-        responseEnvelope(
-          response,
-          extra.responseText,
-          fullTools,
-          extra.error,
-          status,
+    let output;
+    if (captureText && this.options.scrubText) {
+      const responseStructure = scrubStructure(responseEnvelope(
+        response,
+        extra.responseText,
+        toolsStructure.failed ? "<redaction-failed>" : capturedTools as ToolEvent[] | undefined,
+        extra.error,
+        status,
+      ));
+      output = responseStructure.failed
+        ? failedText
+        : text(JSON.stringify(responseStructure.value), "response");
+    } else {
+      output = text(
+        JSON.stringify(
+          responseEnvelope(
+            response,
+            extra.responseText,
+            fullTools,
+            extra.error,
+            status,
+          ),
         ),
-      ),
-      "response",
-    );
+        "response",
+      );
+    }
     let toolTruncated = false;
     let persistedTools: ToolEvent[] | undefined;
-    if (fullTools && captureText) {
-      const encodedTools = text(JSON.stringify(fullTools), "response");
+    if (fullTools && captureText && !toolsStructure.failed) {
+      const encodedTools = text(JSON.stringify(capturedTools), "response");
       toolTruncated = encodedTools.truncated;
       try {
         persistedTools = encodedTools.value
@@ -633,7 +665,7 @@ export class CaptureRuntime {
         // text_truncated flag tells ingestion why this field is unavailable.
         persistedTools = undefined;
       }
-    } else if (fullTools) {
+    } else if (fullTools && !captureText) {
       persistedTools = fullTools.map((item) => ({
         call_id: item.call_id,
         name: item.name,

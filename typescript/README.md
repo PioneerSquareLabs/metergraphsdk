@@ -141,12 +141,20 @@ one of these options; each is sufficient on its own:
 Resolution order is the explicit option, environment variable, then
 configuration file. The SDK treats the file as read-only. Without repository
 identity, it warns once and continues capture without repository attribution.
-Metergraph captures the scrubbed provider request and a
-normalized response envelope, including assistant content and tool calls, by
-default. Provider credentials and transport headers are removed. Request and
-response are each limited to 1 MiB of UTF-8 by default with an explicit
-truncation marker. Set `METERGRAPH_TEXT_MAX_BYTES` or initialize with
-`textMaxBytes` to raise the per-field limit. Set `METERGRAPH_CAPTURE_TEXT=0`,
+Metergraph removes these sensitive key names from the captured request only:
+`api-key`, `api_key`, `apikey`,
+`authorization`, `client_secret`, `cookie`, `headers`, `id_token`, `password`,
+`proxy-authorization`, `refresh_token`, `secret`, `set-cookie`, `token`, and
+`x-api-key`. It then captures a normalized response envelope, including
+assistant content and tool calls. Set
+`METERGRAPH_SCRUB_TEXT=1` or initialize with `scrubText: true` to add
+pattern-based, best-effort scrubbing for secrets, LinkedIn profile URLs, email
+addresses, and phone numbers. It does not cover person names, postal addresses,
+free-form identifiers, @handles, government IDs, card numbers, IP addresses, or
+non-ASCII contact details. Import `scrubText()` from the package when an
+application needs the same helper directly. Request and response are each
+limited to 1 MiB of UTF-8 by default with an explicit truncation marker. Set
+`METERGRAPH_TEXT_MAX_BYTES` or initialize with `textMaxBytes` to raise the per-field limit. Set `METERGRAPH_CAPTURE_TEXT=0`,
 initialize with `captureText: false`, or set `captureText: false` on an
 individual `route()` or `trace()` to opt out for sensitive operations. The
 public open-source server still discards content; hosted workspaces retain it

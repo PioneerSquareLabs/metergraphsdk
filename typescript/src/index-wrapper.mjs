@@ -2,6 +2,7 @@ import metergraph from "./index.js";
 
 const {
   BatchFirstIneligibleError,
+  DEFAULT_SCRUB_CATEGORIES,
   DEFAULT_INGEST_URL,
   batchFirst,
   bindWaitUntil,
@@ -23,10 +24,13 @@ const {
   wrap,
   wrapClient,
   wrapHandler,
+  scrubText,
+  scrubValue,
 } = metergraph;
 
 export {
   BatchFirstIneligibleError,
+  DEFAULT_SCRUB_CATEGORIES,
   DEFAULT_INGEST_URL,
   batchFirst,
   bindWaitUntil,
@@ -48,4 +52,6 @@ export {
   wrap,
   wrapClient,
   wrapHandler,
+  scrubText,
+  scrubValue,
 };
