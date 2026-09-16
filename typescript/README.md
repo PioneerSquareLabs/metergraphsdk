@@ -227,8 +227,11 @@ import * as mg from "metergraph".
 Wrap only production code paths: skip tests, test setup files, fixtures,
 mocks, fakes, stubs, msw/nock setups, stories, benchmarks and example
 scripts, and do not add init/track/route/trace to them. Set
-METERGRAPH_DISABLED=1 in the test configuration (vitest/jest setupFiles or
-.env.test) so a test run never sends telemetry.
+METERGRAPH_DISABLED=1 in the test configuration so a test run never sends
+telemetry: set process.env.METERGRAPH_DISABLED = "1" in a vitest/jest
+setupFiles file, use the vitest test.env option, or set it in the test
+command. A .env.test file only counts if the test setup explicitly loads it
+into process.env.
 wrap() returns the same client and
 initializes itself from the environment. Before wrapping, call
 mg.init({ repository: "owner/repository" }) using the actual GitHub owner and
