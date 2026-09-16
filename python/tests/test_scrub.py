@@ -139,6 +139,39 @@ def test_capture_is_unchanged_by_default_and_empty_when_content_is_off() -> None
     assert metadata_only["tool_calls"][0].keys() == {"call_id", "name", "status", "idempotency"}
 
 
+def _plain_response_row(*, scrub_enabled: bool) -> dict:
+    rows = Rows()
+    runtime = Runtime(
+        rows,
+        Options(app_root="", capture_text=True, scrub_text=scrub_enabled),
+    )
+    call = runtime.call_state(
+        "openai",
+        "responses",
+        {"model": "test-model", "messages": [{"role": "user", "content": "hello"}]},
+    )
+    call.finish(
+        SimpleNamespace(
+            id="response-plain",
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="hello"),
+                    finish_reason="stop",
+                )
+            ],
+        )
+    )
+    return rows.rows[0]
+
+
+def test_scrubbing_plain_responses_preserves_an_empty_tool_call_envelope() -> None:
+    scrubbed = _plain_response_row(scrub_enabled=True)
+    unchanged = _plain_response_row(scrub_enabled=False)
+    assert json.loads(scrubbed["response_text"])["tool_calls"] == []
+    assert json.loads(unchanged["response_text"])["tool_calls"] == []
+    assert scrubbed["tool_calls"] == unchanged["tool_calls"]
+
+
 def test_default_response_keeps_tool_argument_keys() -> None:
     rows = Rows()
     runtime = Runtime(rows, Options(app_root="", capture_text=True, scrub_text=False))

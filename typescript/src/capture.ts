@@ -575,7 +575,9 @@ export class CaptureRuntime {
     const scrubStructure = (value: unknown): { value: unknown; failed: boolean } => {
       if (!captureText || !this.options.scrubText) return { value, failed: false };
       try {
-        return { value: scrubValue(JSON.parse(JSON.stringify(value))), failed: false };
+        const serialized = JSON.stringify(value);
+        if (serialized === undefined) return { value: undefined, failed: false };
+        return { value: scrubValue(JSON.parse(serialized)), failed: false };
       } catch {
         return { value: undefined, failed: true };
       }

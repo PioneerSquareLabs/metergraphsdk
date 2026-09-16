@@ -28,8 +28,12 @@ export type ScrubCategory = (typeof DEFAULT_SCRUB_CATEGORIES)[number];
 const categorySet = new Set<string>(DEFAULT_SCRUB_CATEGORIES);
 const PEM_PRIVATE_KEY = /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g;
 const SCHEME_CREDENTIAL = /\b(bearer|basic)([ \t\r\n\f\v]+)([A-Za-z0-9._~+/=-]{8,})/gi;
+const AUTHORIZATION_SCHEME = new RegExp(
+  String.raw`(?<![A-Za-z0-9_])(authorization|proxy-authorization)(["']?[ \t\r\n\f\v]*[:=][ \t\r\n\f\v]*["']?)(bearer|basic|token|digest)([ \t\r\n\f\v]+)([^ \t\r\n\f\v"',;<>]+)`,
+  "gi",
+);
 const KEY_VALUE_CREDENTIAL = new RegExp(
-  String.raw`(?<![A-Za-z0-9_])(?:api[_-]?key|access[_-]?key|secret[_-]?key|client[_-]?secret|private[_-]?key|password|passwd|token|secret|authorization)(?![A-Za-z0-9_])(["']?[ \t\r\n\f\v]*[:=][ \t\r\n\f\v]*["']?)([^ \t\r\n\f\v"',;<>]{6,})`,
+  String.raw`(?<![A-Za-z0-9_])(?:api[_-]?key|access[_-]?key|secret[_-]?key|client[_-]?secret|private[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|session[_-]?token|bearer[_-]?token|password|passwd|token|secret|authorization|proxy-authorization)(?![A-Za-z0-9_])(["']?[ \t\r\n\f\v]*[:=][ \t\r\n\f\v]*["']?)([^ \t\r\n\f\v"',;<>]{6,})`,
   "gi",
 );
 const PROVIDER_TOKEN = /(?<![A-Za-z0-9])(?:sk-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})/g;
@@ -70,6 +74,11 @@ export function scrubText(text: string, categories: Iterable<string> = DEFAULT_S
     if (category === "secret") {
       result = result.replace(PEM_PRIVATE_KEY, "<secret>");
       result = result.replace(
+        AUTHORIZATION_SCHEME,
+        (_match: string, key: string, prefix: string, scheme: string, whitespace: string) =>
+          `${key}${prefix}${scheme}${whitespace}<secret>`,
+      );
+      result = result.replace(
         SCHEME_CREDENTIAL,
         (match: string, scheme: string, whitespace: string, candidate: string) => {
           const suspicious = /[0-9._~+/=-]/.test(candidate)
@@ -78,8 +87,8 @@ export function scrubText(text: string, categories: Iterable<string> = DEFAULT_S
         },
       );
       result = result.replace(KEY_VALUE_CREDENTIAL, (match: string, _prefix: string, value: string, offset: number, source: string) => {
-        if (["bearer", "basic"].includes(value.toLowerCase())
-          && source.slice(offset + match.length).startsWith(" <secret>")) {
+        if (["bearer", "basic", "token", "digest"].includes(value.toLowerCase())
+          && /^[ \t\r\n\f\v]+<secret>/.test(source.slice(offset + match.length))) {
           return match;
         }
         return `${match.slice(0, match.length - value.length)}<secret>`;

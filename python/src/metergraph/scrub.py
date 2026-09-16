@@ -37,10 +37,20 @@ _SCHEME_CREDENTIAL = re.compile(
     r"\b(bearer|basic)([ \t\r\n\f\v]+)([A-Za-z0-9._~+/=-]{8,})",
     re.IGNORECASE | re.ASCII,
 )
+_AUTHORIZATION_SCHEME = re.compile(
+    r"(?<![A-Za-z0-9_])"
+    r"(authorization|proxy-authorization)"
+    r"([\"']?[ \t\r\n\f\v]*[:=][ \t\r\n\f\v]*[\"']?)"
+    r"(bearer|basic|token|digest)([ \t\r\n\f\v]+)"
+    r"([^ \t\r\n\f\v\"',;<>]+)",
+    re.IGNORECASE | re.ASCII,
+)
 _KEY_VALUE_CREDENTIAL = re.compile(
     r"(?<![A-Za-z0-9_])"
     r"(?:api[_-]?key|access[_-]?key|secret[_-]?key|client[_-]?secret|"
-    r"private[_-]?key|password|passwd|token|secret|authorization)"
+    r"private[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|"
+    r"auth[_-]?token|session[_-]?token|bearer[_-]?token|password|passwd|"
+    r"token|secret|authorization|proxy-authorization)"
     r"(?![A-Za-z0-9_])"
     r"([\"']?[ \t\r\n\f\v]*[:=][ \t\r\n\f\v]*[\"']?)"
     r"([^ \t\r\n\f\v\"',;<>]{6,})",
@@ -111,6 +121,14 @@ def _validated_categories(categories: Iterable[str]) -> tuple[str, ...]:
 def _scrub_secret(text: str) -> str:
     text = _PEM_PRIVATE_KEY.sub("<secret>", text)
 
+    text = _AUTHORIZATION_SCHEME.sub(
+        lambda match: (
+            f"{match.group(1)}{match.group(2)}{match.group(3)}"
+            f"{match.group(4)}<secret>"
+        ),
+        text,
+    )
+
     def replace_scheme(match: re.Match[str]) -> str:
         candidate = match.group(3)
         suspicious = (
@@ -128,8 +146,8 @@ def _scrub_secret(text: str) -> str:
 
     def replace_key_value(match: re.Match[str]) -> str:
         value = match.group(2)
-        if value.lower() in {"bearer", "basic"} and match.string[match.end() :].startswith(
-            " <secret>"
+        if value.lower() in {"bearer", "basic", "token", "digest"} and re.match(
+            r"[ \t\r\n\f\v]+<secret>", match.string[match.end() :]
         ):
             return match.group(0)
         return f"{match.group(0)[:-len(value)]}<secret>"

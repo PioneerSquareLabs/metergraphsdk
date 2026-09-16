@@ -113,6 +113,28 @@ test("capture remains unchanged by default and emits no text when disabled", () 
   assert.deepEqual(Object.keys(metadataOnly.tool_calls[0]).sort(), ["call_id", "idempotency", "name", "status"]);
 });
 
+function plainResponseRow(scrubEnabled) {
+  const rows = [];
+  const capture = runtime(rows, { scrubText: scrubEnabled });
+  const state = capture.start("openai", "responses", {
+    model: "test-model",
+    messages: [{ role: "user", content: "hello" }],
+  });
+  capture.finish(state, {
+    id: "response-plain",
+    choices: [{ message: { content: "hello" }, finish_reason: "stop" }],
+  });
+  return rows[0];
+}
+
+test("scrubbing plain responses preserves an empty tool call envelope", () => {
+  const scrubbed = plainResponseRow(true);
+  const unchanged = plainResponseRow(false);
+  assert.deepEqual(JSON.parse(scrubbed.response_text).tool_calls, []);
+  assert.deepEqual(JSON.parse(unchanged.response_text).tool_calls, []);
+  assert.deepEqual(scrubbed.tool_calls, unchanged.tool_calls);
+});
+
 test("default response keeps tool argument keys", () => {
   const rows = [];
   const capture = runtime(rows, { scrubText: false });
