@@ -112,9 +112,19 @@ function usage(response: unknown): Record<string, number | undefined> {
   );
 }
 
+// Only a string is the reply text. On an OpenAI Responses body `text` is the
+// request's text *config*, and `output_text` is empty or absent when the reply
+// is only a function call: that reply is in `output`.
+function directText(response: unknown): string | undefined {
+  const outputText = get(response, "output_text");
+  if (typeof outputText === "string" && outputText) return outputText;
+  const text = get(response, "text");
+  return typeof text === "string" ? text : undefined;
+}
+
 function responseText(response: unknown): string | undefined {
-  const direct = get(response, "output_text") ?? get(response, "text");
-  if (typeof direct === "string") return direct;
+  const direct = directText(response);
+  if (direct !== undefined) return direct;
   const message = get(first(get(response, "choices")), "message");
   const content = get(message, "content");
   if (typeof content === "string") return content;
@@ -447,8 +457,8 @@ function toolEvents(
 
 function responseContent(response: unknown, aggregate?: string): unknown {
   if (aggregate !== undefined) return aggregate;
-  const direct = get(response, "output_text") ?? get(response, "text");
-  if (direct !== undefined) return scrub(direct);
+  const direct = directText(response);
+  if (direct !== undefined) return direct;
   const message = get(first(get(response, "choices")), "message");
   const content = get(message, "content");
   if (content !== undefined) return scrub(content);

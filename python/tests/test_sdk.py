@@ -1576,3 +1576,80 @@ def test_writer_server_error_retries_and_is_not_fatal(caplog):
     assert len(attempts) == 1
     assert writer._fatal is False
     assert any("HTTP 500" in r.getMessage() for r in caplog.records)
+
+
+class _Dumpable:
+    """A provider SDK model: model_dump is how it becomes JSON."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def model_dump(self, **_kwargs):
+        return self.value
+
+
+def test_responses_function_call_only_records_the_output_not_the_text_config(tmp_path):
+    """A Responses reply that is only a function call has an empty output_text,
+    and its `text` attribute is the request's text *config*. Recording that
+    config as the answer made the call unusable for analysis."""
+    rows = Rows()
+    runtime = Runtime(rows, Options(app_root=str(tmp_path), capture_text=True))
+    call = _Dumpable({
+        "type": "function_call", "id": "fc_1", "call_id": "call_1",
+        "name": "get_weather", "arguments": "{\"city\":\"SF\"}", "status": "completed",
+    })
+    state = runtime.call_state("openai", "responses.create", {"model": "gpt-test"})
+    state.finish(SimpleNamespace(
+        id="resp_1",
+        status="completed",
+        output_text="",
+        text=_Dumpable({"format": {"type": "text"}, "verbosity": "medium"}),
+        output=[call],
+    ))
+
+    content = captured_response(rows.rows[0])["content"]
+    assert content == [call.value]
+
+
+def test_responses_text_reply_still_records_output_text(tmp_path):
+    rows = Rows()
+    runtime = Runtime(rows, Options(app_root=str(tmp_path), capture_text=True))
+    state = runtime.call_state("openai", "responses.create", {"model": "gpt-test"})
+    state.finish(SimpleNamespace(
+        id="resp_1", status="completed", output_text="hello",
+        text=_Dumpable({"format": {"type": "text"}}), output=[],
+    ))
+
+    assert captured_response(rows.rows[0])["content"] == "hello"
+
+
+def test_scrub_degrades_one_value_not_the_whole_object():
+    """When a model cannot dump itself to JSON, only the value JSON cannot
+    hold may fall back to text. The structure around it is what analysis
+    reads, so it has to survive."""
+    from metergraph._template import scrub
+
+    class Opaque:
+        def __repr__(self):
+            return "Opaque()"
+
+    class Message:
+        def model_dump(self, *, mode="python", exclude_none=False):
+            if mode == "json":
+                raise ValueError("cannot serialize Opaque")
+            return {"role": "assistant", "content": "hi", "extra": Opaque()}
+
+    assert scrub(Message()) == {"role": "assistant", "content": "hi", "extra": "Opaque()"}
+
+
+def test_scrub_serializes_dataclasses_as_fields():
+    from dataclasses import dataclass
+
+    from metergraph._template import scrub
+
+    @dataclass
+    class Part:
+        text: str
+        api_key: str = "sk-secret"
+
+    assert scrub([Part("hi")]) == [{"text": "hi"}]

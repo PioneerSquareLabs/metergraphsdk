@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import re
@@ -48,7 +49,20 @@ def scrub(value: Any) -> Any:
         try:
             return scrub(model_dump(mode="json", exclude_none=True))
         except Exception:
+            pass
+        # A value JSON mode cannot hold must not cost the structure around it,
+        # which is what analysis reads: dump the Python form and let each leaf
+        # fall back on its own.
+        try:
+            return scrub(model_dump(exclude_none=True))
+        except Exception:
             return repr(value)
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return scrub({
+            field.name: getattr(value, field.name)
+            for field in dataclasses.fields(value)
+            if getattr(value, field.name) is not None
+        })
     if isinstance(value, Mapping):
         return {
             str(k): scrub(v)

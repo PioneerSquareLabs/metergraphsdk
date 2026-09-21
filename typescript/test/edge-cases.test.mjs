@@ -428,3 +428,53 @@ test("provider wrapper sets TTFT for a tool-only stream and captures iterator er
   assert.deepEqual(rows[1].tool_names, ["lookup"]);
   assert.deepEqual(rows[1].tool_calls[0].arguments, { id: "1" });
 });
+
+
+test("a Responses reply that is only a function call records its output, not the text config", async (t) => {
+  // Without openai-node's output_text convenience, a raw Responses body's
+  // `text` is the request's text *config*. Recording it as the answer made the
+  // call unusable for analysis.
+  const rows = [];
+  setCaptureRuntime(stubRuntime(rows));
+  t.after(() => setCaptureRuntime());
+
+  const call = {
+    type: "function_call", id: "fc_1", call_id: "call_1",
+    name: "get_weather", arguments: "{\"city\":\"SF\"}", status: "completed",
+  };
+  const client = wrap({
+    responses: {
+      async create() {
+        return {
+          id: "resp_1", status: "completed", model: "gpt-5",
+          text: { format: { type: "text" }, verbosity: "medium" },
+          output: [call],
+        };
+      },
+    },
+  }, { provider: "openai" });
+  await client.responses.create({ model: "gpt-5", input: "weather in SF?" });
+
+  assert.deepEqual(capturedResponse(rows[0]).content, [call]);
+});
+
+
+test("a Responses text reply still records output_text", async (t) => {
+  const rows = [];
+  setCaptureRuntime(stubRuntime(rows));
+  t.after(() => setCaptureRuntime());
+
+  const client = wrap({
+    responses: {
+      async create() {
+        return {
+          id: "resp_1", status: "completed", model: "gpt-5", output_text: "hello",
+          text: { format: { type: "text" } }, output: [],
+        };
+      },
+    },
+  }, { provider: "openai" });
+  await client.responses.create({ model: "gpt-5", input: "hi" });
+
+  assert.equal(capturedResponse(rows[0]).content, "hello");
+});

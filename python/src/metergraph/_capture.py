@@ -330,9 +330,14 @@ def _request_id(response: Any) -> str | None:
 def _response_content(response: Any, aggregate_text: str | None = None) -> Any:
     if aggregate_text is not None:
         return aggregate_text
-    direct = _get(response, "output_text") or _get(response, "text")
-    if direct is not None:
-        return scrub(direct)
+    # Only a string is the reply text. On an OpenAI Responses object `text` is
+    # the request's text *config*, and `output_text` is empty when the reply is
+    # only a function call: that reply is in `output`, read below.
+    direct = _get(response, "output_text")
+    if not isinstance(direct, str) or not direct:
+        direct = _get(response, "text")
+    if isinstance(direct, str):
+        return direct
     choice = _first(_get(response, "choices"))
     message = _get(choice, "message")
     content = _get(message, "content")
