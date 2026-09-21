@@ -17,8 +17,8 @@ const sensitive = new Set([
 ]);
 
 // Header and query containers carry transport credentials and nothing analysis
-// reads, so they are dropped whole. Compared lower-cased, so camelCase client
-// options match too.
+// reads, so they are dropped whole. Keys compare lower-cased, so camelCase
+// client options match.
 const transportContainers = new Set([
   "default_headers",
   "default_query",
@@ -103,8 +103,8 @@ function fnv1a(value: string): string {
   return hash.toString(16).padStart(16, "0");
 }
 
-// Credential names are left out at every depth, as they always were: this hash
-// routes unnamed workloads, so it must not move for existing traffic.
+// Credential names are left out at every depth. This hash routes unnamed
+// workloads, so its input must stay stable across SDK versions.
 export function templateHash(request: Record<string, unknown>): string {
   return fnv1a(JSON.stringify(normalized(withoutCredentialNames(request))));
 }

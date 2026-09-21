@@ -431,9 +431,8 @@ test("provider wrapper sets TTFT for a tool-only stream and captures iterator er
 
 
 test("a Responses reply that is only a function call records its output, not the text config", async (t) => {
-  // Without openai-node's output_text convenience, a raw Responses body's
-  // `text` is the request's text *config*. Recording it as the answer made the
-  // call unusable for analysis.
+  // A raw Responses body has no output_text, and its `text` is the text
+  // *config*; the reply is its `output`.
   const rows = [];
   setCaptureRuntime(stubRuntime(rows));
   t.after(() => setCaptureRuntime());
@@ -494,8 +493,8 @@ const toolWithSensitiveNames = {
 
 
 test("request capture strips credentials only where they travel", async (t) => {
-  // A tool parameter or schema property that shares a credential's name is
-  // part of the request analysis replays, so it must survive.
+  // A tool parameter or schema property sharing a credential's name is part of
+  // the replayed request.
   const rows = [];
   setCaptureRuntime(stubRuntime(rows));
   t.after(() => setCaptureRuntime());
@@ -535,8 +534,7 @@ test("request capture strips credentials only where they travel", async (t) => {
 
 
 test("template hash still ignores credential names at any depth", async () => {
-  // Unnamed workloads are routed by this hash, so it must not move for
-  // traffic that was already captured.
+  // This hash routes unnamed workloads, so its input must stay stable.
   const { templateHash } = await import("../dist/template.js");
   const without = {
     model: "m",

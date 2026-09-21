@@ -1589,9 +1589,8 @@ class _Dumpable:
 
 
 def test_responses_function_call_only_records_the_output_not_the_text_config(tmp_path):
-    """A Responses reply that is only a function call has an empty output_text,
-    and its `text` attribute is the request's text *config*. Recording that
-    config as the answer made the call unusable for analysis."""
+    """A function-call-only Responses reply has an empty output_text and a
+    `text` config; the reply is its `output`."""
     rows = Rows()
     runtime = Runtime(rows, Options(app_root=str(tmp_path), capture_text=True))
     call = _Dumpable({
@@ -1624,9 +1623,8 @@ def test_responses_text_reply_still_records_output_text(tmp_path):
 
 
 def test_scrub_degrades_one_value_not_the_whole_object():
-    """When a model cannot dump itself to JSON, only the value JSON cannot
-    hold may fall back to text. The structure around it is what analysis
-    reads, so it has to survive."""
+    """Only the value JSON cannot hold falls back to text; the structure
+    around it is what analysis reads."""
     from metergraph._template import json_value
 
     class Opaque:
@@ -1669,9 +1667,8 @@ _TOOL_WITH_SENSITIVE_NAMES = {
 
 
 def test_request_capture_strips_credentials_only_where_they_travel(tmp_path):
-    """Credentials travel in request-level parameters and header or query
-    containers. A tool parameter or schema property that shares a credential's
-    name is part of the request analysis replays, so it must survive."""
+    """Credentials are stripped where they travel. A tool parameter or schema
+    property sharing a credential's name is part of the replayed request."""
     rows = Rows()
     runtime = Runtime(rows, Options(app_root=str(tmp_path), capture_text=True))
     request = {
@@ -1707,8 +1704,7 @@ def test_request_capture_strips_credentials_only_where_they_travel(tmp_path):
 
 
 def test_template_hash_still_ignores_credential_names_at_any_depth():
-    """Unnamed workloads are routed by this hash, so it must not move for
-    traffic that was already captured."""
+    """This hash routes unnamed workloads, so its input must stay stable."""
     with_names = {"model": "m", "tools": [_TOOL_WITH_SENSITIVE_NAMES]}
     without = {"model": "m", "tools": [{
         "type": "function",

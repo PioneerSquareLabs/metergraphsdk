@@ -112,9 +112,8 @@ function usage(response: unknown): Record<string, number | undefined> {
   );
 }
 
-// Only a string is the reply text. On an OpenAI Responses body `text` is the
-// request's text *config*, and `output_text` is empty or absent when the reply
-// is only a function call: that reply is in `output`.
+// Only a non-empty string is reply text. On an OpenAI Responses body `text` is
+// the text *config*, and a function-call-only reply lives in `output`.
 function directText(response: unknown): string | undefined {
   const outputText = get(response, "output_text");
   if (typeof outputText === "string" && outputText) return outputText;

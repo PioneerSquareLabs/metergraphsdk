@@ -44,8 +44,8 @@ def _normalize_text(value: str) -> str:
 
 
 # Header and query containers carry transport credentials and nothing analysis
-# reads, so they are dropped whole. Compared lower-cased, matching the
-# TypeScript SDK's camelCase client options too.
+# reads, so they are dropped whole. Keys compare lower-cased, so camelCase
+# client options match.
 _TRANSPORT_CONTAINERS = {
     "default_headers",
     "default_query",
@@ -68,9 +68,8 @@ def json_value(value: Any) -> Any:
             return json_value(model_dump(mode="json", exclude_none=True))
         except Exception:
             pass
-        # A value JSON mode cannot hold must not cost the structure around it,
-        # which is what analysis reads: dump the Python form and let each leaf
-        # fall back on its own.
+        # The Python-mode dump keeps the structure analysis reads; only the
+        # values JSON cannot hold fall back to text.
         try:
             return json_value(model_dump(exclude_none=True))
         except Exception:
@@ -140,8 +139,8 @@ def template_hash(request: Mapping[str, Any]) -> str:
             return _normalize_text(value)
         return value
 
-    # Credential names are left out at every depth, as they always were: this
-    # hash routes unnamed workloads, so it must not move for existing traffic.
+    # Credential names are left out at every depth. This hash routes unnamed
+    # workloads, so its input must stay stable across SDK versions.
     encoded = json.dumps(
         skeleton(_without_credential_names(json_value(request))),
         sort_keys=True,
