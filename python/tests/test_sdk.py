@@ -1576,3 +1576,140 @@ def test_writer_server_error_retries_and_is_not_fatal(caplog):
     assert len(attempts) == 1
     assert writer._fatal is False
     assert any("HTTP 500" in r.getMessage() for r in caplog.records)
+
+
+class _Dumpable:
+    """A provider SDK model: model_dump is how it becomes JSON."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def model_dump(self, **_kwargs):
+        return self.value
+
+
+def test_responses_function_call_only_records_the_output_not_the_text_config(tmp_path):
+    """A function-call-only Responses reply has an empty output_text and a
+    `text` config; the reply is its `output`."""
+    rows = Rows()
+    runtime = Runtime(rows, Options(app_root=str(tmp_path), capture_text=True))
+    call = _Dumpable({
+        "type": "function_call", "id": "fc_1", "call_id": "call_1",
+        "name": "get_weather", "arguments": "{\"city\":\"SF\"}", "status": "completed",
+    })
+    state = runtime.call_state("openai", "responses.create", {"model": "gpt-test"})
+    state.finish(SimpleNamespace(
+        id="resp_1",
+        status="completed",
+        output_text="",
+        text=_Dumpable({"format": {"type": "text"}, "verbosity": "medium"}),
+        output=[call],
+    ))
+
+    content = captured_response(rows.rows[0])["content"]
+    assert content == [call.value]
+
+
+def test_responses_text_reply_still_records_output_text(tmp_path):
+    rows = Rows()
+    runtime = Runtime(rows, Options(app_root=str(tmp_path), capture_text=True))
+    state = runtime.call_state("openai", "responses.create", {"model": "gpt-test"})
+    state.finish(SimpleNamespace(
+        id="resp_1", status="completed", output_text="hello",
+        text=_Dumpable({"format": {"type": "text"}}), output=[],
+    ))
+
+    assert captured_response(rows.rows[0])["content"] == "hello"
+
+
+def test_scrub_degrades_one_value_not_the_whole_object():
+    """Only the value JSON cannot hold falls back to text; the structure
+    around it is what analysis reads."""
+    from metergraph._template import json_value
+
+    class Opaque:
+        def __repr__(self):
+            return "Opaque()"
+
+    class Message:
+        def model_dump(self, *, mode="python", exclude_none=False):
+            if mode == "json":
+                raise ValueError("cannot serialize Opaque")
+            return {"role": "assistant", "content": "hi", "extra": Opaque()}
+
+    assert json_value(Message()) == {"role": "assistant", "content": "hi", "extra": "Opaque()"}
+
+
+def test_scrub_serializes_dataclasses_as_fields():
+    from dataclasses import dataclass
+
+    from metergraph._template import json_value
+
+    @dataclass
+    class Part:
+        text: str
+        note: str | None = None
+
+    assert json_value([Part("hi")]) == [{"text": "hi"}]
+
+
+_TOOL_WITH_SENSITIVE_NAMES = {
+    "type": "function",
+    "function": {
+        "name": "login",
+        "parameters": {
+            "type": "object",
+            "properties": {"token": {"type": "string"}, "password": {"type": "string"}},
+            "required": ["token", "password"],
+        },
+    },
+}
+
+
+def test_request_capture_strips_credentials_only_where_they_travel(tmp_path):
+    """Credentials are stripped where they travel. A tool parameter or schema
+    property sharing a credential's name is part of the replayed request."""
+    rows = Rows()
+    runtime = Runtime(rows, Options(app_root=str(tmp_path), capture_text=True))
+    request = {
+        "model": "gpt-test",
+        "api_key": "sk-top-level",
+        "authorization": "Bearer top-level",
+        "extra_headers": {"x-trace": "keep-out"},
+        "extra_query": {"api-version": "keep-out"},
+        "extra_body": {"api_key": "sk-in-body", "search_parameters": {"mode": "auto"}},
+        "messages": [
+            {"role": "user", "content": "log me in"},
+            {"role": "assistant", "content": None, "tool_calls": [{
+                "id": "call_1", "type": "function",
+                "function": {"name": "login", "arguments": "{\"token\":\"t\"}"},
+            }]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+        ],
+        "tools": [_TOOL_WITH_SENSITIVE_NAMES],
+        "response_format": {"type": "json_schema", "json_schema": {
+            "name": "Session", "schema": {"type": "object", "properties": {"secret": {"type": "string"}}},
+        }},
+    }
+    runtime.call_state("openai", "chat.completions.create", request).finish(response())
+
+    raw = rows.rows[0]["request_json"]
+    for leaked in ("sk-top-level", "Bearer top-level", "keep-out", "sk-in-body"):
+        assert leaked not in raw
+    captured = json.loads(raw)
+    assert captured["tools"] == [_TOOL_WITH_SENSITIVE_NAMES]
+    assert captured["response_format"] == request["response_format"]
+    assert captured["messages"] == request["messages"]
+    assert captured["extra_body"] == {"search_parameters": {"mode": "auto"}}
+
+
+def test_template_hash_still_ignores_credential_names_at_any_depth():
+    """This hash routes unnamed workloads, so its input must stay stable."""
+    with_names = {"model": "m", "tools": [_TOOL_WITH_SENSITIVE_NAMES]}
+    without = {"model": "m", "tools": [{
+        "type": "function",
+        "function": {"name": "login", "parameters": {
+            "type": "object", "properties": {}, "required": ["token", "password"],
+        }},
+    }]}
+    assert template_hash(with_names) == template_hash(without)

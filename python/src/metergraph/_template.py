@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import re
@@ -42,26 +43,90 @@ def _normalize_text(value: str) -> str:
     return " ".join(value.split())
 
 
-def scrub(value: Any) -> Any:
+# Header and query containers carry transport credentials and nothing analysis
+# reads, so they are dropped whole. Keys compare lower-cased, so camelCase
+# client options match.
+_TRANSPORT_CONTAINERS = {
+    "default_headers",
+    "default_query",
+    "defaultheaders",
+    "defaultquery",
+    "extra_headers",
+    "extra_query",
+    "extraheaders",
+    "extraquery",
+    "headers",
+    "query",
+}
+
+
+def json_value(value: Any) -> Any:
+    """`value` as plain JSON data, with nothing removed."""
     model_dump = getattr(value, "model_dump", None)
     if callable(model_dump):
         try:
-            return scrub(model_dump(mode="json", exclude_none=True))
+            return json_value(model_dump(mode="json", exclude_none=True))
+        except Exception:
+            pass
+        # The Python-mode dump keeps the structure analysis reads; only the
+        # values JSON cannot hold fall back to text.
+        try:
+            return json_value(model_dump(exclude_none=True))
         except Exception:
             return repr(value)
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return json_value({
+            field.name: getattr(value, field.name)
+            for field in dataclasses.fields(value)
+            if getattr(value, field.name) is not None
+        })
     if isinstance(value, Mapping):
-        return {
-            str(k): scrub(v)
-            for k, v in value.items()
-            if str(k).strip().lower() not in _SENSITIVE_KEYS
-        }
+        return {str(k): json_value(v) for k, v in value.items()}
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return [scrub(item) for item in value]
+        return [json_value(item) for item in value]
     if isinstance(value, str):
         return value
     if isinstance(value, (int, float, bool)) or value is None:
         return value
     return repr(value)
+
+
+def _credential_key(key: str) -> bool:
+    key = key.strip().lower()
+    return key in _SENSITIVE_KEYS or key in _TRANSPORT_CONTAINERS
+
+
+def scrub_request(request: Any) -> Any:
+    """The provider request as captured: JSON data without its credentials.
+
+    Credentials travel as request-level parameters and in header or query
+    containers. `extra_body` is merged into the request body, so its keys are
+    request-level too. Messages, tools and schemas are kept exactly as sent,
+    even where a name matches a credential's (a tool parameter called `token`),
+    because they are the request analysis replays.
+    """
+    value = json_value(request)
+    if not isinstance(value, Mapping):
+        return value
+    clean = {k: v for k, v in value.items() if not _credential_key(k)}
+    extra_body = clean.get("extra_body")
+    if isinstance(extra_body, Mapping):
+        clean["extra_body"] = {
+            k: v for k, v in extra_body.items() if not _credential_key(k)
+        }
+    return clean
+
+
+def _without_credential_names(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            k: _without_credential_names(v)
+            for k, v in value.items()
+            if k.strip().lower() not in _SENSITIVE_KEYS
+        }
+    if isinstance(value, list):
+        return [_without_credential_names(item) for item in value]
+    return value
 
 
 def template_hash(request: Mapping[str, Any]) -> str:
@@ -74,7 +139,11 @@ def template_hash(request: Mapping[str, Any]) -> str:
             return _normalize_text(value)
         return value
 
+    # Credential names are left out at every depth. This hash routes unnamed
+    # workloads, so its input must stay stable across SDK versions.
     encoded = json.dumps(
-        skeleton(scrub(request)), sort_keys=True, separators=(",", ":")
+        skeleton(_without_credential_names(json_value(request))),
+        sort_keys=True,
+        separators=(",", ":"),
     )
     return hashlib.sha256(encoded.encode()).hexdigest()

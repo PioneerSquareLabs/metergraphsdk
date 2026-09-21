@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 
 from ._context import CaptureContext, snapshot
 from ._gateway import detect_gateway, gateway_evidence, resolve_gateway
-from ._template import scrub, template_hash
+from ._template import json_value, scrub_request, template_hash
 from ._version import SDK_VERSION
 
 
@@ -330,29 +330,34 @@ def _request_id(response: Any) -> str | None:
 def _response_content(response: Any, aggregate_text: str | None = None) -> Any:
     if aggregate_text is not None:
         return aggregate_text
-    direct = _get(response, "output_text") or _get(response, "text")
-    if direct is not None:
-        return scrub(direct)
+    # Only a non-empty string is reply text. On an OpenAI Responses object
+    # `text` is the text *config*, and a function-call-only reply lives in
+    # `output`.
+    direct = _get(response, "output_text")
+    if not isinstance(direct, str) or not direct:
+        direct = _get(response, "text")
+    if isinstance(direct, str):
+        return direct
     choice = _first(_get(response, "choices"))
     message = _get(choice, "message")
     content = _get(message, "content")
     if content is not None:
-        return scrub(content)
+        return json_value(content)
     parsed = _get(message, "parsed")
     if parsed is not None:
-        return scrub(parsed)
+        return json_value(parsed)
     normalized_text = _response_text(response)
     if normalized_text is not None:
         return normalized_text
     blocks = _get(response, "content")
     if blocks is not None:
-        return scrub(blocks)
+        return json_value(blocks)
     outputs = _get(response, "output")
     if outputs is not None:
-        return scrub(outputs)
+        return json_value(outputs)
     candidates = _get(response, "candidates")
     if candidates is not None:
-        return scrub(candidates)
+        return json_value(candidates)
     return None
 
 
@@ -402,7 +407,7 @@ def _tool_argument(value: Any) -> Any:
             return json.loads(value)
         except json.JSONDecodeError:
             return value
-    return scrub(value)
+    return json_value(value)
 
 
 def _tool_policies(request: Mapping[str, Any]) -> dict[str, str]:
@@ -591,7 +596,7 @@ def _tool_events(
             block = _get(chunk, "content_block")
             if _get(block, "type") == "tool_use":
                 key = str(_get(chunk, "index", len(anthropic_deltas)))
-                initial_input = scrub(_get(block, "input", {}))
+                initial_input = json_value(_get(block, "input", {}))
                 anthropic_deltas[key] = {
                     "id": str(_get(block, "id") or key),
                     "name": str(_get(block, "name") or ""),
@@ -769,7 +774,7 @@ class CallState:
             if self.context.capture_text is not None
             else self.runtime.options.capture_text
         )
-        request_clean = scrub(self.request)
+        request_clean = scrub_request(self.request)
         request_json, request_truncated = self.runtime._text(
             json.dumps(request_clean, separators=(",", ":"), default=repr),
             "request",

@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 
 import { contextSnapshot, type CaptureContext } from "./context.js";
 import { gatewayEvidence } from "./gateway.js";
-import { scrub, templateHash } from "./template.js";
+import { scrubRequest, templateHash } from "./template.js";
 import type { Transport } from "./transport.js";
 import { SDK_VERSION } from "./version.js";
 
@@ -112,9 +112,18 @@ function usage(response: unknown): Record<string, number | undefined> {
   );
 }
 
+// Only a non-empty string is reply text. On an OpenAI Responses body `text` is
+// the text *config*, and a function-call-only reply lives in `output`.
+function directText(response: unknown): string | undefined {
+  const outputText = get(response, "output_text");
+  if (typeof outputText === "string" && outputText) return outputText;
+  const text = get(response, "text");
+  return typeof text === "string" ? text : undefined;
+}
+
 function responseText(response: unknown): string | undefined {
-  const direct = get(response, "output_text") ?? get(response, "text");
-  if (typeof direct === "string") return direct;
+  const direct = directText(response);
+  if (direct !== undefined) return direct;
   const message = get(first(get(response, "choices")), "message");
   const content = get(message, "content");
   if (typeof content === "string") return content;
@@ -208,7 +217,7 @@ function toolArgument(value: unknown): unknown {
   if (typeof value === "string") {
     try { return JSON.parse(value); } catch { return value; }
   }
-  return scrub(value);
+  return value;
 }
 
 function toolEvents(
@@ -422,7 +431,7 @@ function toolEvents(
           arguments: input && typeof input === "object"
             && Object.keys(input as Record<string, unknown>).length === 0
             ? ""
-            : JSON.stringify(scrub(input ?? {})),
+            : JSON.stringify(input ?? {}),
         });
       }
     } else if (kind === "content_block_delta") {
@@ -447,21 +456,21 @@ function toolEvents(
 
 function responseContent(response: unknown, aggregate?: string): unknown {
   if (aggregate !== undefined) return aggregate;
-  const direct = get(response, "output_text") ?? get(response, "text");
-  if (direct !== undefined) return scrub(direct);
+  const direct = directText(response);
+  if (direct !== undefined) return direct;
   const message = get(first(get(response, "choices")), "message");
   const content = get(message, "content");
-  if (content !== undefined) return scrub(content);
+  if (content !== undefined) return content;
   const parsed = get(message, "parsed");
-  if (parsed !== undefined) return scrub(parsed);
+  if (parsed !== undefined) return parsed;
   const normalizedText = responseText(response);
   if (normalizedText !== undefined) return normalizedText;
   const blocks = get(response, "content");
-  if (blocks !== undefined) return scrub(blocks);
+  if (blocks !== undefined) return blocks;
   const output = get(response, "output");
-  if (output !== undefined) return scrub(output);
+  if (output !== undefined) return output;
   const candidates = get(response, "candidates");
-  return candidates === undefined ? undefined : scrub(candidates);
+  return candidates;
 }
 
 function responseEnvelope(
@@ -593,9 +602,10 @@ export class CaptureRuntime {
       }
       return { value: `${clipped}${marker}`, truncated: true };
     };
-    const request = text(JSON.stringify(scrub(state.request)), "request");
+    const capturedRequest = scrubRequest(state.request);
+    const request = text(JSON.stringify(capturedRequest), "request");
     const fullTools = toolEvents(
-      scrub(state.request) as Record<string, unknown>,
+      capturedRequest as Record<string, unknown>,
       response,
       extra.responseChunks,
     );

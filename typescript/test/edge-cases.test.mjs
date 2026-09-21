@@ -428,3 +428,120 @@ test("provider wrapper sets TTFT for a tool-only stream and captures iterator er
   assert.deepEqual(rows[1].tool_names, ["lookup"]);
   assert.deepEqual(rows[1].tool_calls[0].arguments, { id: "1" });
 });
+
+
+test("a Responses reply that is only a function call records its output, not the text config", async (t) => {
+  // A raw Responses body has no output_text, and its `text` is the text
+  // *config*; the reply is its `output`.
+  const rows = [];
+  setCaptureRuntime(stubRuntime(rows));
+  t.after(() => setCaptureRuntime());
+
+  const call = {
+    type: "function_call", id: "fc_1", call_id: "call_1",
+    name: "get_weather", arguments: "{\"city\":\"SF\"}", status: "completed",
+  };
+  const client = wrap({
+    responses: {
+      async create() {
+        return {
+          id: "resp_1", status: "completed", model: "gpt-5",
+          text: { format: { type: "text" }, verbosity: "medium" },
+          output: [call],
+        };
+      },
+    },
+  }, { provider: "openai" });
+  await client.responses.create({ model: "gpt-5", input: "weather in SF?" });
+
+  assert.deepEqual(capturedResponse(rows[0]).content, [call]);
+});
+
+
+test("a Responses text reply still records output_text", async (t) => {
+  const rows = [];
+  setCaptureRuntime(stubRuntime(rows));
+  t.after(() => setCaptureRuntime());
+
+  const client = wrap({
+    responses: {
+      async create() {
+        return {
+          id: "resp_1", status: "completed", model: "gpt-5", output_text: "hello",
+          text: { format: { type: "text" } }, output: [],
+        };
+      },
+    },
+  }, { provider: "openai" });
+  await client.responses.create({ model: "gpt-5", input: "hi" });
+
+  assert.equal(capturedResponse(rows[0]).content, "hello");
+});
+
+
+const toolWithSensitiveNames = {
+  type: "function",
+  function: {
+    name: "login",
+    parameters: {
+      type: "object",
+      properties: { token: { type: "string" }, password: { type: "string" } },
+      required: ["token", "password"],
+    },
+  },
+};
+
+
+test("request capture strips credentials only where they travel", async (t) => {
+  // A tool parameter or schema property sharing a credential's name is part of
+  // the replayed request.
+  const rows = [];
+  setCaptureRuntime(stubRuntime(rows));
+  t.after(() => setCaptureRuntime());
+
+  const request = {
+    model: "gpt-5",
+    apiKey: "sk-top-level",
+    authorization: "Bearer top-level",
+    extraHeaders: { "x-trace": "keep-out" },
+    defaultQuery: { "api-version": "keep-out" },
+    messages: [
+      { role: "user", content: "log me in" },
+      {
+        role: "assistant", content: null,
+        tool_calls: [{ id: "call_1", type: "function", function: { name: "login", arguments: "{\"token\":\"t\"}" } }],
+      },
+      { role: "tool", tool_call_id: "call_1", content: "ok" },
+    ],
+    tools: [toolWithSensitiveNames],
+    response_format: {
+      type: "json_schema",
+      json_schema: { name: "Session", schema: { type: "object", properties: { secret: { type: "string" } } } },
+    },
+  };
+  const client = wrap({
+    chat: { completions: { async create() { return { id: "r", choices: [{ message: { content: "ok" } }] }; } } },
+  }, { provider: "openai" });
+  await client.chat.completions.create(request);
+
+  const raw = rows[0].request_json;
+  assert.doesNotMatch(raw, /sk-top-level|Bearer top-level|keep-out/);
+  const captured = JSON.parse(raw);
+  assert.deepEqual(captured.tools, [toolWithSensitiveNames]);
+  assert.deepEqual(captured.response_format, request.response_format);
+  assert.deepEqual(captured.messages, request.messages);
+});
+
+
+test("template hash still ignores credential names at any depth", async () => {
+  // This hash routes unnamed workloads, so its input must stay stable.
+  const { templateHash } = await import("../dist/template.js");
+  const without = {
+    model: "m",
+    tools: [{
+      type: "function",
+      function: { name: "login", parameters: { type: "object", properties: {}, required: ["token", "password"] } },
+    }],
+  };
+  assert.equal(templateHash({ model: "m", tools: [toolWithSensitiveNames] }), templateHash(without));
+});
