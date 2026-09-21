@@ -33,11 +33,18 @@ provider request and normalized response by default. Applications can opt out
 globally with `METERGRAPH_CAPTURE_TEXT=0`, at initialization, or around an
 individual route or trace. Request and response are independently limited to
 1 MiB of UTF-8 by default; applications can raise that limit with
-`METERGRAPH_TEXT_MAX_BYTES` or the initialization option. Known-sensitive
-request keys (`api_key`, `authorization`,
-`headers`, `token`, `secret`) are stripped before anything is serialized —
-see `scrub()` in [`python/src/metergraph/_template.py`](python/src/metergraph/_template.py)
-and [`typescript/src/template.ts`](typescript/src/template.ts).
+`METERGRAPH_TEXT_MAX_BYTES` or the initialization option. Credentials are
+stripped before anything is serialized, where they travel: known-sensitive
+request-level parameters (`api_key`, `authorization`, `token`, `secret` and
+similar, including at the top level of `extra_body`) and header and query
+containers (`headers`, `extra_headers`, `extra_query` and their defaults),
+which are dropped whole. Messages, tools and schemas are captured as sent,
+including a field whose name matches a credential's, such as a tool parameter
+called `token`: analysis replays that request, so it must match what the
+provider received. Values inside prompts and tool arguments are content, and
+follow the content controls above. See `scrub_request()` in
+[`python/src/metergraph/_template.py`](python/src/metergraph/_template.py)
+and `scrubRequest()` in [`typescript/src/template.ts`](typescript/src/template.ts).
 
 **Fail-open by design.** Transport, DNS, or ingest failures are swallowed and
 never raise, block, or slow down the wrapped LLM call — this is a deliberate

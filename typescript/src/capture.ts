@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 
 import { contextSnapshot, type CaptureContext } from "./context.js";
 import { gatewayEvidence } from "./gateway.js";
-import { scrub, templateHash } from "./template.js";
+import { scrubRequest, templateHash } from "./template.js";
 import type { Transport } from "./transport.js";
 import { SDK_VERSION } from "./version.js";
 
@@ -218,7 +218,7 @@ function toolArgument(value: unknown): unknown {
   if (typeof value === "string") {
     try { return JSON.parse(value); } catch { return value; }
   }
-  return scrub(value);
+  return value;
 }
 
 function toolEvents(
@@ -432,7 +432,7 @@ function toolEvents(
           arguments: input && typeof input === "object"
             && Object.keys(input as Record<string, unknown>).length === 0
             ? ""
-            : JSON.stringify(scrub(input ?? {})),
+            : JSON.stringify(input ?? {}),
         });
       }
     } else if (kind === "content_block_delta") {
@@ -461,17 +461,17 @@ function responseContent(response: unknown, aggregate?: string): unknown {
   if (direct !== undefined) return direct;
   const message = get(first(get(response, "choices")), "message");
   const content = get(message, "content");
-  if (content !== undefined) return scrub(content);
+  if (content !== undefined) return content;
   const parsed = get(message, "parsed");
-  if (parsed !== undefined) return scrub(parsed);
+  if (parsed !== undefined) return parsed;
   const normalizedText = responseText(response);
   if (normalizedText !== undefined) return normalizedText;
   const blocks = get(response, "content");
-  if (blocks !== undefined) return scrub(blocks);
+  if (blocks !== undefined) return blocks;
   const output = get(response, "output");
-  if (output !== undefined) return scrub(output);
+  if (output !== undefined) return output;
   const candidates = get(response, "candidates");
-  return candidates === undefined ? undefined : scrub(candidates);
+  return candidates;
 }
 
 function responseEnvelope(
@@ -603,9 +603,10 @@ export class CaptureRuntime {
       }
       return { value: `${clipped}${marker}`, truncated: true };
     };
-    const request = text(JSON.stringify(scrub(state.request)), "request");
+    const capturedRequest = scrubRequest(state.request);
+    const request = text(JSON.stringify(capturedRequest), "request");
     const fullTools = toolEvents(
-      scrub(state.request) as Record<string, unknown>,
+      capturedRequest as Record<string, unknown>,
       response,
       extra.responseChunks,
     );

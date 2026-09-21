@@ -1627,7 +1627,7 @@ def test_scrub_degrades_one_value_not_the_whole_object():
     """When a model cannot dump itself to JSON, only the value JSON cannot
     hold may fall back to text. The structure around it is what analysis
     reads, so it has to survive."""
-    from metergraph._template import scrub
+    from metergraph._template import json_value
 
     class Opaque:
         def __repr__(self):
@@ -1639,17 +1639,81 @@ def test_scrub_degrades_one_value_not_the_whole_object():
                 raise ValueError("cannot serialize Opaque")
             return {"role": "assistant", "content": "hi", "extra": Opaque()}
 
-    assert scrub(Message()) == {"role": "assistant", "content": "hi", "extra": "Opaque()"}
+    assert json_value(Message()) == {"role": "assistant", "content": "hi", "extra": "Opaque()"}
 
 
 def test_scrub_serializes_dataclasses_as_fields():
     from dataclasses import dataclass
 
-    from metergraph._template import scrub
+    from metergraph._template import json_value
 
     @dataclass
     class Part:
         text: str
-        api_key: str = "sk-secret"
+        note: str | None = None
 
-    assert scrub([Part("hi")]) == [{"text": "hi"}]
+    assert json_value([Part("hi")]) == [{"text": "hi"}]
+
+
+_TOOL_WITH_SENSITIVE_NAMES = {
+    "type": "function",
+    "function": {
+        "name": "login",
+        "parameters": {
+            "type": "object",
+            "properties": {"token": {"type": "string"}, "password": {"type": "string"}},
+            "required": ["token", "password"],
+        },
+    },
+}
+
+
+def test_request_capture_strips_credentials_only_where_they_travel(tmp_path):
+    """Credentials travel in request-level parameters and header or query
+    containers. A tool parameter or schema property that shares a credential's
+    name is part of the request analysis replays, so it must survive."""
+    rows = Rows()
+    runtime = Runtime(rows, Options(app_root=str(tmp_path), capture_text=True))
+    request = {
+        "model": "gpt-test",
+        "api_key": "sk-top-level",
+        "authorization": "Bearer top-level",
+        "extra_headers": {"x-trace": "keep-out"},
+        "extra_query": {"api-version": "keep-out"},
+        "extra_body": {"api_key": "sk-in-body", "search_parameters": {"mode": "auto"}},
+        "messages": [
+            {"role": "user", "content": "log me in"},
+            {"role": "assistant", "content": None, "tool_calls": [{
+                "id": "call_1", "type": "function",
+                "function": {"name": "login", "arguments": "{\"token\":\"t\"}"},
+            }]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+        ],
+        "tools": [_TOOL_WITH_SENSITIVE_NAMES],
+        "response_format": {"type": "json_schema", "json_schema": {
+            "name": "Session", "schema": {"type": "object", "properties": {"secret": {"type": "string"}}},
+        }},
+    }
+    runtime.call_state("openai", "chat.completions.create", request).finish(response())
+
+    raw = rows.rows[0]["request_json"]
+    for leaked in ("sk-top-level", "Bearer top-level", "keep-out", "sk-in-body"):
+        assert leaked not in raw
+    captured = json.loads(raw)
+    assert captured["tools"] == [_TOOL_WITH_SENSITIVE_NAMES]
+    assert captured["response_format"] == request["response_format"]
+    assert captured["messages"] == request["messages"]
+    assert captured["extra_body"] == {"search_parameters": {"mode": "auto"}}
+
+
+def test_template_hash_still_ignores_credential_names_at_any_depth():
+    """Unnamed workloads are routed by this hash, so it must not move for
+    traffic that was already captured."""
+    with_names = {"model": "m", "tools": [_TOOL_WITH_SENSITIVE_NAMES]}
+    without = {"model": "m", "tools": [{
+        "type": "function",
+        "function": {"name": "login", "parameters": {
+            "type": "object", "properties": {}, "required": ["token", "password"],
+        }},
+    }]}
+    assert template_hash(with_names) == template_hash(without)

@@ -478,3 +478,72 @@ test("a Responses text reply still records output_text", async (t) => {
 
   assert.equal(capturedResponse(rows[0]).content, "hello");
 });
+
+
+const toolWithSensitiveNames = {
+  type: "function",
+  function: {
+    name: "login",
+    parameters: {
+      type: "object",
+      properties: { token: { type: "string" }, password: { type: "string" } },
+      required: ["token", "password"],
+    },
+  },
+};
+
+
+test("request capture strips credentials only where they travel", async (t) => {
+  // A tool parameter or schema property that shares a credential's name is
+  // part of the request analysis replays, so it must survive.
+  const rows = [];
+  setCaptureRuntime(stubRuntime(rows));
+  t.after(() => setCaptureRuntime());
+
+  const request = {
+    model: "gpt-5",
+    apiKey: "sk-top-level",
+    authorization: "Bearer top-level",
+    extraHeaders: { "x-trace": "keep-out" },
+    defaultQuery: { "api-version": "keep-out" },
+    messages: [
+      { role: "user", content: "log me in" },
+      {
+        role: "assistant", content: null,
+        tool_calls: [{ id: "call_1", type: "function", function: { name: "login", arguments: "{\"token\":\"t\"}" } }],
+      },
+      { role: "tool", tool_call_id: "call_1", content: "ok" },
+    ],
+    tools: [toolWithSensitiveNames],
+    response_format: {
+      type: "json_schema",
+      json_schema: { name: "Session", schema: { type: "object", properties: { secret: { type: "string" } } } },
+    },
+  };
+  const client = wrap({
+    chat: { completions: { async create() { return { id: "r", choices: [{ message: { content: "ok" } }] }; } } },
+  }, { provider: "openai" });
+  await client.chat.completions.create(request);
+
+  const raw = rows[0].request_json;
+  assert.doesNotMatch(raw, /sk-top-level|Bearer top-level|keep-out/);
+  const captured = JSON.parse(raw);
+  assert.deepEqual(captured.tools, [toolWithSensitiveNames]);
+  assert.deepEqual(captured.response_format, request.response_format);
+  assert.deepEqual(captured.messages, request.messages);
+});
+
+
+test("template hash still ignores credential names at any depth", async () => {
+  // Unnamed workloads are routed by this hash, so it must not move for
+  // traffic that was already captured.
+  const { templateHash } = await import("../dist/template.js");
+  const without = {
+    model: "m",
+    tools: [{
+      type: "function",
+      function: { name: "login", parameters: { type: "object", properties: {}, required: ["token", "password"] } },
+    }],
+  };
+  assert.equal(templateHash({ model: "m", tools: [toolWithSensitiveNames] }), templateHash(without));
+});
