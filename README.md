@@ -316,7 +316,7 @@ self-hosted server remains available and discards content even when the SDK
 sends it. Transport problems never break or slow your LLM calls. When the
 collector is unreachable, capture drops and your application carries on.
 
-See [`examples/`](examples) for runnable per-provider examples, including an offline fake-provider demo that needs no API keys.
+See [`examples/`](examples) for runnable per-provider examples, including an offline fake-provider demo that needs no API keys. The [instrumentation coverage contract](docs/instrumentation-coverage.md) is the source of truth for supported providers, frameworks, package anchors, and unsupported-path behavior.
 
 
 ## Capture from existing telemetry (Phoenix, Langfuse)
