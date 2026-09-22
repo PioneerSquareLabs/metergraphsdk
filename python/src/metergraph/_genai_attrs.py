@@ -1,10 +1,21 @@
 """Cross-dialect GenAI span-attribute translation.
 
-Turns a plain span-attribute mapping into the request/response shapes the
-capture layer expects, so usage and finish_reason are re-derived the same way
-for every telemetry dialect: a detection pass, an extractor per dialect, and a
-per-field merge in the order ``langfuse.*`` > ``gen_ai.*`` > OpenInference.
-All three have extractors.
+Turns a plain span-attribute mapping into the exact (request dict, response
+dict, metadata) shapes ``MetergraphGenAIExporter._export_span`` builds, so the
+capture layer re-derives usage and finish_reason the same way for every
+telemetry dialect.
+
+This module ships all four dialects Metergraph understands: the OpenTelemetry
+``gen_ai.*`` semantic conventions, the Langfuse SDK, LangSmith, and
+OpenInference (Arize Phoenix). When a span carries more than one dialect,
+every field falls back per-field in the order ``langfuse.*`` > ``langsmith.*``
+> ``gen_ai.*`` > OpenInference, which is why the merge exists before there is
+anything to merge.
+
+LangSmith is the one dialect that is not its own attribute namespace: it
+writes the ``gen_ai.*`` conventions and adds a ``langsmith.*`` sidecar, so its
+extractor reads the gen_ai spellings the semantic conventions dropped rather
+than a vocabulary of its own.
 
 This module is a stdlib-only leaf: it must not import ``_capture`` or
 ``opentelemetry``. Usage keys emitted here are deliberately spelled in the
@@ -13,14 +24,18 @@ alias vocabulary ``_capture._usage`` already accepts.
 
 from __future__ import annotations
 
+import ast
 import enum
 import json
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
+# The merge order is fixed here, ahead of the dialects that populate it, so
+# adding one is a new extractor rather than a reshuffle of existing behavior.
 DIALECT_LANGFUSE = "langfuse"
 DIALECT_GENAI = "gen_ai"
 DIALECT_OPENINFERENCE = "openinference"
+DIALECT_LANGSMITH = "langsmith"
 
 
 class SkipReason(enum.Enum):
@@ -47,13 +62,6 @@ class MappedCall:
     trace_name: str | None
     completion_start_time: str | None
     error_message: str | None
-    # Only the dialects that marked this span an LLM call, in precedence
-    # order -- a dialect present but *vetoing* is excluded. These are the
-    # dialects whose extractors actually ran, so dialects[0] is what the
-    # exporter falls back to when no vendor attribute is present. Leaving a
-    # vetoing dialect in relabels a call it explicitly disclaimed: the same
-    # gen_ai span reports "gen_ai" on its own and "langfuse" as soon as a
-    # Langfuse type="span" workflow observation happens to wrap it.
     dialects: tuple[str, ...]
     parse_degraded: bool
     usage_absent: bool
@@ -84,6 +92,33 @@ _USAGE_TOP_KEYS = frozenset(
 # Langfuse usage_details spellings that translate onto that vocabulary.
 _LANGFUSE_USAGE_RENAMES = {"input": "input_tokens", "output": "output_tokens"}
 
+# LangChain's standard token-detail keys, as LangSmith forwards them in
+# gen_ai.usage.{input,output}_token_details. "audio" has no home in the alias
+# vocabulary and is dropped rather than guessed at.
+_LANGSMITH_TOKEN_DETAIL_RENAMES = {
+    "cache_read": "cache_read_input_tokens",
+    "cache_creation": "cache_creation_input_tokens",
+    "reasoning": "reasoning_tokens",
+}
+
+# Provider values are emitted by several OpenTelemetry instrumentors before
+# the semantic-convention provider vocabulary is stable. Keep this mapping
+# deliberately small: unknown values remain visible instead of being guessed
+# into a supported provider.
+_PROVIDER_ALIASES = {
+    "amazon.bedrock": "bedrock",
+    "aws": "bedrock",
+    "aws.bedrock": "bedrock",
+    "aws.bedrock.converse": "bedrock",
+    "aws_bedrock": "bedrock",
+    "bedrock": "bedrock",
+    "azure": "azure",
+    "azure.ai.inference": "azure",
+    "azure.openai": "azure",
+    "azure.openai.chat": "azure",
+    "azure_openai": "azure",
+}
+
 
 def map_usage_details(
     decoded: Mapping[str, Any],
@@ -110,6 +145,13 @@ def map_usage_details(
 
 def _string(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _canonical_provider(value: Any) -> str | None:
+    provider = _string(value)
+    if provider is None:
+        return None
+    return _PROVIDER_ALIASES.get(provider.strip().lower(), provider)
 
 
 def _number(value: Any) -> float | None:
@@ -169,7 +211,7 @@ def _text_from_output_messages(value: Any) -> str | None:
 def _genai_request_content(
     attributes: Mapping[str, Any],
 ) -> tuple[str | None, str | None]:
-    """Split gen_ai request content into (system_instructions, messages)."""
+    """Split gen_ai request content exactly like the exporter does today."""
     system = attributes.get("gen_ai.system_instructions")
     messages = attributes.get("gen_ai.input.messages")
     if not isinstance(messages, str):
@@ -223,9 +265,9 @@ class _Fields:
 def _extract_genai(attributes: Mapping[str, Any]) -> _Fields:
     fields = _Fields()
     fields.model = _string(attributes.get("gen_ai.request.model"))
-    fields.provider = _string(attributes.get("gen_ai.provider.name")) or _string(
-        attributes.get("gen_ai.system")
-    )
+    fields.provider = _canonical_provider(
+        attributes.get("gen_ai.provider.name")
+    ) or _canonical_provider(attributes.get("gen_ai.system"))
     fields.operation = _string(attributes.get("gen_ai.operation.name"))
     fields.response_model = _string(attributes.get("gen_ai.response.model"))
     system, messages = _genai_request_content(attributes)
@@ -317,9 +359,9 @@ def _extract_openinference(attributes: Mapping[str, Any]) -> _Fields:
         attributes.get("llm.model_name")
     )
     fields.response_model = _string(attributes.get("llm.response.model_name"))
-    fields.provider = _string(attributes.get("llm.provider")) or _string(
-        attributes.get("llm.system")
-    )
+    fields.provider = _canonical_provider(
+        attributes.get("llm.provider")
+    ) or _canonical_provider(attributes.get("llm.system"))
     fields.finish_reason = _string(attributes.get("llm.finish_reason"))
 
     usage_pairs = (
@@ -468,9 +510,114 @@ def _extract_langfuse(attributes: Mapping[str, Any]) -> _Fields:
     return fields
 
 
-def _detected_dialects(attributes: Mapping[str, Any]) -> dict[str, bool]:
-    """Detected dialects mapped to whether they mark the span as an LLM call."""
-    detected: dict[str, bool] = {}
+def _load_repr_mapping(value: Any) -> tuple[Any, bool]:
+    """Decode an attribute holding a Python ``repr`` of a mapping.
+
+    LangSmith stringifies token-detail dicts with ``str()``, not JSON, so the
+    value arrives single-quoted -- ``"{'cache_read': 8}"`` -- and json.loads
+    rejects it. Try JSON first anyway -- if upstream ever switches to a real
+    JSON encoding this keeps working -- then fall back to literal_eval, which
+    evaluates only Python literals and cannot execute code.
+    """
+    decoded, ok = _load_json(value)
+    if ok:
+        return decoded, True
+    if not isinstance(value, str):
+        return None, False
+    try:
+        return ast.literal_eval(value), True
+    except (ValueError, SyntaxError, MemoryError, RecursionError):
+        return None, False
+
+
+def _chat_completion_text(value: Any) -> str | None:
+    """Pull the assistant text out of a provider chat-completion payload.
+
+    LangSmith stores whatever the wrapped client returned, so for the common
+    wrap_openai case gen_ai.completion is the raw response body rather than a
+    string. Anything else keeps its structure and lands on response["output"].
+    """
+    if not isinstance(value, Mapping):
+        return None
+    choices = value.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    message = choices[0].get("message") if isinstance(choices[0], Mapping) else None
+    if isinstance(message, Mapping) and isinstance(message.get("content"), str):
+        return message["content"]
+    return None
+
+
+def _extract_langsmith(attributes: Mapping[str, Any]) -> _Fields:
+    """Read the fields LangSmith spells differently, or spells alone.
+
+    Model, provider, response model, finish reason and the flat token counts
+    are plain gen_ai.* attributes that ``_extract_genai`` already reads. What
+    is left is the content -- which LangSmith writes in the pre-1.37 gen_ai
+    spellings the current conventions replaced -- the token-detail breakdown,
+    and the two trace fields it puts under its own prefix.
+    """
+    fields = _Fields()
+    fields.session_id = _string(attributes.get("langsmith.trace.session_id"))
+    fields.trace_name = _string(attributes.get("langsmith.trace.name"))
+
+    for attribute in ("input_token_details", "output_token_details"):
+        raw = attributes.get(f"gen_ai.usage.{attribute}")
+        if raw is None:
+            continue
+        decoded, ok = _load_repr_mapping(raw)
+        if not ok or not isinstance(decoded, Mapping):
+            fields.parse_degraded = True
+            continue
+        dropped: list[str] = []
+        for key, value in decoded.items():
+            canonical = _LANGSMITH_TOKEN_DETAIL_RENAMES.get(key)
+            if canonical is None:
+                dropped.append(key)
+            else:
+                fields.usage[canonical] = value
+        fields.dropped_usage_keys = tuple(
+            sorted({*fields.dropped_usage_keys, *dropped})
+        )
+
+    raw_input = attributes.get("gen_ai.prompt")
+    if isinstance(raw_input, str):
+        decoded, ok = _load_json(raw_input)
+        if not ok:
+            fields.request["input"] = raw_input
+            fields.parse_degraded = True
+        elif isinstance(decoded, Mapping) and isinstance(decoded.get("messages"), list):
+            # A wrapped chat call: the run inputs are the request kwargs, so
+            # the messages list is the conversation the exporter wants.
+            fields.request["messages"] = decoded["messages"]
+        else:
+            fields.request["input"] = decoded
+
+    raw_output = attributes.get("gen_ai.completion")
+    if isinstance(raw_output, str):
+        decoded, ok = _load_json(raw_output)
+        if not ok:
+            fields.response_text = raw_output
+            fields.parse_degraded = True
+        elif isinstance(decoded, str):
+            fields.response_text = decoded
+        else:
+            text = _chat_completion_text(decoded)
+            if text is not None:
+                fields.response_text = text
+            else:
+                fields.output_structure = decoded
+    return fields
+
+
+def _detected_dialects(attributes: Mapping[str, Any]) -> dict[str, bool | None]:
+    """Detected dialects mapped to their verdict on whether this is an LLM call.
+
+    ``True`` claims the span, ``False`` denies it, and ``None`` means the
+    dialect is present but carries no span-kind attribute to judge by. See
+    ``_vetoed`` for how the verdicts combine.
+    """
+    detected: dict[str, bool | None] = {}
     if any(key.startswith("langfuse.observation.") for key in attributes):
         observation_type = _string(attributes.get("langfuse.observation.type"))
         detected[DIALECT_LANGFUSE] = observation_type == "generation"
@@ -478,20 +625,66 @@ def _detected_dialects(attributes: Mapping[str, Any]) -> dict[str, bool]:
         attributes.get("gen_ai.request.model") is not None
         or attributes.get("gen_ai.operation.name") is not None
     ):
-        # The value says whether the dialect marks this span as an LLM call.
-        detected[DIALECT_GENAI] = True
+        # LangSmith exports gen_ai.* for chains, tools and retrievers, so its
+        # sidecar kind must be allowed to veto the generic dialect. Other
+        # producers use gen_ai.* as their complete eligibility signal.
+        detected[DIALECT_GENAI] = (
+            None
+            if any(key.startswith("langsmith.") for key in attributes)
+            else True
+        )
+    if any(key.startswith("langsmith.") for key in attributes):
+        # LangSmith exports EVERY run as a gen_ai span -- chains, tools and
+        # retrievers included -- and records the real kind here. Without this
+        # verdict a chain span that inherits a model name maps as a second
+        # complete call carrying its child's tokens.
+        span_kind = _string(attributes.get("langsmith.span.kind"))
+        detected[DIALECT_LANGSMITH] = (
+            span_kind is not None and span_kind.lower() == "llm"
+        )
     kind = attributes.get("openinference.span.kind")
     if kind is not None:
         detected[DIALECT_OPENINFERENCE] = isinstance(kind, str) and kind.upper() == "LLM"
     return detected
 
 
+def _vetoed(detected: Mapping[str, bool | None]) -> bool:
+    """Whether a dialect denies this span and no other dialect claims it.
+
+    An abstaining dialect (``None``) does not decide by itself. A concrete
+    veto with no concrete claim is decisive, while a bare span described only
+    by abstaining dialects stays eligible.
+    """
+    verdicts = [verdict for verdict in detected.values() if verdict is not None]
+    return bool(verdicts) and not any(verdicts)
+
+
+def _eligible_dialects(detected: Mapping[str, bool | None]) -> list[str]:
+    """Return dialects that did not veto, or none when a veto is decisive."""
+    if any(verdict is False for verdict in detected.values()) and not any(
+        verdict is True for verdict in detected.values()
+    ):
+        return []
+    return [
+        name
+        for name in _PRECEDENCE
+        if name in detected and detected[name] is not False
+    ]
+
+
 _EXTRACTORS = {
     DIALECT_LANGFUSE: _extract_langfuse,
+    DIALECT_LANGSMITH: _extract_langsmith,
     DIALECT_GENAI: _extract_genai,
     DIALECT_OPENINFERENCE: _extract_openinference,
 }
-_PRECEDENCE = (DIALECT_LANGFUSE, DIALECT_GENAI, DIALECT_OPENINFERENCE)
+# Field-level precedence order: langfuse > langsmith > gen_ai > OpenInference.
+_PRECEDENCE = (
+    DIALECT_LANGFUSE,
+    DIALECT_LANGSMITH,
+    DIALECT_GENAI,
+    DIALECT_OPENINFERENCE,
+)
 
 
 def _first_value(contributions: list[_Fields], name: str) -> Any:
@@ -509,11 +702,15 @@ def map_span_attributes(
     detected = _detected_dialects(attributes)
     if not detected:
         return SkipReason.NOT_GENAI
-    eligible = [name for name in _PRECEDENCE if detected.get(name)]
-    if not eligible:
+    if _vetoed(detected):
         return SkipReason.INELIGIBLE_KIND
 
-    contributions = [_EXTRACTORS[name](attributes) for name in eligible]
+    eligible = _eligible_dialects(detected)
+    if not eligible:
+        return SkipReason.INELIGIBLE_KIND
+    contributions = [
+        _EXTRACTORS[name](attributes) for name in eligible
+    ]
     model = _first_value(contributions, "model")
     if model is None:
         return SkipReason.NO_MODEL

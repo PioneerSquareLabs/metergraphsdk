@@ -1,34 +1,28 @@
-"""Ground-truth check: do the REAL upstream libraries still emit the attributes
-the mapper reads?
+"""Ground-truth check: do the REAL instrumentation libraries still emit the
+attributes the mapper reads?
 
-Every other mapper test hand-writes span attributes, so it asserts only that
-the mapper handles a vocabulary *we* wrote down. If Langfuse or OpenInference
-renames or drops an attribute those tests stay green while live capture
+Every other mapper test hand-writes span attributes, so it asserts that the
+mapper handles a vocabulary *we* wrote down. If Phoenix, Langfuse or LangSmith
+renames or drops an attribute, those tests stay green while live capture
 silently loses a field -- exactly how a `langfuse.session.id` that never
 existed in any shipped SDK survived review.
 
-This module inverts the direction: it drives the real libraries -- the Langfuse
-SDK, and openinference-instrumentation-openai over an httpx MockTransport --
-reads back whatever attributes the installed versions actually produced, and
-asserts on the MappedCall they yield. It is meaningful only when its
-dependencies float, so it runs from the scheduled `upstream-dialects` workflow
-(unpinned, weekly), not as a required pull-request check.
+This module inverts the direction: it drives the real libraries, reads back
+whatever attributes that installed version actually produced, and asserts on
+the MappedCall they yield. It is meaningful only when its dependencies float,
+so it runs from the scheduled `upstream-dialects` workflow (unpinned, weekly),
+not as a required pull-request check.
 
-No credentials and no network. Dummy keys, a mock transport and a local
-TracerProvider are not enough on their own -- the Langfuse client also installs
-its own OTLP processor on whatever provider it is handed, which used to export
-to cloud.langfuse.com and print `401 Unauthorized` after these assertions had
-already passed. Its transport is replaced with a local exporter, and both
-fixtures run with every outbound connection blocked and recorded, so a future
-version of either library that reaches the network turns this job red instead
-of depending on what a remote host answers.
+No credentials and no network: the OpenAI call goes through an httpx
+MockTransport, and the Langfuse and LangSmith clients are given dummy keys and
+a local TracerProvider.
 """
+
 from __future__ import annotations
 
 import contextlib
 import datetime
 import socket
-from dataclasses import dataclass
 from typing import Iterator, Sequence
 
 import pytest
@@ -40,6 +34,7 @@ pytest.importorskip(
     reason="upstream-dialects extras not installed",
 )
 pytest.importorskip("langfuse", reason="upstream-dialects extras not installed")
+pytest.importorskip("langsmith", reason="upstream-dialects extras not installed")
 
 from openinference.instrumentation.openai import OpenAIInstrumentor  # noqa: E402
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider  # noqa: E402
@@ -84,13 +79,7 @@ def _memory_provider() -> tuple[InMemorySpanExporter, TracerProvider]:
 
 
 class _LocalSpanExporter(SpanExporter):
-    """Stands in for Langfuse's OTLP transport: accepts batches, sends nothing.
-
-    Langfuse builds an OTLPSpanExporter aimed at its cloud endpoint unless it
-    is handed one, and installs it on the provider given to the constructor --
-    including ours. Supplying this leaves the in-memory processor untouched
-    while giving the Langfuse processor nowhere to send.
-    """
+    """Accept Langfuse's batch exports without sending them anywhere."""
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         return SpanExportResult.SUCCESS
@@ -102,21 +91,12 @@ class _LocalSpanExporter(SpanExporter):
         return True
 
 
-# Loopback stays reachable so a genuinely local service is not misreported as
-# an escape; nothing in this module needs even that.
 _LOOPBACK = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 @contextlib.contextmanager
 def _blocked_network() -> Iterator[list[str]]:
-    """Refuse and record every attempt to leave the machine.
-
-    Both layers matter: requests/urllib3 and httpx resolve through
-    ``socket.getaddrinfo`` before connecting, and a literal IP skips resolution
-    entirely. Recording rather than only raising is what lets a test assert on
-    the attempt -- the export runs on a background thread, where a raised
-    AssertionError would otherwise be swallowed into a log line.
-    """
+    """Record and reject any connection attempt outside loopback."""
     attempts: list[str] = []
     real_getaddrinfo = socket.getaddrinfo
     real_connect = socket.socket.connect
@@ -146,20 +126,14 @@ def _blocked_network() -> Iterator[list[str]]:
         socket.socket.connect = real_connect
 
 
-@dataclass(frozen=True)
-class _DialectRun:
-    spans: list[tuple[str, dict]]
-    outbound: tuple[str, ...]
-
-
 # Both fixtures are module-scoped on purpose. OpenAIInstrumentor patches the
 # openai package globally, and the Langfuse client is a process-wide singleton:
 # a second Langfuse(...) returns the cached client still bound to the FIRST
 # tracer provider, so a function-scoped fixture would capture zero spans on
 # every test after the first.
 @pytest.fixture(scope="module")
-def openinference_run() -> _DialectRun:
-    """Drive the real instrumentor once, under a closed network, and keep the spans."""
+def openinference_spans():
+    """Spans openinference-instrumentation-openai really emits for one call."""
     memory, provider = _memory_provider()
     with _blocked_network() as outbound:
         OpenAIInstrumentor().instrument(tracer_provider=provider)
@@ -182,24 +156,16 @@ def openinference_run() -> _DialectRun:
             )
         finally:
             OpenAIInstrumentor().uninstrument()
-    return _DialectRun(
-        spans=[
-            (span.instrumentation_scope.name, dict(span.attributes or {}))
-            for span in memory.get_finished_spans()
-        ],
-        outbound=tuple(outbound),
-    )
+    assert outbound == []
+    return [
+        (span.instrumentation_scope.name, dict(span.attributes or {}))
+        for span in memory.get_finished_spans()
+    ]
 
 
 @pytest.fixture(scope="module")
-def openinference_spans(openinference_run: _DialectRun) -> list[tuple[str, dict]]:
-    """Spans openinference-instrumentation-openai really emits for one call."""
-    return openinference_run.spans
-
-
-@pytest.fixture(scope="module")
-def langfuse_run() -> _DialectRun:
-    """Drive the real SDK once, under a closed network, and keep what it emitted."""
+def langfuse_spans():
+    """Spans the Langfuse SDK really emits for a good and a failed generation."""
     from langfuse import Langfuse, propagate_attributes
 
     memory, provider = _memory_provider()
@@ -211,64 +177,107 @@ def langfuse_run() -> _DialectRun:
             tracing_enabled=True,
             span_exporter=_LocalSpanExporter(),
         )
-        _emit_observations(client, propagate_attributes)
-        # Inside the guard on purpose: shutdown() force-flushes the Langfuse
-        # processor and joins its threads, so any export this version attempts
-        # happens here rather than at interpreter exit, unguarded and after
-        # the assertions have already reported green.
+        # session/user/trace_name reach spans through baggage, not a setter.
+        with propagate_attributes(
+            session_id="sess-1", user_id="u-1", trace_name="my-trace"
+        ):
+            with client.start_as_current_observation(
+                as_type="generation",
+                name="good-generation",
+                model="claude-opus-5",
+                input=[{"role": "user", "content": "Synthetic input"}],
+                model_parameters={"temperature": 0.2},
+            ) as good:
+                good.update(
+                    output={"role": "assistant", "content": "Synthetic reply"},
+                    usage_details={"input": 11, "output": 4, "total": 15},
+                    cost_details={"input": 0.001, "output": 0.002, "total": 0.003},
+                    completion_start_time=datetime.datetime(
+                        2026, 8, 31, 12, 0, 0, tzinfo=datetime.timezone.utc
+                    ),
+                )
+            with client.start_as_current_observation(
+                as_type="generation", name="failed-generation", model="claude-opus-5"
+            ) as bad:
+                bad.update(level="ERROR", status_message="upstream 500")
         client.shutdown()
-    return _DialectRun(
-        spans=[
-            (span.instrumentation_scope.name, dict(span.attributes or {}))
-            for span in memory.get_finished_spans()
-        ],
-        outbound=tuple(outbound),
-    )
+    assert outbound == []
+    return [
+        (span.instrumentation_scope.name, dict(span.attributes or {}))
+        for span in memory.get_finished_spans()
+    ]
 
 
 @pytest.fixture(scope="module")
-def langfuse_spans(langfuse_run: _DialectRun) -> list[tuple[str, dict]]:
-    """Spans the Langfuse SDK really emits for a good and a failed generation."""
-    return langfuse_run.spans
+def langsmith_spans():
+    """Spans the LangSmith SDK really emits for an llm, a chain and a tool run.
 
+    tracing_mode="otel" is what makes LangSmith export OTel spans at all; its
+    default mode posts runs to the LangSmith API and emits none. The client
+    reuses the already-installed global provider, which is the attachment the
+    README documents.
+    """
+    import os
 
-def _emit_observations(client, propagate_attributes) -> None:
-    # session/user/trace_name reach spans through baggage, not a setter.
-    with propagate_attributes(
-        session_id="sess-1", user_id="u-1", trace_name="my-trace"
-    ):
-        with client.start_as_current_observation(
-            as_type="generation",
-            name="good-generation",
-            model="claude-opus-5",
-            input=[{"role": "user", "content": "Synthetic input"}],
-            model_parameters={"temperature": 0.2},
-        ) as good:
-            good.update(
-                output={"role": "assistant", "content": "Synthetic reply"},
-                usage_details={"input": 11, "output": 4, "total": 15},
-                cost_details={"input": 0.001, "output": 0.002, "total": 0.003},
-                completion_start_time=datetime.datetime(
-                    2026, 8, 31, 12, 0, 0, tzinfo=datetime.timezone.utc
-                ),
-            )
-        with client.start_as_current_observation(
-            as_type="generation", name="failed-generation", model="claude-opus-5"
-        ) as bad:
-            bad.update(level="ERROR", status_message="upstream 500")
+    from opentelemetry import trace as otel_trace
+
+    memory, provider = _memory_provider()
+    otel_trace.set_tracer_provider(provider)
+    os.environ.update(
+        LANGSMITH_TRACING="true",
+        LANGSMITH_TRACING_MODE="otel",
+        LANGSMITH_API_KEY="lsv2-not-a-real-key",
+        LANGSMITH_PROJECT="upstream-dialects",
+    )
+
+    from langsmith import traceable
+    from langsmith.run_trees import get_cached_client
+
+    client = get_cached_client()
+
+    @traceable(
+        run_type="llm",
+        name="good-generation",
+        metadata={"ls_model_name": "gpt-4o-mini", "ls_provider": "openai"},
+    )
+    def generation(messages, model="gpt-4o-mini"):
+        return CHAT_RESPONSE | {
+            "usage_metadata": {
+                "input_tokens": 30,
+                "output_tokens": 12,
+                "total_tokens": 42,
+                "input_token_details": {"cache_read": 5},
+                "output_token_details": {"reasoning": 7},
+            }
+        }
+
+    # The chain carries the model name its child run also sees: this is the
+    # shape that double-counts if span-kind stops being read.
+    @traceable(
+        run_type="chain", name="outer-chain", metadata={"ls_model_name": "gpt-4o-mini"}
+    )
+    def outer(question):
+        return generation([{"role": "user", "content": question}])
+
+    @traceable(
+        run_type="tool", name="a-tool", metadata={"ls_model_name": "gpt-4o-mini"}
+    )
+    def a_tool(argument):
+        return "tool result"
+
+    outer("Synthetic input")
+    a_tool("Synthetic input")
+    client.flush()
+    provider.force_flush()
+    spans = {}
+    for span in memory.get_finished_spans():
+        attributes = dict(span.attributes or {})
+        kind = attributes.get("langsmith.span.kind")
+        spans[kind] = (span.instrumentation_scope.name, attributes)
+    return spans
 
 
 # --- OpenInference (Arize Phoenix) -----------------------------------------
-
-
-def test_openinference_stays_off_the_network(openinference_run):
-    """The MockTransport carries the call; nothing may reach a real endpoint.
-
-    Asserted rather than assumed: the instrumentor and the OpenAI client are
-    both unpinned here, and a version that adds its own outbound request has
-    to fail this weekly job rather than quietly depend on a remote host.
-    """
-    assert openinference_run.outbound == ()
 
 
 def test_openinference_scope_name_is_what_the_readme_documents(openinference_spans):
@@ -319,17 +328,6 @@ def test_openinference_still_reports_no_cost(openinference_spans):
 
 
 # --- Langfuse ---------------------------------------------------------------
-
-
-def test_langfuse_sdk_stays_off_the_network(langfuse_run):
-    """The drift watch must observe the SDK, never a Langfuse deployment.
-
-    It runs weekly, unpinned and unattended, so a version that starts
-    exporting again has to fail here. Before this guard existed the assertions
-    below all passed and the run then printed `401 Unauthorized` from a
-    background export nobody was watching.
-    """
-    assert langfuse_run.outbound == ()
 
 
 def test_langfuse_scope_name_is_what_the_readme_documents(langfuse_spans):
@@ -395,3 +393,71 @@ def test_langfuse_error_generation_carries_status_message(langfuse_spans):
     assert mapped.error_message == "upstream 500"
     # A failed call legitimately reports no usage.
     assert mapped.usage_absent
+
+
+# --- LangSmith ---------------------------------------------------------------
+
+
+def test_langsmith_scope_name_is_what_the_readme_documents(langsmith_spans):
+    assert {scope for scope, _ in langsmith_spans.values()} == {"langsmith"}
+
+
+def test_langsmith_llm_run_maps_to_a_complete_call(langsmith_spans):
+    _, attributes = langsmith_spans["llm"]
+    mapped = map_span_attributes(attributes)
+    assert not isinstance(mapped, SkipReason), "eligibility gate stopped matching"
+
+    assert mapped.dialects == ("langsmith", "gen_ai")
+    assert mapped.model == "gpt-4o-mini"
+    assert mapped.provider == "openai"
+    assert mapped.response["usage"] == {
+        "input_tokens": 30,
+        "output_tokens": 12,
+        "cache_read_input_tokens": 5,
+        "completion_tokens_details": {"reasoning_tokens": 7},
+    }
+    assert mapped.response_text == "Synthetic result"
+    assert mapped.request["messages"] == [
+        {"role": "user", "content": "Synthetic input"}
+    ]
+    assert mapped.trace_name == "good-generation"
+    assert not mapped.parse_degraded
+    assert not mapped.usage_absent
+
+
+def test_langsmith_still_emits_gen_ai_on_non_llm_runs(langsmith_spans):
+    """The premise the span-kind gate exists for. If this ever fails LangSmith
+    stopped labelling chains and tools as gen_ai spans, and the veto could be
+    relaxed -- but do not relax it while this passes."""
+    for kind in ("chain", "tool"):
+        _, attributes = langsmith_spans[kind]
+        assert attributes.get("gen_ai.operation.name") is not None
+
+
+def test_langsmith_chain_and_tool_runs_are_not_billable_calls(langsmith_spans):
+    """Both carry a model name and the chain carries its child's tokens, so
+    only langsmith.span.kind keeps them from being counted as calls."""
+    for kind in ("chain", "tool"):
+        _, attributes = langsmith_spans[kind]
+        assert map_span_attributes(attributes) is SkipReason.INELIGIBLE_KIND
+
+
+def test_langsmith_token_details_are_still_repr_encoded(langsmith_spans):
+    """_load_repr_mapping exists only because these are str(dict), not JSON.
+    If this starts failing upstream switched to JSON and the fallback can go."""
+    import json as _json
+
+    _, attributes = langsmith_spans["llm"]
+    raw = attributes["gen_ai.usage.input_token_details"]
+    assert isinstance(raw, str)
+    with pytest.raises(ValueError):
+        _json.loads(raw)
+
+
+def test_langsmith_still_reports_no_cost(langsmith_spans):
+    """LangSmith prices runs server-side, like Phoenix. If this fails the SDK
+    began putting cost on spans and a cost evidence contract can be added."""
+    _, attributes = langsmith_spans["llm"]
+    mapped = map_span_attributes(attributes)
+    assert mapped.cost is None
+    assert mapped.cost_source is None
