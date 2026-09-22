@@ -640,7 +640,7 @@ def _detected_dialects(attributes: Mapping[str, Any]) -> dict[str, bool | None]:
         # complete call carrying its child's tokens.
         span_kind = _string(attributes.get("langsmith.span.kind"))
         detected[DIALECT_LANGSMITH] = (
-            span_kind.lower() == "llm" if span_kind is not None else None
+            span_kind is not None and span_kind.lower() == "llm"
         )
     kind = attributes.get("openinference.span.kind")
     if kind is not None:

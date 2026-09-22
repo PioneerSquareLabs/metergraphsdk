@@ -563,16 +563,12 @@ def test_langsmith_tool_span_is_not_a_billable_call():
     assert map_span_attributes(attributes) is SkipReason.INELIGIBLE_KIND
 
 
-def test_langsmith_without_a_span_kind_abstains_rather_than_denying():
-    """Only langsmith.span.kind carries a verdict. A span with other langsmith
-    attributes and no kind must not be vetoed into silence."""
+def test_langsmith_without_a_span_kind_is_not_counted():
+    """A missing kind is not proof that a LangSmith run is an LLM call."""
     attributes = _langsmith_llm_span()
     del attributes["langsmith.span.kind"]
 
-    mapped = map_span_attributes(attributes)
-
-    assert isinstance(mapped, MappedCall)
-    assert mapped.trace_name == "my-chat-call"
+    assert map_span_attributes(attributes) is SkipReason.INELIGIBLE_KIND
 
 
 def test_langsmith_token_details_drop_keys_with_no_home_in_the_vocabulary():

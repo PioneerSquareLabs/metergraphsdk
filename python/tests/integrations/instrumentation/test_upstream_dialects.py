@@ -20,7 +20,10 @@ a local TracerProvider.
 
 from __future__ import annotations
 
+import contextlib
 import datetime
+import socket
+from typing import Iterator, Sequence
 
 import pytest
 
@@ -34,8 +37,12 @@ pytest.importorskip("langfuse", reason="upstream-dialects extras not installed")
 pytest.importorskip("langsmith", reason="upstream-dialects extras not installed")
 
 from openinference.instrumentation.openai import OpenAIInstrumentor  # noqa: E402
-from opentelemetry.sdk.trace import TracerProvider  # noqa: E402
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor  # noqa: E402
+from opentelemetry.sdk.trace import ReadableSpan, TracerProvider  # noqa: E402
+from opentelemetry.sdk.trace.export import (  # noqa: E402
+    SimpleSpanProcessor,
+    SpanExporter,
+    SpanExportResult,
+)
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import (  # noqa: E402
     InMemorySpanExporter,
 )
@@ -71,6 +78,54 @@ def _memory_provider() -> tuple[InMemorySpanExporter, TracerProvider]:
     return memory, provider
 
 
+class _LocalSpanExporter(SpanExporter):
+    """Accept Langfuse's batch exports without sending them anywhere."""
+
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        return SpanExportResult.SUCCESS
+
+    def shutdown(self) -> None:
+        return None
+
+    def force_flush(self, timeout_millis: int = 30_000) -> bool:
+        return True
+
+
+_LOOPBACK = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+@contextlib.contextmanager
+def _blocked_network() -> Iterator[list[str]]:
+    """Record and reject any connection attempt outside loopback."""
+    attempts: list[str] = []
+    real_getaddrinfo = socket.getaddrinfo
+    real_connect = socket.socket.connect
+
+    def escapes(host: object) -> bool:
+        if isinstance(host, str) and host not in _LOOPBACK:
+            attempts.append(host)
+            return True
+        return False
+
+    def guarded_getaddrinfo(host, port, *args, **kwargs):
+        if escapes(host):
+            raise AssertionError(f"upstream drift watch resolved {host!r}")
+        return real_getaddrinfo(host, port, *args, **kwargs)
+
+    def guarded_connect(self, address):
+        if isinstance(address, tuple) and escapes(address[0]):
+            raise AssertionError(f"upstream drift watch dialed {address[0]!r}")
+        return real_connect(self, address)
+
+    socket.getaddrinfo = guarded_getaddrinfo
+    socket.socket.connect = guarded_connect
+    try:
+        yield attempts
+    finally:
+        socket.getaddrinfo = real_getaddrinfo
+        socket.socket.connect = real_connect
+
+
 # Both fixtures are module-scoped on purpose. OpenAIInstrumentor patches the
 # openai package globally, and the Langfuse client is a process-wide singleton:
 # a second Langfuse(...) returns the cached client still bound to the FIRST
@@ -80,26 +135,28 @@ def _memory_provider() -> tuple[InMemorySpanExporter, TracerProvider]:
 def openinference_spans():
     """Spans openinference-instrumentation-openai really emits for one call."""
     memory, provider = _memory_provider()
-    OpenAIInstrumentor().instrument(tracer_provider=provider)
-    try:
-        client = openai.OpenAI(
-            api_key="sk-not-a-real-key",
-            http_client=httpx.Client(
-                transport=httpx.MockTransport(
-                    lambda request: httpx.Response(200, json=CHAT_RESPONSE)
-                )
-            ),
-        )
-        client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are terse."},
-                {"role": "user", "content": "Synthetic input"},
-            ],
-            temperature=0.2,
-        )
-    finally:
-        OpenAIInstrumentor().uninstrument()
+    with _blocked_network() as outbound:
+        OpenAIInstrumentor().instrument(tracer_provider=provider)
+        try:
+            client = openai.OpenAI(
+                api_key="sk-not-a-real-key",
+                http_client=httpx.Client(
+                    transport=httpx.MockTransport(
+                        lambda request: httpx.Response(200, json=CHAT_RESPONSE)
+                    )
+                ),
+            )
+            client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are terse."},
+                    {"role": "user", "content": "Synthetic input"},
+                ],
+                temperature=0.2,
+            )
+        finally:
+            OpenAIInstrumentor().uninstrument()
+    assert outbound == []
     return [
         (span.instrumentation_scope.name, dict(span.attributes or {}))
         for span in memory.get_finished_spans()
@@ -112,35 +169,39 @@ def langfuse_spans():
     from langfuse import Langfuse, propagate_attributes
 
     memory, provider = _memory_provider()
-    client = Langfuse(
-        public_key="pk-not-a-real-key",
-        secret_key="sk-not-a-real-key",
-        tracer_provider=provider,
-        tracing_enabled=True,
-    )
-    # session/user/trace_name reach spans through baggage, not a setter.
-    with propagate_attributes(
-        session_id="sess-1", user_id="u-1", trace_name="my-trace"
-    ):
-        with client.start_as_current_observation(
-            as_type="generation",
-            name="good-generation",
-            model="claude-opus-5",
-            input=[{"role": "user", "content": "Synthetic input"}],
-            model_parameters={"temperature": 0.2},
-        ) as good:
-            good.update(
-                output={"role": "assistant", "content": "Synthetic reply"},
-                usage_details={"input": 11, "output": 4, "total": 15},
-                cost_details={"input": 0.001, "output": 0.002, "total": 0.003},
-                completion_start_time=datetime.datetime(
-                    2026, 8, 31, 12, 0, 0, tzinfo=datetime.timezone.utc
-                ),
-            )
-        with client.start_as_current_observation(
-            as_type="generation", name="failed-generation", model="claude-opus-5"
-        ) as bad:
-            bad.update(level="ERROR", status_message="upstream 500")
+    with _blocked_network() as outbound:
+        client = Langfuse(
+            public_key="pk-not-a-real-key",
+            secret_key="sk-not-a-real-key",
+            tracer_provider=provider,
+            tracing_enabled=True,
+            span_exporter=_LocalSpanExporter(),
+        )
+        # session/user/trace_name reach spans through baggage, not a setter.
+        with propagate_attributes(
+            session_id="sess-1", user_id="u-1", trace_name="my-trace"
+        ):
+            with client.start_as_current_observation(
+                as_type="generation",
+                name="good-generation",
+                model="claude-opus-5",
+                input=[{"role": "user", "content": "Synthetic input"}],
+                model_parameters={"temperature": 0.2},
+            ) as good:
+                good.update(
+                    output={"role": "assistant", "content": "Synthetic reply"},
+                    usage_details={"input": 11, "output": 4, "total": 15},
+                    cost_details={"input": 0.001, "output": 0.002, "total": 0.003},
+                    completion_start_time=datetime.datetime(
+                        2026, 8, 31, 12, 0, 0, tzinfo=datetime.timezone.utc
+                    ),
+                )
+            with client.start_as_current_observation(
+                as_type="generation", name="failed-generation", model="claude-opus-5"
+            ) as bad:
+                bad.update(level="ERROR", status_message="upstream 500")
+        client.shutdown()
+    assert outbound == []
     return [
         (span.instrumentation_scope.name, dict(span.attributes or {}))
         for span in memory.get_finished_spans()

@@ -374,6 +374,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from metergraph.opentelemetry import MetergraphGenAIExporter
 
 os.environ["LANGSMITH_TRACING_MODE"] = "otel"  # or "hybrid" to keep LangSmith
+os.environ["LANGSMITH_TRACING"] = "true"
 
 provider = TracerProvider()
 provider.add_span_processor(BatchSpanProcessor(MetergraphGenAIExporter()))
