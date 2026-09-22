@@ -101,6 +101,24 @@ _LANGSMITH_TOKEN_DETAIL_RENAMES = {
     "reasoning": "reasoning_tokens",
 }
 
+# Provider values are emitted by several OpenTelemetry instrumentors before
+# the semantic-convention provider vocabulary is stable. Keep this mapping
+# deliberately small: unknown values remain visible instead of being guessed
+# into a supported provider.
+_PROVIDER_ALIASES = {
+    "amazon.bedrock": "bedrock",
+    "aws": "bedrock",
+    "aws.bedrock": "bedrock",
+    "aws.bedrock.converse": "bedrock",
+    "aws_bedrock": "bedrock",
+    "bedrock": "bedrock",
+    "azure": "azure",
+    "azure.ai.inference": "azure",
+    "azure.openai": "azure",
+    "azure.openai.chat": "azure",
+    "azure_openai": "azure",
+}
+
 
 def map_usage_details(
     decoded: Mapping[str, Any],
@@ -127,6 +145,13 @@ def map_usage_details(
 
 def _string(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _canonical_provider(value: Any) -> str | None:
+    provider = _string(value)
+    if provider is None:
+        return None
+    return _PROVIDER_ALIASES.get(provider.strip().lower(), provider)
 
 
 def _number(value: Any) -> float | None:
@@ -240,9 +265,9 @@ class _Fields:
 def _extract_genai(attributes: Mapping[str, Any]) -> _Fields:
     fields = _Fields()
     fields.model = _string(attributes.get("gen_ai.request.model"))
-    fields.provider = _string(attributes.get("gen_ai.provider.name")) or _string(
-        attributes.get("gen_ai.system")
-    )
+    fields.provider = _canonical_provider(
+        attributes.get("gen_ai.provider.name")
+    ) or _canonical_provider(attributes.get("gen_ai.system"))
     fields.operation = _string(attributes.get("gen_ai.operation.name"))
     fields.response_model = _string(attributes.get("gen_ai.response.model"))
     system, messages = _genai_request_content(attributes)
@@ -334,9 +359,9 @@ def _extract_openinference(attributes: Mapping[str, Any]) -> _Fields:
         attributes.get("llm.model_name")
     )
     fields.response_model = _string(attributes.get("llm.response.model_name"))
-    fields.provider = _string(attributes.get("llm.provider")) or _string(
-        attributes.get("llm.system")
-    )
+    fields.provider = _canonical_provider(
+        attributes.get("llm.provider")
+    ) or _canonical_provider(attributes.get("llm.system"))
     fields.finish_reason = _string(attributes.get("llm.finish_reason"))
 
     usage_pairs = (
@@ -600,11 +625,14 @@ def _detected_dialects(attributes: Mapping[str, Any]) -> dict[str, bool | None]:
         attributes.get("gen_ai.request.model") is not None
         or attributes.get("gen_ai.operation.name") is not None
     ):
-        # No opinion, not a claim. The gen_ai conventions have no span-kind
-        # attribute, and producers that emit gen_ai.* for chains, tools and
-        # retrievers alongside their own dialect say so there. Asserting True
-        # here would let those spans outvote the dialect that knows better.
-        detected[DIALECT_GENAI] = None
+        # LangSmith exports gen_ai.* for chains, tools and retrievers, so its
+        # sidecar kind must be allowed to veto the generic dialect. Other
+        # producers use gen_ai.* as their complete eligibility signal.
+        detected[DIALECT_GENAI] = (
+            None
+            if any(key.startswith("langsmith.") for key in attributes)
+            else True
+        )
     if any(key.startswith("langsmith.") for key in attributes):
         # LangSmith exports EVERY run as a gen_ai span -- chains, tools and
         # retrievers included -- and records the real kind here. Without this
@@ -623,12 +651,25 @@ def _detected_dialects(attributes: Mapping[str, Any]) -> dict[str, bool | None]:
 def _vetoed(detected: Mapping[str, bool | None]) -> bool:
     """Whether a dialect denies this span and no other dialect claims it.
 
-    Abstaining dialects (``None``) never decide the outcome: a span described
-    only by dialects with no span-kind opinion stays eligible, which is what
-    keeps a bare ``gen_ai.*`` span capturing.
+    An abstaining dialect (``None``) does not decide by itself. A concrete
+    veto with no concrete claim is decisive, while a bare span described only
+    by abstaining dialects stays eligible.
     """
     verdicts = [verdict for verdict in detected.values() if verdict is not None]
     return bool(verdicts) and not any(verdicts)
+
+
+def _eligible_dialects(detected: Mapping[str, bool | None]) -> list[str]:
+    """Return dialects that did not veto, or none when a veto is decisive."""
+    if any(verdict is False for verdict in detected.values()) and not any(
+        verdict is True for verdict in detected.values()
+    ):
+        return []
+    return [
+        name
+        for name in _PRECEDENCE
+        if name in detected and detected[name] is not False
+    ]
 
 
 _EXTRACTORS = {
@@ -664,8 +705,11 @@ def map_span_attributes(
     if _vetoed(detected):
         return SkipReason.INELIGIBLE_KIND
 
+    eligible = _eligible_dialects(detected)
+    if not eligible:
+        return SkipReason.INELIGIBLE_KIND
     contributions = [
-        _EXTRACTORS[name](attributes) for name in _PRECEDENCE if name in detected
+        _EXTRACTORS[name](attributes) for name in eligible
     ]
     model = _first_value(contributions, "model")
     if model is None:
@@ -724,7 +768,7 @@ def map_span_attributes(
         trace_name=_first_value(contributions, "trace_name"),
         completion_start_time=_first_value(contributions, "completion_start_time"),
         error_message=_first_value(contributions, "error_message"),
-        dialects=tuple(name for name in _PRECEDENCE if name in detected),
+        dialects=tuple(eligible),
         parse_degraded=any(
             contribution.parse_degraded for contribution in contributions
         ),

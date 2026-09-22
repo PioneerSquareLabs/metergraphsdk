@@ -149,8 +149,8 @@ gateway-reported `reported_cost_usd`. A trusted custom domain uses
 
 MeterGraph provides a standard OpenTelemetry GenAI span exporter that also
 reads OpenInference (Arize Phoenix), Langfuse SDK and LangSmith spans, so an
-app already instrumented for any of them captures by registering one exporter
-— see
+app already instrumented for any of them captures by registering one exporter.
+See
 [Capture from existing telemetry](#capture-from-existing-telemetry-phoenix-langfuse-langsmith)
 below. LiteLLM is
 the currently qualified integration and can attach the exporter without

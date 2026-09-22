@@ -140,6 +140,66 @@ def test_gen_ai_accepts_legacy_prompt_and_completion_token_spellings():
     assert mapped.response["usage"] == {"input_tokens": 33, "output_tokens": 4}
 
 
+def test_bedrock_provider_spellings_are_canonicalized_without_guessing_unknowns():
+    for provider in (
+        "aws.bedrock",
+        "aws",
+        "AWS.Bedrock",
+        "aws.bedrock.converse",
+        "amazon.bedrock",
+        "aws_bedrock",
+        "bedrock",
+    ):
+        mapped = map_span_attributes(
+            {
+                "gen_ai.operation.name": "chat",
+                "gen_ai.provider.name": provider,
+                "gen_ai.request.model": "amazon.nova-lite-v1:0",
+                "gen_ai.usage.input_tokens": 12,
+                "gen_ai.usage.output_tokens": 4,
+            }
+        )
+        assert isinstance(mapped, MappedCall)
+        assert mapped.provider == "bedrock"
+        assert mapped.operation == "chat"
+        assert mapped.response["usage"] == {
+            "input_tokens": 12,
+            "output_tokens": 4,
+        }
+
+    mapped = map_span_attributes(
+        {
+            "gen_ai.operation.name": "chat",
+            "gen_ai.provider.name": "future.provider",
+            "gen_ai.request.model": "future-model",
+        }
+    )
+    assert isinstance(mapped, MappedCall)
+    assert mapped.provider == "future.provider"
+
+
+def test_azure_provider_spellings_are_canonicalized_for_openai_compatible_paths():
+    for provider in (
+        "azure.openai",
+        "Azure.OpenAI",
+        "azure.openai.chat",
+        "azure.ai.inference",
+        "azure_openai",
+    ):
+        mapped = map_span_attributes(
+            {
+                "gen_ai.operation.name": "chat",
+                "gen_ai.system": provider,
+                "gen_ai.request.model": "gpt-4o-deployment",
+                "gen_ai.usage.input_tokens": 8,
+                "gen_ai.usage.output_tokens": 3,
+            }
+        )
+        assert isinstance(mapped, MappedCall)
+        assert mapped.provider == "azure"
+        assert mapped.model == "gpt-4o-deployment"
+
+
 def test_langfuse_generation_parses_json_string_attributes():
     mapped = map_span_attributes(
         {

@@ -124,7 +124,7 @@ On a tracer provider shared with other instrumentation,
 `span.instrumentation_scope.name` (exclude wins; with `include_scopes` set, only
 the listed scopes pass), so one call is never captured twice. The public
 `exporter.skipped` dict counts spans that produced no row, keyed by reason
-(`"scope"`, `"not-genai"`, `"ineligible-kind"`, `"no-model"`) — the first thing to check when a tee
+(`"scope"`, `"not-genai"`, `"ineligible-kind"`, `"no-model"`). The first thing to check when a tee
 shows nothing.
 
 Configuration:

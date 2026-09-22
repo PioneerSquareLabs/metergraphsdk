@@ -48,7 +48,7 @@ verified before it is added to the supported range.
 | Azure OpenAI | Python `openai>=2.50,<3`; TypeScript `openai>=4,<8` | Azure endpoint configuration through the OpenAI-compatible client entry point | Supported | Azure endpoint configuration is recognized as Azure, while model, route, usage, timing, and errors retain the normal OpenAI-compatible contract. |
 | OpenInference / Phoenix | `opentelemetry-sdk>=1.30` plus the installed OpenInference instrumentor | `MetergraphGenAIExporter` on the existing tracer provider | Supported | `LLM` spans map to provider, model, usage, messages, and output; non-LLM spans increment an explicit skip reason. |
 | Langfuse | Langfuse SDK v3/v4 with `opentelemetry-sdk>=1.30` | `MetergraphGenAIExporter` on the tracer provider used by the Langfuse client | Supported | Generation observations map to usage, content, session, trace name, and errors; other observations are skipped. |
-| LangSmith | LangSmith OpenTelemetry spans with `opentelemetry-sdk>=1.30` | `MetergraphGenAIExporter` on the shared tracer provider | Project target | LLM runs must map to model, provider, usage, content, and errors; non-LLM runs must be skipped. |
+| LangSmith | LangSmith OpenTelemetry spans with `opentelemetry-sdk>=1.30` | `MetergraphGenAIExporter` on the shared tracer provider, with `LANGSMITH_TRACING_MODE=otel` or `hybrid` | Supported | LLM runs map to model, provider, usage, content, and errors; non-LLM runs are skipped. |
 
 The Bedrock anchor is the OpenTelemetry Python instrumentor range exercised by
 the provider fixtures. Azure uses the same OpenAI-compatible client anchors as
