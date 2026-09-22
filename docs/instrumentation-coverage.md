@@ -44,16 +44,17 @@ verified before it is added to the supported range.
 | OpenRouter through OpenAI clients | OpenAI anchor above; public URL `https://openrouter.ai/api/v1` | Automatic host detection or `gateway="openrouter"` for a trusted custom URL | Supported | Requested model, served model, and reported-cost evidence remain distinct. |
 | LiteLLM OpenTelemetry exporter, legacy shape | `litellm[proxy]>=1.96.2,<1.101` | `MetergraphGenAIExporter` registered as LiteLLM's exporter | Project target | `gen_ai.system` and LiteLLM metadata provider fallback, cache counters, route identity, and actionable skip diagnostics. |
 | LiteLLM OpenTelemetry exporter, current shape | `litellm[proxy]>=1.101,<2` with `LITELLM_OTEL_V2` enabled | Same exporter registration | Project target | `gen_ai.provider.name`, cache counters, content, proxy identity, and no inferred-channel requirement when provider data is present. |
-| Amazon Bedrock GenAI spans | Bedrock instrumentation package and version anchor to be pinned by MET-208 | Standard OpenTelemetry GenAI exporter path | Project target | `aws.bedrock`, `aws`, and canonical Bedrock provider spellings map to `bedrock`; model, route, usage, timing, and unsupported configuration diagnostics are verified. |
-| Azure OpenAI | Azure OpenAI client and version anchor to be pinned by MET-208 | Python and TypeScript OpenAI-compatible client entry points | Project target | Azure endpoint configuration is recognized as Azure, while model, route, usage, timing, and errors retain the normal OpenAI-compatible contract. |
+| Amazon Bedrock GenAI spans | `opentelemetry-instrumentation-bedrock>=0.49b0,<1` | Standard OpenTelemetry GenAI exporter path | Supported | `aws.bedrock`, `aws`, and canonical Bedrock provider spellings map to `bedrock`; model, route, usage, timing, and unsupported configuration diagnostics are verified. |
+| Azure OpenAI | Python `openai>=2.50,<3`; TypeScript `openai>=4,<8` | Azure endpoint configuration through the OpenAI-compatible client entry point | Supported | Azure endpoint configuration is recognized as Azure, while model, route, usage, timing, and errors retain the normal OpenAI-compatible contract. |
 | OpenInference / Phoenix | `opentelemetry-sdk>=1.30` plus the installed OpenInference instrumentor | `MetergraphGenAIExporter` on the existing tracer provider | Supported | `LLM` spans map to provider, model, usage, messages, and output; non-LLM spans increment an explicit skip reason. |
 | Langfuse | Langfuse SDK v3/v4 with `opentelemetry-sdk>=1.30` | `MetergraphGenAIExporter` on the tracer provider used by the Langfuse client | Supported | Generation observations map to usage, content, session, trace name, and errors; other observations are skipped. |
 | LangSmith | LangSmith OpenTelemetry spans with `opentelemetry-sdk>=1.30` | `MetergraphGenAIExporter` on the shared tracer provider | Project target | LLM runs must map to model, provider, usage, content, and errors; non-LLM runs must be skipped. |
 
-The project target rows are intentionally explicit about version anchors that
-still need to be pinned. MET-208 must replace those placeholders with the
-versions exercised by its provider fixtures before the rows can move to
-Supported.
+The Bedrock anchor is the OpenTelemetry Python instrumentor range exercised by
+the provider fixtures. Azure uses the same OpenAI-compatible client anchors as
+the existing direct-provider paths, with the endpoint and API-version
+configuration called out separately so an Azure deployment is not mistaken for
+the public OpenAI service.
 
 ## Unsupported paths and diagnostics
 

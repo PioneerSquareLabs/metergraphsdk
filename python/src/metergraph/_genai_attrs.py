@@ -84,6 +84,24 @@ _USAGE_TOP_KEYS = frozenset(
 # Langfuse usage_details spellings that translate onto that vocabulary.
 _LANGFUSE_USAGE_RENAMES = {"input": "input_tokens", "output": "output_tokens"}
 
+# Provider values are emitted by several OpenTelemetry instrumentors before
+# the semantic-convention provider vocabulary is stable. Keep this mapping
+# deliberately small: unknown values remain visible instead of being guessed
+# into a supported provider.
+_PROVIDER_ALIASES = {
+    "amazon.bedrock": "bedrock",
+    "aws": "bedrock",
+    "aws.bedrock": "bedrock",
+    "aws.bedrock.converse": "bedrock",
+    "aws_bedrock": "bedrock",
+    "bedrock": "bedrock",
+    "azure": "azure",
+    "azure.ai.inference": "azure",
+    "azure.openai": "azure",
+    "azure.openai.chat": "azure",
+    "azure_openai": "azure",
+}
+
 
 def map_usage_details(
     decoded: Mapping[str, Any],
@@ -110,6 +128,13 @@ def map_usage_details(
 
 def _string(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _canonical_provider(value: Any) -> str | None:
+    provider = _string(value)
+    if provider is None:
+        return None
+    return _PROVIDER_ALIASES.get(provider.strip().lower(), provider)
 
 
 def _number(value: Any) -> float | None:
@@ -223,9 +248,9 @@ class _Fields:
 def _extract_genai(attributes: Mapping[str, Any]) -> _Fields:
     fields = _Fields()
     fields.model = _string(attributes.get("gen_ai.request.model"))
-    fields.provider = _string(attributes.get("gen_ai.provider.name")) or _string(
-        attributes.get("gen_ai.system")
-    )
+    fields.provider = _canonical_provider(
+        attributes.get("gen_ai.provider.name")
+    ) or _canonical_provider(attributes.get("gen_ai.system"))
     fields.operation = _string(attributes.get("gen_ai.operation.name"))
     fields.response_model = _string(attributes.get("gen_ai.response.model"))
     system, messages = _genai_request_content(attributes)
@@ -317,9 +342,9 @@ def _extract_openinference(attributes: Mapping[str, Any]) -> _Fields:
         attributes.get("llm.model_name")
     )
     fields.response_model = _string(attributes.get("llm.response.model_name"))
-    fields.provider = _string(attributes.get("llm.provider")) or _string(
-        attributes.get("llm.system")
-    )
+    fields.provider = _canonical_provider(
+        attributes.get("llm.provider")
+    ) or _canonical_provider(attributes.get("llm.system"))
     fields.finish_reason = _string(attributes.get("llm.finish_reason"))
 
     usage_pairs = (

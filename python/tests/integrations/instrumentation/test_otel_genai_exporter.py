@@ -216,6 +216,48 @@ def test_translates_current_litellm_span_shape(monkeypatch):
     _capture.set_runtime(None)
 
 
+def test_exports_bedrock_and_azure_provider_paths(monkeypatch):
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root="")))
+    monkeypatch.setattr(metergraph, "init", lambda: None)
+    exporter = MetergraphGenAIExporter()
+
+    exporter.export(
+        [
+            _span(
+                {
+                    "gen_ai.operation.name": "chat",
+                    "gen_ai.provider.name": "aws.bedrock",
+                    "gen_ai.request.model": "amazon.nova-lite-v1:0",
+                    "gen_ai.usage.input_tokens": 12,
+                    "gen_ai.usage.output_tokens": 4,
+                }
+            ),
+            _span(
+                {
+                    "gen_ai.operation.name": "chat",
+                    "gen_ai.system": "Azure.OpenAI",
+                    "gen_ai.request.model": "gpt-4o-deployment",
+                    "gen_ai.usage.input_tokens": 8,
+                    "gen_ai.usage.output_tokens": 3,
+                }
+            ),
+        ]
+    )
+
+    assert [row["provider"] for row in rows.rows] == ["bedrock", "azure"]
+    assert [row["model"] for row in rows.rows] == [
+        "amazon.nova-lite-v1:0",
+        "gpt-4o-deployment",
+    ]
+    assert [row["route"] for row in rows.rows] == ["chat", "chat"]
+    assert [(row["input_tokens"], row["output_tokens"]) for row in rows.rows] == [
+        (12, 4),
+        (8, 3),
+    ]
+    _capture.set_runtime(None)
+
+
 def test_maps_otel_error_status_without_raising(monkeypatch):
     rows = Rows()
     _capture.set_runtime(Runtime(rows, Options(app_root="")))
