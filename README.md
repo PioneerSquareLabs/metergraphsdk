@@ -331,6 +331,18 @@ which point it becomes `filtered` and stays that way. Declarations are request
 content: they follow the same text capture switch, redaction hook and size
 bound as the rest of the request, and are omitted rather than clipped.
 
+The same canonical view is produced for applications that reach MeterGraph
+through OpenTelemetry rather than an SDK, from the GenAI convention's
+`gen_ai.tool.definitions` attribute. Those records carry the dialect `otel`,
+because the dialect names the shape a declaration was read in rather than the
+provider that served the call. The convention requires only a tool's type and
+name and permits omitting the parameter schema, so an OTEL record that omits it
+reports `incomplete` rather than presenting an empty schema as a declared one.
+Losses belonging to the declaration set rather than to a single declaration,
+an unreadable attribute and reported upstream attribute loss, are recorded in
+the envelope's optional `limitations` array. That path has no redaction hook,
+since there is no SDK on it.
+
 An Anthropic reply whose whole content is client tool calls records
 `"content": null` with its tool calls intact, instead of a serialized list of
 provider block objects. The rule is deliberately narrow: it applies to the

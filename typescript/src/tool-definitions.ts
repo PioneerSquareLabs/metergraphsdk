@@ -51,12 +51,19 @@ const RECORD_KEYS = [
 ];
 const OPTIONAL_RECORD_KEYS = ["provider_type", "duplicate_of"];
 const KINDS = new Set(["function", "provider", "unknown"]);
+// One contract, one vocabulary. `otel` and the attribute container belong to
+// the hosted OpenTelemetry reader and no SDK producer emits them, but the
+// closed sets are the contract's and are kept identical across all three
+// implementations so a record valid in one is valid in every one.
+const OTEL_DIALECT = "otel";
+const OTEL_CONTAINER = "gen_ai.tool.definitions";
 const DIALECTS = new Set([
   "anthropic",
   "openai_chat",
   "openai_responses",
   "gemini",
   "ai_sdk",
+  OTEL_DIALECT,
   "unknown",
 ]);
 const STATUSES = new Set([
@@ -67,7 +74,10 @@ const STATUSES = new Set([
   "provider_tool",
   "ambiguous",
 ]);
-const CONTAINER_NAMES = new Set(CONTAINERS.map(([name]) => name));
+const CONTAINER_NAMES = new Set([
+  ...CONTAINERS.map(([name]) => name),
+  OTEL_CONTAINER,
+]);
 const SCHEMA_KEY_NAMES = new Set([...SCHEMA_KEYS, "input_schema", "inputSchema"]);
 
 // A provider-native tool declares a type, not a schema, so its dialect is only

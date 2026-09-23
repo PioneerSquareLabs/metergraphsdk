@@ -59,13 +59,27 @@ _RECORD_KEYS = (
 )
 _OPTIONAL_RECORD_KEYS = ("provider_type", "duplicate_of")
 _KINDS = frozenset({"function", "provider", "unknown"})
+# One contract, one vocabulary. `otel` and the attribute container belong to
+# the hosted OpenTelemetry reader and no SDK producer emits them, but the
+# closed sets are the contract's and are kept identical across all three
+# implementations so a record valid in one is valid in every one.
+_OTEL_DIALECT = "otel"
+_OTEL_CONTAINER = "gen_ai.tool.definitions"
 _DIALECTS = frozenset(
-    {"anthropic", "openai_chat", "openai_responses", "gemini", "ai_sdk", "unknown"}
+    {
+        "anthropic",
+        "openai_chat",
+        "openai_responses",
+        "gemini",
+        "ai_sdk",
+        _OTEL_DIALECT,
+        "unknown",
+    }
 )
 _STATUSES = frozenset(
     {"declared", "incomplete", "malformed", "unsupported", "provider_tool", "ambiguous"}
 )
-_CONTAINER_NAMES = frozenset(name for name, _ in _CONTAINERS)
+_CONTAINER_NAMES = frozenset(name for name, _ in _CONTAINERS) | {_OTEL_CONTAINER}
 _SCHEMA_KEY_NAMES = frozenset(_SCHEMA_KEYS) | {"input_schema", "inputSchema"}
 
 
