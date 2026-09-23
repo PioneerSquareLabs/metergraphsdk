@@ -956,6 +956,11 @@ class Runtime:
                 value = self.options.redact(value, kind)
             except Exception:
                 return "<redaction-failed>", False
+            # A hook that returns something other than text is the same kind of
+            # fault as one that raises, and gets the same answer. Without this
+            # the encode below raises out of `finish` and the row is lost.
+            if not isinstance(value, str):
+                return "<redaction-failed>", False
         raw = value.encode()
         if len(raw) <= self.options.text_max_bytes:
             return value, False
@@ -980,26 +985,31 @@ class Runtime:
         """
         if not enabled:
             return None, False
+        # One boundary around the whole field. Everything inside is optional
+        # telemetry built partly from caller-supplied output, so any fault here
+        # drops the field alone: the row, the provider result and the provider
+        # exception are never affected by it.
         try:
-            read = _tool_definitions.declarations(request, provider)
+            return self._build_tool_definitions(request, provider)
         except Exception:
             return None, False
+
+    def _build_tool_definitions(
+        self, request: Mapping[str, Any], provider: str
+    ) -> tuple[dict[str, Any] | None, bool]:
+        read = _tool_definitions.declarations(request, provider)
         if read is None:
             return None, False
         records, scope = read
-        try:
-            encoded = json.dumps(records, ensure_ascii=False, separators=(",", ":"))
-        except (TypeError, ValueError):
-            return None, False
+        encoded = json.dumps(records, ensure_ascii=False, separators=(",", ":"))
         fidelity = "verbatim"
         if self.options.redact:
-            try:
-                redacted = self.options.redact(encoded, "request")
-            except Exception:
+            redacted = self.options.redact(encoded, "request")
+            if not isinstance(redacted, str):
                 return None, False
             try:
                 parsed = json.loads(redacted)
-            except (TypeError, ValueError, json.JSONDecodeError):
+            except (TypeError, ValueError, RecursionError):
                 return None, False
             if not _tool_definitions.valid_declarations(parsed):
                 return None, False
@@ -1007,12 +1017,7 @@ class Runtime:
                 fidelity = "filtered"
             records = parsed
         envelope = _tool_definitions.envelope(records, scope, fidelity)
-        try:
-            serialized = json.dumps(
-                envelope, ensure_ascii=False, separators=(",", ":")
-            )
-        except (TypeError, ValueError):
-            return None, False
+        serialized = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
         if len(serialized.encode()) > self.options.text_max_bytes:
             return None, True
         return envelope, False

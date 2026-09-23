@@ -15,6 +15,7 @@ precedence a provider applies across competing containers.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -381,11 +382,70 @@ def declarations(
     return records, ("effective" if contributors <= 1 else "inventory")
 
 
+_MAX_SCHEMA_DEPTH = 100
+
+
+def _enumerated(value: Any, allowed: frozenset[str], *, nullable: bool = False) -> bool:
+    """Whether a value is one of a closed set.
+
+    The type check comes first on purpose. `value in frozenset` raises
+    `TypeError` for an unhashable value such as `{}`, and this validator runs on
+    caller-supplied output, so it must answer rather than raise.
+    """
+    if value is None:
+        return nullable
+    return isinstance(value, str) and value in allowed
+
+
+def _index_value(value: Any) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value < _INDEX_MAX
+    )
+
+
+def _storable(value: Any, depth: int = 0) -> bool:
+    """Whether a value is JSON data the durable column can hold.
+
+    `json.loads` accepts `NaN` and `Infinity`, and a JSON string may carry a
+    lone surrogate or a NUL; none of those survive the durable write. Depth is
+    bounded so a deeply nested hook result cannot recurse this check off the
+    stack.
+    """
+    if depth > _MAX_SCHEMA_DEPTH:
+        return False
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return False
+        return "\x00" not in value
+    if isinstance(value, bool) or value is None:
+        return True
+    if isinstance(value, int):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, Mapping):
+        return all(
+            isinstance(key, str)
+            and _storable(key, depth + 1)
+            and _storable(item, depth + 1)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return all(_storable(item, depth + 1) for item in value)
+    return False
+
+
 def valid_declarations(value: Any) -> bool:
     """Whether a declarations array still matches the contract.
 
     Applied to the redaction hook's output, which is caller-supplied and may
-    return anything at all.
+    return anything at all. Total by construction: it answers for every input
+    and never raises, so a hostile or broken hook costs the field and nothing
+    else.
     """
     if not isinstance(value, list) or not value:
         return False
@@ -397,24 +457,19 @@ def valid_declarations(value: Any) -> bool:
             return False
         if keys - set(_RECORD_KEYS) - set(_OPTIONAL_RECORD_KEYS):
             return False
-        index = record["index"]
-        if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < _INDEX_MAX:
+        if not _index_value(record["index"]):
             return False
-        duplicate = record.get("duplicate_of")
-        if "duplicate_of" in record and (
-            not isinstance(duplicate, int)
-            or isinstance(duplicate, bool)
-            or not 0 <= duplicate < _INDEX_MAX
-        ):
+        if "duplicate_of" in record and not _index_value(record["duplicate_of"]):
             return False
-        if record["kind"] not in _KINDS or record["dialect"] not in _DIALECTS:
+        if not _enumerated(record["kind"], _KINDS):
             return False
-        if record["status"] not in _STATUSES:
+        if not _enumerated(record["dialect"], _DIALECTS):
             return False
-        if record["container"] not in _CONTAINER_NAMES:
+        if not _enumerated(record["status"], _STATUSES):
             return False
-        schema_key = record["schema_key"]
-        if schema_key is not None and schema_key not in _SCHEMA_KEY_NAMES:
+        if not _enumerated(record["container"], _CONTAINER_NAMES):
+            return False
+        if not _enumerated(record["schema_key"], _SCHEMA_KEY_NAMES, nullable=True):
             return False
         for key in ("name", "provider_type"):
             text = record.get(key)
@@ -425,6 +480,8 @@ def valid_declarations(value: Any) -> bool:
             return False
         schema = record["schema"]
         if schema is not None and not isinstance(schema, Mapping):
+            return False
+        if not _storable(dict(record)):
             return False
     return True
 

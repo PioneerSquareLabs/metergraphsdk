@@ -381,9 +381,36 @@ export function readDeclarations(
   return { declarations: records, scope: contributors <= 1 ? "effective" : "inventory" };
 }
 
+const MAX_SCHEMA_DEPTH = 100;
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+/**
+ * Whether a value is JSON data the durable column can hold. `JSON.parse`
+ * accepts a lone surrogate, a hook can introduce `NaN`, and neither survives
+ * the durable write; depth is bounded so a deeply nested hook result cannot
+ * recurse this check off the stack.
+ */
+function storable(value: unknown, depth = 0): boolean {
+  if (depth > MAX_SCHEMA_DEPTH) return false;
+  if (typeof value === "string") {
+    return !value.includes("\u0000") && !LONE_SURROGATE.test(value);
+  }
+  if (typeof value === "boolean" || value === null) return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every((item) => storable(item, depth + 1));
+  if (isMapping(value)) {
+    return Object.entries(value).every(
+      ([key, item]) => storable(key, depth + 1) && storable(item, depth + 1),
+    );
+  }
+  return false;
+}
+
 /**
  * Whether a declarations array still matches the contract. Applied to the
  * redaction hook's output, which is caller-supplied and may return anything.
+ * Total by construction: it answers for every input and never throws, so a
+ * hostile or broken hook costs the field and nothing else.
  */
 export function validDeclarations(value: unknown): value is ToolDeclaration[] {
   if (!Array.isArray(value) || !value.length) return false;
@@ -419,6 +446,7 @@ export function validDeclarations(value: unknown): value is ToolDeclaration[] {
     }
     if (entry.description !== null && typeof entry.description !== "string") return false;
     if (entry.schema !== null && !isMapping(entry.schema)) return false;
+    if (!storable(entry)) return false;
   }
   return true;
 }

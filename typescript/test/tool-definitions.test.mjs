@@ -443,6 +443,69 @@ test("a non-finite schema value is unsupported rather than claimed verbatim", ()
   assert.equal(record.schema, null);
 });
 
+test("a malformed hook result costs the field and nothing else", () => {
+  // The hook is caller-supplied, so its output is untrusted input: an
+  // unhashable enum value, a value the durable column cannot hold, or output
+  // that is not an array at all must omit the field and keep the row.
+  const deep = {};
+  let node = deep;
+  for (let index = 0; index < 300; index += 1) { node.a = {}; node = node.a; }
+  const mutations = [
+    ["an unhashable enum value", (records) => { records[0].kind = {}; return records; }],
+    ["a list enum value", (records) => { records[0].kind = []; return records; }],
+    ["an object status", (records) => { records[0].status = { a: 1 }; return records; }],
+    ["a numeric dialect", (records) => { records[0].dialect = 7; return records; }],
+    ["a string index", (records) => { records[0].index = "zero"; return records; }],
+    ["a lone surrogate name", (records) => {
+      records[0].name = String.fromCharCode(0xD800); return records; }],
+    ["a NUL description", (records) => {
+      records[0].description = `a${String.fromCharCode(0)}b`; return records; }],
+    ["a schema past the depth bound", (records) => { records[0].schema = deep; return records; }],
+    ["an added key", (records) => { records[0].surprise = "extra"; return records; }],
+  ];
+  for (const [reason, mutate] of mutations) {
+    const row = capture(TOOL_REQUEST, message([], "end_turn"), {
+      options: { redact: (value) => JSON.stringify(mutate(JSON.parse(value))) },
+    });
+    assert.equal(row.tool_definitions, undefined, `a malformed view survived ${reason}`);
+    assert.equal(row.model, "claude-test", `the row was lost for ${reason}`);
+  }
+  for (const [reason, hook] of [
+    ["output that is not JSON", () => "not json at all"],
+    ["output that is not an array", () => '{"not":"an array"}'],
+    ["a hook that throws", () => { throw new Error("boom"); }],
+  ]) {
+    const row = capture(TOOL_REQUEST, message([], "end_turn"), { options: { redact: hook } });
+    assert.equal(row.tool_definitions, undefined, `a malformed view survived ${reason}`);
+    assert.equal(row.model, "claude-test", `the row was lost for ${reason}`);
+  }
+});
+
+test("a hook that introduces a non-finite value yields a filtered view, not a claim", () => {
+  // `JSON.stringify` writes NaN as null, so the SDK never sees the non-finite
+  // value: it sees a schema that differs from the one it read. The view
+  // survives with the changed value and reports `filtered`, which is the
+  // honest answer. `JSON.parse` rejects a bare NaN literal, so a hook cannot
+  // smuggle one in through the text either.
+  const row = capture(TOOL_REQUEST, message([], "end_turn"), {
+    options: {
+      redact: (value) => {
+        const records = JSON.parse(value);
+        records[0].schema = { threshold: NaN };
+        return JSON.stringify(records);
+      },
+    },
+  });
+  assert.equal(row.tool_definitions.fidelity, "filtered");
+  assert.deepEqual(row.tool_definitions.declarations[0].schema, { threshold: null });
+
+  const rejected = capture(TOOL_REQUEST, message([], "end_turn"), {
+    options: { redact: () => '[{"index":0,"schema":{"t":NaN}}]' },
+  });
+  assert.equal(rejected.tool_definitions, undefined);
+  assert.equal(rejected.model, "claude-test");
+});
+
 test("jsonEqual is the equality the recognition rule and fidelity use", () => {
   assert.ok(jsonEqual({ a: 1, b: 2 }, { b: 2, a: 1 }), "object key order is ignored");
   assert.ok(!jsonEqual([1, 2], [2, 1]), "array order is kept");

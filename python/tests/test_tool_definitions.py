@@ -414,6 +414,75 @@ def test_redaction_returning_junk_omits_the_field_but_keeps_the_row(tmp_path):
         assert rows.rows[0]["model"] == "claude-test", "the row still ships"
 
 
+def _hostile_hook_row(tmp_path, mutate):
+    """One captured row from a run whose redaction hook returns `mutate`'s output."""
+    rows = Rows()
+    run = Runtime(
+        rows,
+        Options(app_root=str(tmp_path), capture_text=True,
+                redact=lambda value, kind: mutate(value)),
+    )
+    state = run.call_state(
+        "anthropic", "messages",
+        {"model": "claude-test",
+         "tools": [{"name": "lookup", "input_schema": {"type": "object"}}]},
+    )
+    state.finish(Model(content=[], stop_reason="end_turn"))
+    return rows.rows
+
+
+def _with_record_key(key, value):
+    def mutate(text):
+        records = json.loads(text)
+        records[0][key] = value
+        return json.dumps(records)
+
+    return mutate
+
+
+def _deeply_nested(levels=300):
+    root: dict = {}
+    node = root
+    for _ in range(levels):
+        node["a"] = {}
+        node = node["a"]
+    return root
+
+
+@pytest.mark.parametrize("mutate,reason", [
+    (_with_record_key("kind", {}), "an unhashable enum value"),
+    (_with_record_key("kind", []), "an unhashable list enum value"),
+    (_with_record_key("status", {"a": 1}), "a dict where a status belongs"),
+    (_with_record_key("container", ["tools"]), "a list where a container belongs"),
+    (_with_record_key("schema_key", {}), "a dict where a schema key belongs"),
+    (_with_record_key("dialect", 7), "a number where a dialect belongs"),
+    (_with_record_key("index", "zero"), "a string index"),
+    (_with_record_key("name", "\ud800"), "a lone surrogate in a name"),
+    (_with_record_key("description", "a\x00b"), "a NUL in a description"),
+    (_with_record_key("schema", {"title": "\udfff"}), "a surrogate inside a schema"),
+    (_with_record_key("schema", {"threshold": float("nan")}), "a non-finite schema value"),
+    (_with_record_key("schema", _deeply_nested()), "a schema nested past the depth bound"),
+    (_with_record_key("surprise", "extra"), "an added key"),
+    (lambda text: "not json at all", "output that is not JSON"),
+    (lambda text: "17", "output that is not an array"),
+    (lambda text: 17, "output that is not text"),
+    (lambda text: (_ for _ in ()).throw(RuntimeError("boom")), "a hook that raises"),
+])
+def test_a_malformed_hook_result_costs_the_field_and_nothing_else(tmp_path, mutate, reason):
+    """The hook is caller-supplied, so its output is untrusted input.
+
+    A membership test against a closed set raises `TypeError` for an unhashable
+    value, which once escaped `finish` and dropped the whole row. Every case
+    here must leave the row intact and omit only the declaration view.
+    """
+    rows = _hostile_hook_row(tmp_path, mutate)
+
+    assert len(rows) == 1, f"the row was lost for {reason}"
+    assert "tool_definitions" not in rows[0], f"a malformed view survived {reason}"
+    assert rows[0]["model"] == "claude-test"
+    assert rows[0]["provider"] == "anthropic"
+
+
 def test_a_hook_cannot_assert_its_own_fidelity(tmp_path):
     def forge(value, kind):
         records = json.loads(value)
