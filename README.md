@@ -334,10 +334,12 @@ bound as the rest of the request, and are omitted rather than clipped.
 An Anthropic reply whose whole content is client tool calls records
 `"content": null` with its tool calls intact, instead of a serialized list of
 provider block objects. The rule is deliberately narrow: it applies to the
-direct `messages` seams, requires a `tool_use` stop reason, and requires every
-block to match exactly one recorded tool event. Anything else, including a
-reply truncated at `max_tokens`, mixed text, thinking blocks, provider-executed
-tools and unknown block types, keeps exactly the representation it has today.
+direct `messages` seams, and requires every block to match exactly one
+recorded tool event. Where a stop reason is observable it must be `tool_use`;
+a reply that carries no stop reason at all is not disqualified by its absence.
+Anything else, including a reply truncated at `max_tokens`, mixed text,
+thinking blocks, provider-executed tools and unknown block types, keeps
+exactly the representation it has today.
 
 See [`examples/`](examples) for runnable per-provider examples, including an offline fake-provider demo that needs no API keys. The [instrumentation coverage contract](docs/instrumentation-coverage.md) is the source of truth for supported providers, frameworks, package anchors, and unsupported-path behavior.
 
