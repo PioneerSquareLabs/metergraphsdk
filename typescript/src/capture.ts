@@ -3,6 +3,13 @@ import { randomBytes } from "node:crypto";
 import { contextSnapshot, type CaptureContext } from "./context.js";
 import { gatewayEvidence } from "./gateway.js";
 import { scrubRequest, templateHash } from "./template.js";
+import {
+  jsonEqual,
+  readDeclarations,
+  toolDefinitionsEnvelope,
+  validDeclarations,
+  type ToolDefinitions,
+} from "./tool-definitions.js";
 import type { Transport } from "./transport.js";
 import { SDK_VERSION } from "./version.js";
 
@@ -473,17 +480,196 @@ function responseContent(response: unknown, aggregate?: string): unknown {
   return candidates;
 }
 
+// The direct Anthropic seams. An Anthropic model behind Bedrock, Vertex or an
+// OpenAI-shaped gateway keeps the existing behaviour: its reply shape is not
+// the one verified here.
+const ANTHROPIC_ENDPOINTS = new Set(["messages", "messages.stream"]);
+// Everything a tool_use block may carry and still be fully represented by its
+// canonical tool event. `caller` is allowed only as the direct-call default,
+// which the event already implies by existing.
+const TOOL_BLOCK_KEYS = new Set(["type", "id", "name", "input", "caller"]);
+
+function plainMapping(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (item === undefined) continue;
+    out[key] = item;
+  }
+  return out;
+}
+
+function representableToolBlock(block: unknown): Record<string, unknown> | undefined {
+  const mapping = plainMapping(block);
+  if (!mapping || mapping.type !== "tool_use") return undefined;
+  if (Object.keys(mapping).some((key) => !TOOL_BLOCK_KEYS.has(key))) return undefined;
+  const caller = mapping.caller;
+  if (caller !== undefined && caller !== null) {
+    const declared = plainMapping(caller);
+    if (!declared) return undefined;
+    const meaningful = Object.entries(declared).filter(([, value]) => value !== null);
+    if (meaningful.length !== 1 || meaningful[0]![0] !== "type" || meaningful[0]![1] !== "direct") {
+      return undefined;
+    }
+  }
+  return mapping;
+}
+
+/**
+ * Whether every block of this reply is represented by exactly one event. Events
+ * also carry the request history's calls, which is expected and never
+ * disqualifies; only the events whose ids belong to this reply are compared.
+ */
+function matchedEvents(
+  blocks: Record<string, unknown>[],
+  events: ToolEvent[] | undefined,
+  compareArguments = true,
+): boolean {
+  const ids = blocks.map((block) => block.id);
+  if (ids.some((id) => typeof id !== "string" || !id)) return false;
+  if (new Set(ids).size !== ids.length) return false;
+  for (const block of blocks) {
+    const matches = (events ?? []).filter((event) => event.call_id === block.id);
+    if (matches.length !== 1) return false;
+    const event = matches[0]!;
+    if (event.name !== block.name) return false;
+    // A streamed block starts with no input: its arguments arrive as deltas and
+    // are compared against the accumulation instead.
+    if (compareArguments && !jsonEqual(event.arguments, toolArgument(block.input))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function argumentsEqual(accumulated: string, eventArguments: unknown): boolean {
+  try {
+    const expected = accumulated.trim() ? JSON.parse(accumulated) : {};
+    let actual = eventArguments;
+    if (typeof actual === "string") actual = actual.trim() ? JSON.parse(actual) : {};
+    else if (actual === undefined || actual === null) actual = {};
+    return jsonEqual(expected, actual);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A completed raw Anthropic event stream whose whole reply was tool calls.
+ * A raw stream never produces a final Message, so completion is established
+ * from the events themselves: every started block stopped, the stream reached
+ * `message_stop`, and no observable stop reason other than `tool_use`.
+ */
+function streamToolOnly(chunks: unknown[], events: ToolEvent[] | undefined): boolean {
+  const started = new Map<string, Record<string, unknown>>();
+  const args = new Map<string, string>();
+  const stopped = new Set<string>();
+  const stopReasons: string[] = [];
+  let sawMessageStop = false;
+  for (const chunk of chunks) {
+    if (chunkText(chunk)) return false;
+    const kind = get(chunk, "type");
+    const delta = get(chunk, "delta");
+    if (typeof delta === "string" && String(kind).includes("reasoning")) return false;
+    if (get(delta, "thinking") || get(delta, "reasoning")) return false;
+    if (kind === "content_block_start") {
+      const mapping = representableToolBlock(get(chunk, "content_block"));
+      if (!mapping) return false;
+      const key = String(get(chunk, "index") ?? started.size);
+      started.set(key, mapping);
+      const initial = mapping.input;
+      const empty = initial === undefined || initial === null
+        || (typeof initial === "object" && Object.keys(initial as object).length === 0);
+      args.set(key, empty ? "" : JSON.stringify(initial));
+    } else if (kind === "content_block_delta") {
+      if (get(delta, "type") !== "input_json_delta") return false;
+      const key = String(get(chunk, "index") ?? "0");
+      args.set(key, (args.get(key) ?? "") + String(get(delta, "partial_json") ?? ""));
+    } else if (kind === "content_block_stop") {
+      stopped.add(String(get(chunk, "index") ?? "0"));
+    } else if (kind === "message_delta") {
+      const reason = get(delta, "stop_reason");
+      if (reason !== undefined && reason !== null) stopReasons.push(String(reason));
+    } else if (kind === "message_stop") {
+      sawMessageStop = true;
+    }
+  }
+  if (!started.size || !sawMessageStop) return false;
+  for (const key of started.keys()) if (!stopped.has(key)) return false;
+  if (stopReasons.some((reason) => reason !== "tool_use")) return false;
+  const blocks = [...started.values()];
+  if (!matchedEvents(blocks, events, false)) return false;
+  for (const [key, mapping] of started) {
+    const matches = (events ?? []).filter((event) => event.call_id === mapping.id);
+    if (matches.length !== 1 || !argumentsEqual(args.get(key) ?? "", matches[0]!.arguments)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Whether this reply is an Anthropic client-tool-only turn with no text. Such a
+ * reply has no assistant text at all: recording the provider's block list as
+ * `content` puts a structure where the capture contract promises a string.
+ * Recognized narrowly, because the fallback is always safe and this conversion
+ * is not.
+ */
+function anthropicToolOnly(
+  response: unknown,
+  options: {
+    provider?: string;
+    endpoint?: string;
+    events?: ToolEvent[];
+    aggregate?: string;
+    chunks?: unknown[];
+    completed?: boolean;
+  },
+): boolean {
+  if (!options.completed || options.aggregate !== undefined) return false;
+  if (options.provider !== "anthropic" || !ANTHROPIC_ENDPOINTS.has(options.endpoint ?? "")) {
+    return false;
+  }
+  if (!options.events || !options.events.length) return false;
+  const blocks = get(response, "content");
+  if (Array.isArray(blocks)) {
+    if (!blocks.length) return false;
+    // A reply stopped for any other reason may hold an unfinished tool call,
+    // and a null would assert a turn the model never completed. An absent stop
+    // reason does not disqualify on its own, matching the stream rule.
+    const reason = get(response, "stop_reason");
+    if (reason !== undefined && reason !== null && String(reason) !== "tool_use") return false;
+    const mapped = blocks.map((block) => representableToolBlock(block));
+    if (mapped.some((block) => block === undefined)) return false;
+    return matchedEvents(mapped as Record<string, unknown>[], options.events);
+  }
+  return streamToolOnly(options.chunks ?? [], options.events);
+}
+
 function responseEnvelope(
   response: unknown,
   aggregate: string | undefined,
   tools: ToolEvent[] | undefined,
   error: unknown,
   status: string,
+  recognition: {
+    provider?: string;
+    endpoint?: string;
+    events?: ToolEvent[];
+    chunks?: unknown[];
+    completed?: boolean;
+  } = {},
 ): Record<string, unknown> {
   const responseMetadata = get(response, "response");
+  let toolOnly = false;
+  try {
+    toolOnly = anthropicToolOnly(response, { ...recognition, aggregate });
+  } catch {
+    toolOnly = false;
+  }
   const envelope: Record<string, unknown> = {
     role: "assistant",
-    content: responseContent(response, aggregate),
+    content: toolOnly ? null : responseContent(response, aggregate),
     tool_calls: tools ?? [],
     finish_reason: stopReason(response),
     request_id: get(response, "_request_id") ?? get(response, "response_id")
@@ -498,6 +684,11 @@ function responseEnvelope(
       message: error instanceof Error ? error.message : String(error),
     };
   }
+  // An explicit null says the model produced no text and the reply is in
+  // `tool_calls`. This filter already drops only `undefined`, so the null
+  // survives without a carve-out, and an OpenAI chat tool-call reply keeps the
+  // null content it records today. No key is added, because the downstream
+  // normalizer accepts a closed envelope key set.
   return Object.fromEntries(
     Object.entries(envelope).filter(([, value]) => value !== undefined),
   );
@@ -604,6 +795,48 @@ export class CaptureRuntime {
     };
     const capturedRequest = scrubRequest(state.request);
     const request = text(JSON.stringify(capturedRequest), "request");
+    // Declared schemas are request content, so they follow the request text
+    // controls: withheld when text capture is off, passed through the redaction
+    // hook, and omitted rather than clipped beyond the byte bound. The hook is
+    // caller-supplied, so its output is re-parsed and re-validated, and the
+    // envelope (including `fidelity`) is built here, outside it.
+    let toolDefinitions: ToolDefinitions | undefined;
+    let toolDefinitionsTruncated = false;
+    if (captureText) {
+      try {
+        const read = readDeclarations(state.request as Record<string, unknown>, state.provider);
+        if (read) {
+          let records = read.declarations;
+          let fidelity = "verbatim";
+          const encoded = JSON.stringify(records);
+          if (this.options.redact) {
+            let parsed: unknown;
+            try {
+              parsed = JSON.parse(this.options.redact(encoded, "request"));
+            } catch {
+              parsed = undefined;
+            }
+            if (validDeclarations(parsed)) {
+              if (!jsonEqual(parsed, records)) fidelity = "filtered";
+              records = parsed;
+            } else {
+              records = [];
+            }
+          }
+          if (records.length) {
+            const envelope = toolDefinitionsEnvelope(records, read.scope, fidelity);
+            const serialized = JSON.stringify(envelope);
+            if (new TextEncoder().encode(serialized).byteLength > this.options.textMaxBytes) {
+              toolDefinitionsTruncated = true;
+            } else {
+              toolDefinitions = envelope;
+            }
+          }
+        }
+      } catch {
+        toolDefinitions = undefined;
+      }
+    }
     const fullTools = toolEvents(
       capturedRequest as Record<string, unknown>,
       response,
@@ -624,6 +857,17 @@ export class CaptureRuntime {
           fullTools,
           extra.error,
           status,
+          {
+            provider: state.provider,
+            endpoint: state.endpoint,
+            events: fullTools,
+            chunks: extra.responseChunks,
+            completed: extra.error === undefined
+              && extra.status !== "error"
+              && extra.status !== "abandoned"
+              && statusCode !== "error"
+              && finishReason !== "error",
+          },
         ),
       ),
       "response",
@@ -689,7 +933,11 @@ export class CaptureRuntime {
       content_opted_in: captureText,
       request_json: request.value,
       response_text: output.value,
-      text_truncated: request.truncated || output.truncated || toolTruncated,
+      text_truncated: request.truncated || output.truncated || toolTruncated
+        || toolDefinitionsTruncated,
+      // Absent rather than null: a null would make every tool-free call look
+      // like a row whose declaration view failed validation.
+      ...(toolDefinitions ? { tool_definitions: toolDefinitions } : {}),
       stream: extra.stream ?? false,
       ttft_ms: extra.ttftMs,
       func: state.context.funcName

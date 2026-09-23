@@ -171,3 +171,177 @@ test("wrap captures google generateContent through a real client", async (t) => 
     global.fetch = originalFetch;
   }
 });
+
+// --- MET-9: the declaration view and the tool-only content rule, driven
+// through the real Anthropic client's own request building and SSE parsing.
+
+const MET9_TOOL_REQUEST = {
+  model: "claude-haiku-4-5-20251001",
+  max_tokens: 64,
+  messages: [{ role: "user", content: "rank these" }],
+  tools: [{
+    name: "rank_experts",
+    description: "Rank candidate experts.",
+    input_schema: {
+      type: "object",
+      properties: { query: { type: "string" } },
+      required: ["query"],
+    },
+  }],
+  tool_choice: { type: "tool", name: "rank_experts" },
+};
+
+const MET9_TOOL_ONLY_MESSAGE = {
+  id: "msg_tool",
+  type: "message",
+  role: "assistant",
+  model: "claude-haiku-4-5-20251001",
+  content: [{ type: "tool_use", id: "toolu_real", name: "rank_experts",
+    input: { query: "vision" } }],
+  stop_reason: "tool_use",
+  usage: { input_tokens: 9, output_tokens: 3 },
+};
+
+function sseResponse(events) {
+  const body = events
+    .map(([name, payload]) => `event: ${name}\ndata: ${JSON.stringify(payload)}\n\n`)
+    .join("");
+  return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+}
+
+function met9StreamEvents(stopReason = "tool_use") {
+  return [
+    ["message_start", { type: "message_start", message: {
+      id: "msg_stream", type: "message", role: "assistant",
+      model: "claude-haiku-4-5-20251001", content: [], stop_reason: null,
+      usage: { input_tokens: 9, output_tokens: 0 } } }],
+    ["content_block_start", { type: "content_block_start", index: 0, content_block: {
+      type: "tool_use", id: "toolu_stream", name: "rank_experts", input: {} } }],
+    ["content_block_delta", { type: "content_block_delta", index: 0, delta: {
+      type: "input_json_delta", partial_json: '{"query": "vision"}' } }],
+    ["content_block_stop", { type: "content_block_stop", index: 0 }],
+    ["message_delta", { type: "message_delta",
+      delta: { stop_reason: stopReason, stop_sequence: null },
+      usage: { output_tokens: 7 } }],
+    ["message_stop", { type: "message_stop" }],
+  ];
+}
+
+test("wrap records the declaration view and null content through a real anthropic client",
+  async (t) => {
+    const rows = [];
+    setCaptureRuntime(stubRuntime(rows));
+    t.after(() => setCaptureRuntime());
+
+    const client = wrap(new Anthropic({
+      apiKey: "test",
+      fetch: async () => jsonResponse(MET9_TOOL_ONLY_MESSAGE),
+    }), "anthropic");
+
+    const response = await client.messages.create(MET9_TOOL_REQUEST);
+
+    assert.equal(response.content[0].name, "rank_experts");
+    assert.equal(rows.length, 1);
+    const [record] = rows[0].tool_definitions.declarations;
+    assert.equal(record.name, "rank_experts");
+    assert.equal(record.schema_key, "input_schema");
+    assert.deepEqual(record.schema.required, ["query"]);
+    const envelope = JSON.parse(rows[0].response_text);
+    assert.ok("content" in envelope);
+    assert.equal(envelope.content, null);
+    assert.equal(envelope.tool_calls[0].call_id, "toolu_real");
+    assert.deepEqual(envelope.tool_calls[0].arguments, { query: "vision" });
+  });
+
+test("a real anthropic reply truncated at max_tokens keeps its content", async (t) => {
+  const rows = [];
+  setCaptureRuntime(stubRuntime(rows));
+  t.after(() => setCaptureRuntime());
+
+  const client = wrap(new Anthropic({
+    apiKey: "test",
+    fetch: async () => jsonResponse({ ...MET9_TOOL_ONLY_MESSAGE, stop_reason: "max_tokens" }),
+  }), "anthropic");
+
+  await client.messages.create(MET9_TOOL_REQUEST);
+
+  assert.ok(Array.isArray(JSON.parse(rows[0].response_text).content));
+});
+
+test("a real anthropic raw event stream records null content", async (t) => {
+  const rows = [];
+  setCaptureRuntime(stubRuntime(rows));
+  t.after(() => setCaptureRuntime());
+
+  const client = wrap(new Anthropic({
+    apiKey: "test",
+    fetch: async () => sseResponse(met9StreamEvents()),
+  }), "anthropic");
+
+  const kinds = [];
+  for await (const event of await client.messages.create({ ...MET9_TOOL_REQUEST, stream: true })) {
+    kinds.push(event.type);
+  }
+
+  assert.equal(kinds[kinds.length - 1], "message_stop");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].stream, true);
+  const envelope = JSON.parse(rows[0].response_text);
+  assert.ok("content" in envelope);
+  assert.equal(envelope.content, null);
+  assert.equal(envelope.tool_calls[0].call_id, "toolu_stream");
+  assert.deepEqual(envelope.tool_calls[0].arguments, { query: "vision" });
+});
+
+test("a real anthropic stream truncated at max_tokens keeps its content", async (t) => {
+  const rows = [];
+  setCaptureRuntime(stubRuntime(rows));
+  t.after(() => setCaptureRuntime());
+
+  const client = wrap(new Anthropic({
+    apiKey: "test",
+    fetch: async () => sseResponse(met9StreamEvents("max_tokens")),
+  }), "anthropic");
+
+  for await (const _ of await client.messages.create({ ...MET9_TOOL_REQUEST, stream: true })) {
+    // drain
+  }
+
+  const envelope = JSON.parse(rows[0].response_text);
+  assert.ok(!("content" in envelope && envelope.content === null));
+});
+
+test("the real anthropic stream helper keeps its content while its events disagree",
+  async (t) => {
+    // The TypeScript stream helper mutates the `content_block_start` block in
+    // place as input_json_delta chunks arrive, so `toolEvents` seeds the
+    // accumulation with the already-complete input and then appends the deltas
+    // again: the event's arguments read `{"query":"vision"}{"query": "vision"}`.
+    // That predates this change and belongs to the tool-event contract, which
+    // this change does not touch. The recognition rule requires the reply's
+    // blocks and their events to agree, so it declines to convert and the
+    // provider's own representation is preserved. The Python stream helper does
+    // not double its arguments and does convert, which
+    // tests/integrations/providers/test_real_client_integration.py asserts.
+    const rows = [];
+    setCaptureRuntime(stubRuntime(rows));
+    t.after(() => setCaptureRuntime());
+
+    const client = wrap(new Anthropic({
+      apiKey: "test",
+      fetch: async () => sseResponse(met9StreamEvents()),
+    }), "anthropic");
+
+    const stream = client.messages.stream(MET9_TOOL_REQUEST);
+    for await (const _ of stream) {
+      // drain
+    }
+    const final = await stream.finalMessage();
+
+    assert.equal(final.stop_reason, "tool_use");
+    const envelope = JSON.parse(rows[0].response_text);
+    assert.ok(Array.isArray(envelope.content), "the fallback keeps the blocks");
+    assert.equal(rows[0].tool_calls[0].call_id, "toolu_stream");
+    assert.match(String(rows[0].tool_calls[0].arguments), /^\{"query":"vision"\}\{/,
+      "records the pre-existing doubling this rule refuses to trust");
+  });
