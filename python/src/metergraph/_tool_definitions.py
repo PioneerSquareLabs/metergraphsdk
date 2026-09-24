@@ -1,17 +1,4 @@
-"""The canonical view of the tool declarations a request carried.
-
-A provider request states its tools in one of five dialects, and MeterGraph
-captured only their names. A name is not a schema: it cannot tell an analysis
-what the model was allowed to ask for, so a tool-using call arrived
-unreplayable. This module reads every declaration a request carries and records
-it once, in one shape, preserving order and the declared schema exactly.
-
-What it will not do is guess. Where a declaration is unreadable, incomplete,
-duplicated, or where two schema keys disagree, the record says so rather than
-inventing a schema, and the envelope's `scope` says whether the declarations
-came from one container or several, because nothing in the capture reveals the
-precedence a provider applies across competing containers.
-"""
+"""Canonicalize request tool declarations without guessing provider semantics."""
 
 from __future__ import annotations
 
@@ -23,24 +10,21 @@ from ._template import Unrepresentable, json_equal, json_value_strict
 
 VERSION = 1
 
-# Read in this order, so a request carrying tools in more than one place
-# produces the same records every time.
+# Container order is part of the durable record contract.
 _CONTAINERS = (
     ("tools", ("tools",)),
     ("config.tools", ("config", "tools")),
     ("extra_body.tools", ("extra_body", "tools")),
 )
 
-# Precedence within one Gemini declaration. Listed once, applied everywhere.
+# Gemini schema-key precedence is part of the capture contract.
 _SCHEMA_KEYS = ("parameters_json_schema", "parametersJsonSchema", "parameters")
 
 _GEMINI_NATIVE_TOOLS = frozenset(
     {"google_search", "google_search_retrieval", "code_execution", "url_context"}
 )
 
-# A provider-native tool declares a type, not a schema, so its dialect is only
-# known where the captured provider is itself unambiguous. OpenAI stays unknown:
-# `{"type": "web_search_preview"}` is the same entry on Chat and on Responses.
+# OpenAI provider-native declarations do not identify Chat versus Responses.
 _PROVIDER_DIALECTS = {"anthropic": "anthropic", "google": "gemini"}
 
 _IDENTITY_MAX_BYTES = 512
@@ -59,10 +43,7 @@ _RECORD_KEYS = (
 )
 _OPTIONAL_RECORD_KEYS = ("provider_type", "duplicate_of")
 _KINDS = frozenset({"function", "provider", "unknown"})
-# One contract, one vocabulary. `otel` and the attribute container belong to
-# the hosted OpenTelemetry reader and no SDK producer emits them, but the
-# closed sets are the contract's and are kept identical across all three
-# implementations so a record valid in one is valid in every one.
+# Keep this vocabulary aligned across SDK and OpenTelemetry implementations.
 _OTEL_DIALECT = "otel"
 _OTEL_CONTAINER = "gen_ai.tool.definitions"
 _DIALECTS = frozenset(
@@ -151,7 +132,6 @@ def _function_record(
     schema_keys: tuple[str, ...],
     description_source: Any,
 ) -> dict[str, Any]:
-    """One caller-authored function declaration, read without normalization."""
     name = _attribute(name_source, "name")
     description = _attribute(description_source, "description")
     sources = _schema_sources(entry, schema_keys)
@@ -160,8 +140,7 @@ def _function_record(
         try:
             converted.append((key, json_value_strict(value)))
         except Unrepresentable:
-            # A schema the request serializer cannot hold is not a schema this
-            # view can carry. `request_json` still shows whatever was sent.
+            # Unsupported schemas remain available in request_json.
             return _record(
                 index,
                 container,
@@ -174,8 +153,7 @@ def _function_record(
     if len(converted) > 1:
         first = converted[0][1]
         if any(not json_equal(value, first) for _, value in converted[1:]):
-            # Which key the provider honors is not knowable from the capture,
-            # so neither is the effective schema.
+            # Conflicting schema keys make the effective schema unknowable.
             return _record(
                 index,
                 container,
@@ -294,8 +272,7 @@ def _entry_records(
         ]
     declared_type = _attribute(entry, "type")
     if declared_type == "function":
-        # A function stays a function even with no name: it is incomplete, not
-        # a provider-native tool.
+        # A nameless function is incomplete, not provider-native.
         return [
             _function_record(
                 index,
@@ -351,11 +328,7 @@ def _container_value(request: Mapping[str, Any], path: tuple[str, ...]) -> tuple
 def declarations(
     request: Mapping[str, Any], provider: str | None = None
 ) -> tuple[list[dict[str, Any]], str] | None:
-    """The declarations a request carries, and whether one container supplied them.
-
-    Returns None when the request declares no tools at all, so an absent field
-    and an empty declaration list are never confused.
-    """
+    """Return declarations and their single- or multi-container scope."""
     records: list[dict[str, Any]] = []
     contributors = 0
     for container, path in _CONTAINERS:
@@ -364,8 +337,7 @@ def declarations(
             continue
         before = len(records)
         if not isinstance(value, list):
-            # A tools key that is not a list still happened. Saying so is not
-            # the same as saying no tools were declared.
+            # Preserve malformed presence rather than reporting no declarations.
             records.append(
                 _record(
                     len(records),

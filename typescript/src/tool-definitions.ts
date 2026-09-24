@@ -1,31 +1,15 @@
-/**
- * The canonical view of the tool declarations a request carried.
- *
- * A provider request states its tools in one of five dialects, and MeterGraph
- * captured only their names. A name is not a schema: it cannot tell an analysis
- * what the model was allowed to ask for, so a tool-using call arrived
- * unreplayable. This module reads every declaration a request carries and
- * records it once, in one shape, preserving order and the declared schema
- * exactly.
- *
- * Where a declaration is unreadable, incomplete, duplicated, or where two
- * schema keys disagree, the record says so rather than inventing a schema. The
- * envelope's `scope` says whether the declarations came from one container or
- * several, because nothing in the capture reveals the precedence a provider
- * applies across competing containers.
- */
+/** Canonicalize request tool declarations without guessing provider semantics. */
 
 export const TOOL_DEFINITIONS_VERSION = 1;
 
-// Read in this order, so a request carrying tools in more than one place
-// produces the same records every time.
+// Container order is part of the durable record contract.
 const CONTAINERS: [string, string[]][] = [
   ["tools", ["tools"]],
   ["config.tools", ["config", "tools"]],
   ["extra_body.tools", ["extra_body", "tools"]],
 ];
 
-// Precedence within one Gemini declaration. Listed once, applied everywhere.
+// Gemini schema-key precedence is part of the capture contract.
 const SCHEMA_KEYS = ["parameters_json_schema", "parametersJsonSchema", "parameters"];
 
 const GEMINI_NATIVE_TOOLS = new Set([
@@ -51,10 +35,7 @@ const RECORD_KEYS = [
 ];
 const OPTIONAL_RECORD_KEYS = ["provider_type", "duplicate_of"];
 const KINDS = new Set(["function", "provider", "unknown"]);
-// One contract, one vocabulary. `otel` and the attribute container belong to
-// the hosted OpenTelemetry reader and no SDK producer emits them, but the
-// closed sets are the contract's and are kept identical across all three
-// implementations so a record valid in one is valid in every one.
+// Keep this vocabulary aligned across SDK and OpenTelemetry implementations.
 const OTEL_DIALECT = "otel";
 const OTEL_CONTAINER = "gen_ai.tool.definitions";
 const DIALECTS = new Set([
@@ -80,9 +61,7 @@ const CONTAINER_NAMES = new Set([
 ]);
 const SCHEMA_KEY_NAMES = new Set([...SCHEMA_KEYS, "input_schema", "inputSchema"]);
 
-// A provider-native tool declares a type, not a schema, so its dialect is only
-// known where the captured provider is itself unambiguous. OpenAI stays unknown:
-// `{"type": "web_search_preview"}` is the same entry on Chat and on Responses.
+// OpenAI provider-native declarations do not identify Chat versus Responses.
 const PROVIDER_DIALECTS: Record<string, string> = { anthropic: "anthropic", google: "gemini" };
 
 export interface ToolDeclaration {
@@ -218,7 +197,6 @@ function record(
 
 
 
-/** One caller-authored function declaration, read without normalization. */
 function functionRecord(
   index: number,
   container: string,
@@ -233,8 +211,7 @@ function functionRecord(
     if (!has(entry, key)) continue;
     const value = jsonValue(attribute(entry, key));
     if (value === undefined) {
-      // A schema the request serializer cannot hold is not a schema this view
-      // can carry. `request_json` still shows whatever was sent.
+      // Unsupported schemas remain available in request_json.
       return record(index, container, {
         kind: "function", dialect, status: "unsupported", name, description,
       });
@@ -244,8 +221,7 @@ function functionRecord(
   if (converted.length > 1) {
     const [, first] = converted[0]!;
     if (converted.slice(1).some(([, value]) => !jsonEqual(value, first))) {
-      // Which key the provider honors is not knowable from the capture, so
-      // neither is the effective schema.
+      // Conflicting schema keys make the effective schema unknowable.
       return record(index, container, {
         kind: "function", dialect, status: "ambiguous", name, description,
       });
@@ -318,8 +294,7 @@ function entryRecords(
   }
   const declaredType = attribute(entry, "type");
   if (declaredType === "function") {
-    // A function stays a function even with no name: it is incomplete, not a
-    // provider-native tool.
+    // A nameless function is incomplete, not provider-native.
     return [functionRecord(index, container, "openai_responses", entry, ["parameters"])];
   }
   if (typeof declaredType === "string") {
@@ -352,11 +327,7 @@ function containerValue(request: Record<string, unknown>, path: string[]): [bool
   return [true, value];
 }
 
-/**
- * The declarations a request carries, and whether one container supplied them.
- * Returns undefined when the request declares no tools at all, so an absent
- * field and an empty declaration list are never confused.
- */
+/** Return declarations and their single- or multi-container scope. */
 export function readDeclarations(
   request: Record<string, unknown>,
   provider?: string,
@@ -368,8 +339,7 @@ export function readDeclarations(
     if (!present) continue;
     const before = records.length;
     if (!Array.isArray(value)) {
-      // A tools key that is not a list still happened. Saying so is not the
-      // same as saying no tools were declared.
+      // Preserve malformed presence rather than reporting no declarations.
       records.push(record(records.length, container, {
         kind: "unknown", dialect: "unknown", status: "unsupported",
       }));

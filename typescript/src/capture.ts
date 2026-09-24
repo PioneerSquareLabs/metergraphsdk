@@ -480,13 +480,9 @@ function responseContent(response: unknown, aggregate?: string): unknown {
   return candidates;
 }
 
-// The direct Anthropic seams. An Anthropic model behind Bedrock, Vertex or an
-// OpenAI-shaped gateway keeps the existing behaviour: its reply shape is not
-// the one verified here.
+// Restrict tool-only detection to direct Anthropic response shapes.
 const ANTHROPIC_ENDPOINTS = new Set(["messages", "messages.stream"]);
-// Everything a tool_use block may carry and still be fully represented by its
-// canonical tool event. `caller` is allowed only as the direct-call default,
-// which the event already implies by existing.
+// Extra block fields would be lost when represented only by the canonical event.
 const TOOL_BLOCK_KEYS = new Set(["type", "id", "name", "input", "caller"]);
 
 function plainMapping(value: unknown): Record<string, unknown> | undefined {
@@ -515,11 +511,7 @@ function representableToolBlock(block: unknown): Record<string, unknown> | undef
   return mapping;
 }
 
-/**
- * Whether every block of this reply is represented by exactly one event. Events
- * also carry the request history's calls, which is expected and never
- * disqualifies; only the events whose ids belong to this reply are compared.
- */
+/** Check that every reply block has one equivalent event. */
 function matchedEvents(
   blocks: Record<string, unknown>[],
   events: ToolEvent[] | undefined,
@@ -533,8 +525,7 @@ function matchedEvents(
     if (matches.length !== 1) return false;
     const event = matches[0]!;
     if (event.name !== block.name) return false;
-    // A streamed block starts with no input: its arguments arrive as deltas and
-    // are compared against the accumulation instead.
+    // Streamed arguments are validated after delta accumulation.
     if (compareArguments && !jsonEqual(event.arguments, toolArgument(block.input))) {
       return false;
     }
@@ -554,12 +545,7 @@ function argumentsEqual(accumulated: string, eventArguments: unknown): boolean {
   }
 }
 
-/**
- * A completed raw Anthropic event stream whose whole reply was tool calls.
- * A raw stream never produces a final Message, so completion is established
- * from the events themselves: every started block stopped, the stream reached
- * `message_stop`, and no observable stop reason other than `tool_use`.
- */
+/** Check whether a completed Anthropic stream contains only tool calls. */
 function streamToolOnly(chunks: unknown[], events: ToolEvent[] | undefined): boolean {
   const started = new Map<string, Record<string, unknown>>();
   const args = new Map<string, string>();
@@ -608,13 +594,7 @@ function streamToolOnly(chunks: unknown[], events: ToolEvent[] | undefined): boo
   return true;
 }
 
-/**
- * Whether this reply is an Anthropic client-tool-only turn with no text. Such a
- * reply has no assistant text at all: recording the provider's block list as
- * `content` puts a structure where the capture contract promises a string.
- * Recognized narrowly, because the fallback is always safe and this conversion
- * is not.
- */
+/** Check for a losslessly represented Anthropic tool-only reply. */
 function anthropicToolOnly(
   response: unknown,
   options: {
@@ -634,9 +614,7 @@ function anthropicToolOnly(
   const blocks = get(response, "content");
   if (Array.isArray(blocks)) {
     if (!blocks.length) return false;
-    // A reply stopped for any other reason may hold an unfinished tool call,
-    // and a null would assert a turn the model never completed. An absent stop
-    // reason does not disqualify on its own, matching the stream rule.
+    // Other stop reasons may indicate an unfinished tool call.
     const reason = get(response, "stop_reason");
     if (reason !== undefined && reason !== null && String(reason) !== "tool_use") return false;
     const mapped = blocks.map((block) => representableToolBlock(block));
@@ -684,11 +662,7 @@ function responseEnvelope(
       message: error instanceof Error ? error.message : String(error),
     };
   }
-  // An explicit null says the model produced no text and the reply is in
-  // `tool_calls`. This filter already drops only `undefined`, so the null
-  // survives without a carve-out, and an OpenAI chat tool-call reply keeps the
-  // null content it records today. No key is added, because the downstream
-  // normalizer accepts a closed envelope key set.
+  // Explicit null distinguishes tool-only output from missing content data.
   return Object.fromEntries(
     Object.entries(envelope).filter(([, value]) => value !== undefined),
   );
@@ -795,11 +769,7 @@ export class CaptureRuntime {
     };
     const capturedRequest = scrubRequest(state.request);
     const request = text(JSON.stringify(capturedRequest), "request");
-    // Declared schemas are request content, so they follow the request text
-    // controls: withheld when text capture is off, passed through the redaction
-    // hook, and omitted rather than clipped beyond the byte bound. The hook is
-    // caller-supplied, so its output is re-parsed and re-validated, and the
-    // envelope (including `fidelity`) is built here, outside it.
+    // Tool definitions follow request text, redaction, and size controls.
     let toolDefinitions: ToolDefinitions | undefined;
     let toolDefinitionsTruncated = false;
     if (captureText) {
@@ -935,8 +905,7 @@ export class CaptureRuntime {
       response_text: output.value,
       text_truncated: request.truncated || output.truncated || toolTruncated
         || toolDefinitionsTruncated,
-      // Absent rather than null: a null would make every tool-free call look
-      // like a row whose declaration view failed validation.
+      // Absence distinguishes tool-free calls from invalid declarations.
       ...(toolDefinitions ? { tool_definitions: toolDefinitions } : {}),
       stream: extra.stream ?? false,
       ttft_ms: extra.ttftMs,

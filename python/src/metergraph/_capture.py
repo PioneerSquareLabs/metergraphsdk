@@ -369,23 +369,14 @@ def _response_content(response: Any, aggregate_text: str | None = None) -> Any:
     return None
 
 
-# The direct Anthropic seams. An Anthropic model behind Bedrock, Vertex or an
-# OpenAI-shaped gateway keeps the existing behaviour: its reply shape is not the
-# one verified here.
+# Restrict tool-only detection to direct Anthropic response shapes.
 _ANTHROPIC_ENDPOINTS = frozenset({"messages", "messages.stream"})
-# Everything a tool_use block may carry and still be fully represented by its
-# canonical tool event. `caller` is allowed only as the direct-call default,
-# which the event already implies by existing.
+# Extra block fields would be lost when represented only by the canonical event.
 _TOOL_BLOCK_KEYS = frozenset({"type", "id", "name", "input", "caller"})
 
 
 def _block_mapping(block: Any) -> Mapping[str, Any] | None:
-    """One response block as JSON data, or None if it cannot be represented.
-
-    Degrading to `repr()` here would hide exactly what this decision needs to
-    see, so the strict conversion is used and a failure means "keep the reply
-    as it is captured today".
-    """
+    """Return a response block as lossless JSON data."""
     try:
         converted = json_value_strict(block)
     except Unrepresentable:
@@ -415,11 +406,7 @@ def _matched_events(
     *,
     compare_arguments: bool = True,
 ) -> bool:
-    """Whether every block of this reply is represented by exactly one event.
-
-    Events also carry the request history's calls, which is expected and never
-    disqualifies; only the events whose ids belong to this reply are compared.
-    """
+    """Check that every reply block has one equivalent event."""
     ids = [block.get("id") for block in blocks]
     if any(not isinstance(value, str) or not value for value in ids):
         return False
@@ -434,8 +421,7 @@ def _matched_events(
         event = matches[0]
         if event.get("name") != block.get("name"):
             return False
-        # A streamed block starts with no input: its arguments arrive as deltas
-        # and are compared against the accumulation instead.
+        # Streamed arguments are validated after delta accumulation.
         if compare_arguments and not json_equal(
             event.get("arguments"), _tool_argument(block.get("input"))
         ):
@@ -457,13 +443,7 @@ def _arguments_equal(accumulated: str, event_arguments: Any) -> bool:
 
 
 def _stream_tool_only(chunks: list[Any], events: list[dict] | None) -> bool:
-    """A completed raw Anthropic event stream whose whole reply was tool calls.
-
-    `messages.create(stream=True)` never produces a final Message, so completion
-    is established from the events themselves: every started block stopped, the
-    stream reached `message_stop`, and no observable stop reason other than
-    `tool_use`.
-    """
+    """Check whether a completed Anthropic stream contains only tool calls."""
     started: dict[str, Mapping[str, Any]] = {}
     arguments: dict[str, str] = {}
     stopped: set[str] = set()
@@ -535,13 +515,7 @@ def _anthropic_tool_only(
     stream_chunks: list[Any] | None,
     completed: bool,
 ) -> bool:
-    """Whether this reply is an Anthropic client-tool-only turn with no text.
-
-    Such a reply has no assistant text at all: recording the provider's block
-    list as `content` puts a structure where the capture contract promises a
-    string, and a consumer cannot read it. Recognized narrowly, because the
-    fallback (today's behaviour) is always safe and this conversion is not.
-    """
+    """Check for a losslessly represented Anthropic tool-only reply."""
     if not completed or aggregate_text is not None:
         return False
     if provider != "anthropic" or endpoint not in _ANTHROPIC_ENDPOINTS:
@@ -552,9 +526,7 @@ def _anthropic_tool_only(
     if isinstance(blocks, list):
         if not blocks:
             return False
-        # A reply stopped for any other reason may hold an unfinished tool call,
-        # and a null would assert a turn the model never completed. An absent
-        # stop reason does not disqualify on its own, matching the stream rule.
+        # Other stop reasons may indicate an unfinished tool call.
         reason = _get(response, "stop_reason")
         if reason is not None and str(reason) != "tool_use":
             return False
@@ -607,10 +579,7 @@ def _response_envelope(
             "type": type(error).__name__,
             "message": str(error),
         }
-    # An omitted key says nothing; an explicit null says the model produced no
-    # text and the reply is in `tool_calls`. Only the recognized case is carved
-    # out of the drop-None filter, and no key is added, because the downstream
-    # normalizer accepts a closed envelope key set.
+    # Explicit null distinguishes tool-only output from missing content data.
     return {
         key: value
         for key, value in envelope.items()
@@ -956,9 +925,7 @@ class Runtime:
                 value = self.options.redact(value, kind)
             except Exception:
                 return "<redaction-failed>", False
-            # A hook that returns something other than text is the same kind of
-            # fault as one that raises, and gets the same answer. Without this
-            # the encode below raises out of `finish` and the row is lost.
+            # Invalid hook output must not drop the capture row.
             if not isinstance(value, str):
                 return "<redaction-failed>", False
         raw = value.encode()
@@ -973,22 +940,10 @@ class Runtime:
     def _tool_definitions(
         self, request: Mapping[str, Any], provider: str, *, enabled: bool
     ) -> tuple[dict[str, Any] | None, bool]:
-        """The canonical declaration view for one request, and whether the cap dropped it.
-
-        Declared schemas are request content, so they follow the request text
-        controls: withheld when text capture is off, passed through the redaction
-        hook, and omitted rather than clipped when they exceed the byte bound. The
-        hook is caller-supplied, so its output is re-parsed and re-validated, and
-        the envelope (including `fidelity`) is built here, outside it: a hook can
-        change the declarations it is given but can never assert that what it
-        returned is verbatim.
-        """
+        """Return redacted declarations and whether the size cap dropped them."""
         if not enabled:
             return None, False
-        # One boundary around the whole field. Everything inside is optional
-        # telemetry built partly from caller-supplied output, so any fault here
-        # drops the field alone: the row, the provider result and the provider
-        # exception are never affected by it.
+        # Optional declaration telemetry must not affect the provider call or row.
         try:
             return self._build_tool_definitions(request, provider)
         except Exception:
@@ -1186,8 +1141,7 @@ class CallState:
             "sdk_version": SDK_VERSION,
             "runtime": f"{platform.python_implementation().lower()}-{platform.python_version()}",
         }
-        # Absent rather than null: a null would make every tool-free call look
-        # like a row whose declaration view failed validation.
+        # Absence distinguishes tool-free calls from invalid declarations.
         if tool_definitions_value is not None:
             row["tool_definitions"] = tool_definitions_value
         try:
