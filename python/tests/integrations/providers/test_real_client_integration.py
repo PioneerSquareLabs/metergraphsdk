@@ -335,3 +335,233 @@ def test_wrap_captures_google_generate_content_through_a_real_client(tmp_path):
     assert row["endpoint"] == "models.generate_content"
     assert row["provider"] == "google"
     _capture.set_runtime(None)
+
+
+# --- MET-9: the canonical declaration view and the tool-only content rule ----
+#
+# These drive the real Anthropic client, sync and async, non-streaming and both
+# streaming shapes, so the recognition rule is exercised through the provider's
+# own response parsing rather than a hand-built stand-in.
+
+_TOOL_REQUEST = {
+    "model": "claude-haiku-4-5-20251001",
+    "max_tokens": 64,
+    "messages": [{"role": "user", "content": "rank these"}],
+    "tools": [
+        {
+            "name": "rank_experts",
+            "description": "Rank candidate experts.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        }
+    ],
+    "tool_choice": {"type": "tool", "name": "rank_experts"},
+}
+
+_TOOL_ONLY_MESSAGE = {
+    "id": "msg_tool",
+    "type": "message",
+    "role": "assistant",
+    "model": "claude-haiku-4-5-20251001",
+    "content": [
+        {
+            "type": "tool_use",
+            "id": "toolu_real",
+            "name": "rank_experts",
+            "input": {"query": "vision"},
+        }
+    ],
+    "stop_reason": "tool_use",
+    "usage": {"input_tokens": 9, "output_tokens": 3},
+}
+
+_TOOL_STREAM_EVENTS = [
+    ("message_start", {"type": "message_start", "message": {
+        "id": "msg_stream", "type": "message", "role": "assistant",
+        "model": "claude-haiku-4-5-20251001", "content": [], "stop_reason": None,
+        "usage": {"input_tokens": 9, "output_tokens": 0}}}),
+    ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {
+        "type": "tool_use", "id": "toolu_stream", "name": "rank_experts", "input": {}}}),
+    ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {
+        "type": "input_json_delta", "partial_json": '{"query": "vision"}'}}),
+    ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+    ("message_delta", {"type": "message_delta",
+                       "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+                       "usage": {"output_tokens": 7}}),
+    ("message_stop", {"type": "message_stop"}),
+]
+
+
+def _sse_body(events):
+    return "".join(
+        f"event: {name}\ndata: {json.dumps(payload)}\n\n" for name, payload in events
+    ).encode()
+
+
+def _anthropic_client(handler, *, is_async):
+    from anthropic import Anthropic
+
+    client_class = AsyncAnthropic if is_async else Anthropic
+    http_class = (
+        anthropic_httpx.AsyncClient if is_async else anthropic_httpx.Client
+    )
+    return client_class(
+        api_key="test",
+        http_client=http_class(transport=anthropic_httpx.MockTransport(handler)),
+    )
+
+
+def _json_handler(payload):
+    def handler(request: anthropic_httpx.Request) -> anthropic_httpx.Response:
+        return anthropic_httpx.Response(200, json=payload)
+
+    return handler
+
+
+def _stream_handler(events):
+    def handler(request: anthropic_httpx.Request) -> anthropic_httpx.Response:
+        return anthropic_httpx.Response(
+            200,
+            content=_sse_body(events),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    return handler
+
+
+def _captured(rows):
+    assert len(rows.rows) == 1
+    row = rows.rows[0]
+    return row, json.loads(row["response_text"])
+
+
+def test_real_anthropic_sync_client_records_the_declaration_view(tmp_path):
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root=str(tmp_path), capture_text=True)))
+    client = _anthropic_client(_json_handler(_TOOL_ONLY_MESSAGE), is_async=False)
+    metergraph.wrap(client, provider="anthropic")
+
+    response = client.messages.create(**_TOOL_REQUEST)
+
+    assert response.content[0].name == "rank_experts"
+    row, envelope = _captured(rows)
+    [record] = row["tool_definitions"]["declarations"]
+    assert record["name"] == "rank_experts"
+    assert record["schema_key"] == "input_schema"
+    assert record["schema"]["required"] == ["query"]
+    assert record["status"] == "declared"
+    assert "content" in envelope and envelope["content"] is None
+    [call] = envelope["tool_calls"]
+    assert (call["call_id"], call["name"], call["arguments"]) == (
+        "toolu_real", "rank_experts", {"query": "vision"},
+    )
+    _capture.set_runtime(None)
+
+
+def test_real_anthropic_async_client_records_the_same_row(tmp_path):
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root=str(tmp_path), capture_text=True)))
+    client = _anthropic_client(_json_handler(_TOOL_ONLY_MESSAGE), is_async=True)
+    metergraph.wrap(client, provider="anthropic")
+
+    response = asyncio.run(client.messages.create(**_TOOL_REQUEST))
+
+    assert response.stop_reason == "tool_use"
+    row, envelope = _captured(rows)
+    assert envelope["content"] is None
+    assert row["tool_definitions"]["declarations"][0]["name"] == "rank_experts"
+    _capture.set_runtime(None)
+
+
+def test_real_anthropic_truncated_reply_keeps_its_content(tmp_path):
+    """Same blocks, `max_tokens`: the tool call may be unfinished, so the
+    provider's own representation is preserved."""
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root=str(tmp_path), capture_text=True)))
+    truncated = {**_TOOL_ONLY_MESSAGE, "stop_reason": "max_tokens"}
+    client = _anthropic_client(_json_handler(truncated), is_async=False)
+    metergraph.wrap(client, provider="anthropic")
+
+    client.messages.create(**_TOOL_REQUEST)
+
+    _, envelope = _captured(rows)
+    assert isinstance(envelope["content"], list)
+    _capture.set_runtime(None)
+
+
+def test_real_anthropic_messages_stream_helper_records_null_content(tmp_path):
+    """`messages.stream` assembles a final Message, so rule A applies."""
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root=str(tmp_path), capture_text=True)))
+    client = _anthropic_client(_stream_handler(_TOOL_STREAM_EVENTS), is_async=False)
+    metergraph.wrap(client, provider="anthropic")
+
+    with client.messages.stream(**_TOOL_REQUEST) as stream:
+        for _ in stream:
+            pass
+        final = stream.get_final_message()
+
+    assert final.stop_reason == "tool_use"
+    row, envelope = _captured(rows)
+    assert row["stream"] is True
+    assert "content" in envelope and envelope["content"] is None
+    [call] = envelope["tool_calls"]
+    assert (call["call_id"], call["arguments"]) == ("toolu_stream", {"query": "vision"})
+    _capture.set_runtime(None)
+
+
+def test_real_anthropic_raw_event_stream_records_null_content(tmp_path):
+    """`messages.create(stream=True)` never assembles a final Message, so the
+    completed-stream rule has to recognize it from the events themselves."""
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root=str(tmp_path), capture_text=True)))
+    client = _anthropic_client(_stream_handler(_TOOL_STREAM_EVENTS), is_async=False)
+    metergraph.wrap(client, provider="anthropic")
+
+    kinds = [event.type for event in client.messages.create(**_TOOL_REQUEST, stream=True)]
+
+    assert kinds[-1] == "message_stop"
+    row, envelope = _captured(rows)
+    assert "content" in envelope and envelope["content"] is None
+    assert envelope["tool_calls"][0]["call_id"] == "toolu_stream"
+    _capture.set_runtime(None)
+
+
+def test_real_anthropic_async_raw_stream_records_null_content(tmp_path):
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root=str(tmp_path), capture_text=True)))
+    client = _anthropic_client(_stream_handler(_TOOL_STREAM_EVENTS), is_async=True)
+    metergraph.wrap(client, provider="anthropic")
+
+    async def drain():
+        stream = await client.messages.create(**_TOOL_REQUEST, stream=True)
+        return [event.type async for event in stream]
+
+    kinds = asyncio.run(drain())
+
+    assert kinds[-1] == "message_stop"
+    _, envelope = _captured(rows)
+    assert "content" in envelope and envelope["content"] is None
+    _capture.set_runtime(None)
+
+
+def test_real_anthropic_truncated_stream_keeps_its_content(tmp_path):
+    """A stream cut off at `max_tokens` is not a completed tool-only turn."""
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root=str(tmp_path), capture_text=True)))
+    truncated = [
+        (name, {**payload, "delta": {"stop_reason": "max_tokens", "stop_sequence": None}}
+         if name == "message_delta" else payload)
+        for name, payload in _TOOL_STREAM_EVENTS
+    ]
+    client = _anthropic_client(_stream_handler(truncated), is_async=False)
+    metergraph.wrap(client, provider="anthropic")
+
+    list(client.messages.create(**_TOOL_REQUEST, stream=True))
+
+    _, envelope = _captured(rows)
+    assert not ("content" in envelope and envelope["content"] is None)
+    _capture.set_runtime(None)

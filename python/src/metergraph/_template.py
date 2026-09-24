@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import math
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -89,6 +90,80 @@ def json_value(value: Any) -> Any:
     if isinstance(value, (int, float, bool)) or value is None:
         return value
     return repr(value)
+
+
+class Unrepresentable(Exception):
+    """A value JSON cannot hold, where degrading it to text would be a lie.
+
+    `json_value` degrades such a value to `repr()`, which is right for a best
+    effort capture of a whole request. It is wrong where the caller is deciding
+    whether a structure was represented faithfully, so that decision uses
+    `json_value_strict` and treats this exception as "not representable".
+    """
+
+
+def json_value_strict(value: Any) -> Any:
+    """`value` as plain JSON data, raising rather than degrading to `repr()`."""
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return json_value_strict(model_dump(mode="json", exclude_none=True))
+        except Unrepresentable:
+            raise
+        except Exception:
+            pass
+        try:
+            dumped = model_dump(exclude_none=True)
+        except Exception as exc:
+            raise Unrepresentable(type(value).__name__) from exc
+        return json_value_strict(dumped)
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return json_value_strict({
+            field.name: getattr(value, field.name)
+            for field in dataclasses.fields(value)
+            if getattr(value, field.name) is not None
+        })
+    if isinstance(value, Mapping):
+        return {str(k): json_value_strict(v) for k, v in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [json_value_strict(item) for item in value]
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        # NaN and Infinity are not JSON. Promising a lossless copy of one would
+        # be a lie, so the caller treats the value as unrepresentable.
+        if not math.isfinite(value):
+            raise Unrepresentable("non-finite float")
+        return value
+    raise Unrepresentable(type(value).__name__)
+
+
+def json_equal(left: Any, right: Any) -> bool:
+    """Semantic JSON equality: object key order ignored, array order kept.
+
+    `True` and `1` compare equal under `==` in Python and are different JSON
+    values, so booleans are compared by type as well as value. Numbers compare
+    by value, so `1` and `1.0` are equal.
+    """
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool) and left is right
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        if set(left) != set(right):
+            return False
+        return all(json_equal(left[key], right[key]) for key in left)
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(
+            json_equal(one, other) for one, other in zip(left, right)
+        )
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return left == right
+    if type(left) is not type(right):
+        return False
+    return left == right
 
 
 def _credential_key(key: str) -> bool:

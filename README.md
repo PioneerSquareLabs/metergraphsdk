@@ -317,6 +317,19 @@ self-hosted server remains available and discards content even when the SDK
 sends it. Transport problems never break or slow your LLM calls. When the
 collector is unreachable, capture drops and your application carries on.
 
+### Declared tools and tool-only replies
+
+Requests that declare tools include a canonical `tool_definitions` view with
+names, descriptions, and schemas in declaration order. It supports Anthropic,
+OpenAI, Gemini, Vercel AI SDK, and OpenTelemetry GenAI spans. Incomplete or
+unsupported declarations are identified without inventing missing schemas.
+Tool definitions are request content and follow the same capture, redaction,
+and size controls as the rest of the request.
+
+Anthropic responses containing only client tool calls record `content: null`
+with their tool calls intact. Mixed text, incomplete responses, and
+provider-executed tools retain their provider representation.
+
 See [`examples/`](examples) for runnable per-provider examples, including an offline fake-provider demo that needs no API keys. The [instrumentation coverage contract](docs/instrumentation-coverage.md) is the source of truth for supported providers, frameworks, package anchors, and unsupported-path behavior.
 
 

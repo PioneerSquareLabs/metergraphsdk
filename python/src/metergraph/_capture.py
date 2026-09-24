@@ -18,9 +18,17 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 
+from . import _tool_definitions
 from ._context import CaptureContext, snapshot
 from ._gateway import detect_gateway, gateway_evidence, resolve_gateway
-from ._template import json_value, scrub_request, template_hash
+from ._template import (
+    Unrepresentable,
+    json_equal,
+    json_value,
+    json_value_strict,
+    scrub_request,
+    template_hash,
+)
 from ._version import SDK_VERSION
 
 
@@ -361,6 +369,174 @@ def _response_content(response: Any, aggregate_text: str | None = None) -> Any:
     return None
 
 
+# Restrict tool-only detection to direct Anthropic response shapes.
+_ANTHROPIC_ENDPOINTS = frozenset({"messages", "messages.stream"})
+# Extra block fields would be lost when represented only by the canonical event.
+_TOOL_BLOCK_KEYS = frozenset({"type", "id", "name", "input", "caller"})
+
+
+def _block_mapping(block: Any) -> Mapping[str, Any] | None:
+    """Return a response block as lossless JSON data."""
+    try:
+        converted = json_value_strict(block)
+    except Unrepresentable:
+        return None
+    return converted if isinstance(converted, Mapping) else None
+
+
+def _representable_tool_block(block: Any) -> Mapping[str, Any] | None:
+    mapping = _block_mapping(block)
+    if mapping is None or mapping.get("type") != "tool_use":
+        return None
+    if set(mapping) - _TOOL_BLOCK_KEYS:
+        return None
+    caller = mapping.get("caller")
+    if caller is not None:
+        if not isinstance(caller, Mapping):
+            return None
+        declared = {key: value for key, value in caller.items() if value is not None}
+        if declared != {"type": "direct"}:
+            return None
+    return mapping
+
+
+def _matched_events(
+    blocks: list[Mapping[str, Any]],
+    events: list[dict] | None,
+    *,
+    compare_arguments: bool = True,
+) -> bool:
+    """Check that every reply block has one equivalent event."""
+    ids = [block.get("id") for block in blocks]
+    if any(not isinstance(value, str) or not value for value in ids):
+        return False
+    if len(set(ids)) != len(ids):
+        return False
+    for block in blocks:
+        matches = [
+            event for event in (events or []) if event.get("call_id") == block["id"]
+        ]
+        if len(matches) != 1:
+            return False
+        event = matches[0]
+        if event.get("name") != block.get("name"):
+            return False
+        # Streamed arguments are validated after delta accumulation.
+        if compare_arguments and not json_equal(
+            event.get("arguments"), _tool_argument(block.get("input"))
+        ):
+            return False
+    return True
+
+
+def _arguments_equal(accumulated: str, event_arguments: Any) -> bool:
+    try:
+        expected = json.loads(accumulated) if accumulated.strip() else {}
+        actual = event_arguments
+        if isinstance(actual, str):
+            actual = json.loads(actual) if actual.strip() else {}
+        elif actual is None:
+            actual = {}
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return json_equal(expected, actual)
+
+
+def _stream_tool_only(chunks: list[Any], events: list[dict] | None) -> bool:
+    """Check whether a completed Anthropic stream contains only tool calls."""
+    started: dict[str, Mapping[str, Any]] = {}
+    arguments: dict[str, str] = {}
+    stopped: set[str] = set()
+    stop_reasons: list[str] = []
+    saw_message_stop = False
+    for chunk in chunks:
+        if _chunk_text(chunk):
+            return False
+        kind = _get(chunk, "type")
+        delta = _get(chunk, "delta")
+        if isinstance(delta, str) and "reasoning" in str(kind):
+            return False
+        if _get(delta, "thinking") or _get(delta, "reasoning"):
+            return False
+        if kind == "content_block_start":
+            mapping = _representable_tool_block(_get(chunk, "content_block"))
+            if mapping is None:
+                return False
+            key = str(_get(chunk, "index", len(started)))
+            started[key] = mapping
+            initial = mapping.get("input")
+            arguments[key] = (
+                ""
+                if initial in (None, {})
+                else json.dumps(initial, separators=(",", ":"))
+            )
+        elif kind == "content_block_delta":
+            if _get(delta, "type") != "input_json_delta":
+                return False
+            key = str(_get(chunk, "index", "0"))
+            arguments[key] = arguments.get(key, "") + str(
+                _get(delta, "partial_json") or ""
+            )
+        elif kind == "content_block_stop":
+            stopped.add(str(_get(chunk, "index", "0")))
+        elif kind == "message_delta":
+            reason = _get(delta, "stop_reason")
+            if reason is not None:
+                stop_reasons.append(str(reason))
+        elif kind == "message_stop":
+            saw_message_stop = True
+    if not started or not saw_message_stop:
+        return False
+    if set(started) - stopped:
+        return False
+    if any(reason != "tool_use" for reason in stop_reasons):
+        return False
+    blocks = list(started.values())
+    if not _matched_events(blocks, events, compare_arguments=False):
+        return False
+    for key, mapping in started.items():
+        matches = [
+            event for event in (events or []) if event.get("call_id") == mapping.get("id")
+        ]
+        if len(matches) != 1 or not _arguments_equal(
+            arguments.get(key, ""), matches[0].get("arguments")
+        ):
+            return False
+    return True
+
+
+def _anthropic_tool_only(
+    response: Any,
+    *,
+    provider: str | None,
+    endpoint: str | None,
+    events: list[dict] | None,
+    aggregate_text: str | None,
+    stream_chunks: list[Any] | None,
+    completed: bool,
+) -> bool:
+    """Check for a losslessly represented Anthropic tool-only reply."""
+    if not completed or aggregate_text is not None:
+        return False
+    if provider != "anthropic" or endpoint not in _ANTHROPIC_ENDPOINTS:
+        return False
+    if not events:
+        return False
+    blocks = _get(response, "content")
+    if isinstance(blocks, list):
+        if not blocks:
+            return False
+        # Other stop reasons may indicate an unfinished tool call.
+        reason = _get(response, "stop_reason")
+        if reason is not None and str(reason) != "tool_use":
+            return False
+        mapped = [_representable_tool_block(block) for block in blocks]
+        if any(block is None for block in mapped):
+            return False
+        return _matched_events([block for block in mapped if block is not None], events)
+    return _stream_tool_only(list(stream_chunks or []), events)
+
+
 def _response_envelope(
     response: Any,
     *,
@@ -368,10 +544,28 @@ def _response_envelope(
     tool_calls: list[dict] | None,
     error: BaseException | None,
     status: str,
+    provider: str | None = None,
+    endpoint: str | None = None,
+    events: list[dict] | None = None,
+    stream_chunks: list[Any] | None = None,
+    completed: bool = False,
 ) -> dict[str, Any]:
+    tool_only = False
+    try:
+        tool_only = _anthropic_tool_only(
+            response,
+            provider=provider,
+            endpoint=endpoint,
+            events=events,
+            aggregate_text=aggregate_text,
+            stream_chunks=stream_chunks,
+            completed=completed,
+        )
+    except Exception:
+        tool_only = False
     envelope: dict[str, Any] = {
         "role": "assistant",
-        "content": _response_content(response, aggregate_text),
+        "content": None if tool_only else _response_content(response, aggregate_text),
         "tool_calls": tool_calls or [],
         "finish_reason": _stop_reason(response),
         "request_id": _request_id(response),
@@ -385,7 +579,12 @@ def _response_envelope(
             "type": type(error).__name__,
             "message": str(error),
         }
-    return {key: value for key, value in envelope.items() if value is not None}
+    # Explicit null distinguishes tool-only output from missing content data.
+    return {
+        key: value
+        for key, value in envelope.items()
+        if value is not None or (tool_only and key == "content")
+    }
 
 
 def _tool_names(request: Mapping[str, Any]) -> list[dict[str, str]] | None:
@@ -726,6 +925,9 @@ class Runtime:
                 value = self.options.redact(value, kind)
             except Exception:
                 return "<redaction-failed>", False
+            # Invalid hook output must not drop the capture row.
+            if not isinstance(value, str):
+                return "<redaction-failed>", False
         raw = value.encode()
         if len(raw) <= self.options.text_max_bytes:
             return value, False
@@ -734,6 +936,46 @@ class Runtime:
             errors="ignore"
         )
         return clipped + marker, True
+
+    def _tool_definitions(
+        self, request: Mapping[str, Any], provider: str, *, enabled: bool
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """Return redacted declarations and whether the size cap dropped them."""
+        if not enabled:
+            return None, False
+        # Optional declaration telemetry must not affect the provider call or row.
+        try:
+            return self._build_tool_definitions(request, provider)
+        except Exception:
+            return None, False
+
+    def _build_tool_definitions(
+        self, request: Mapping[str, Any], provider: str
+    ) -> tuple[dict[str, Any] | None, bool]:
+        read = _tool_definitions.declarations(request, provider)
+        if read is None:
+            return None, False
+        records, scope = read
+        encoded = json.dumps(records, ensure_ascii=False, separators=(",", ":"))
+        fidelity = "verbatim"
+        if self.options.redact:
+            redacted = self.options.redact(encoded, "request")
+            if not isinstance(redacted, str):
+                return None, False
+            try:
+                parsed = json.loads(redacted)
+            except (TypeError, ValueError, RecursionError):
+                return None, False
+            if not _tool_definitions.valid_declarations(parsed):
+                return None, False
+            if not json_equal(parsed, records):
+                fidelity = "filtered"
+            records = parsed
+        envelope = _tool_definitions.envelope(records, scope, fidelity)
+        serialized = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
+        if len(serialized.encode()) > self.options.text_max_bytes:
+            return None, True
+        return envelope, False
 
 
 @dataclass
@@ -808,6 +1050,11 @@ class CallState:
             if full_tool_calls
             else None
         )
+        tool_definitions_value, tool_definitions_truncated = (
+            self.runtime._tool_definitions(
+                self.request, self.provider, enabled=capture_text
+            )
+        )
         effective_status = status or (
             "error" if error else _stop_reason(response) or "success"
         )
@@ -825,6 +1072,16 @@ class CallState:
                     tool_calls=full_tool_calls if capture_text else None,
                     error=error,
                     status=effective_status,
+                    provider=self.provider,
+                    endpoint=self.endpoint,
+                    events=full_tool_calls,
+                    stream_chunks=stream_chunks,
+                    completed=(
+                        error is None
+                        and status not in {"error", "abandoned"}
+                        and status_code != "error"
+                        and finish_reason != "error"
+                    ),
                 ),
                 ensure_ascii=False,
                 separators=(",", ":"),
@@ -865,7 +1122,12 @@ class CallState:
             "content_opted_in": capture_text,
             "request_json": request_json,
             "response_text": response_json,
-            "text_truncated": request_truncated or response_truncated or tool_truncated,
+            "text_truncated": (
+                request_truncated
+                or response_truncated
+                or tool_truncated
+                or tool_definitions_truncated
+            ),
             "stream": stream,
             "ttft_ms": ttft_ms,
             "func": self.func,
@@ -879,6 +1141,9 @@ class CallState:
             "sdk_version": SDK_VERSION,
             "runtime": f"{platform.python_implementation().lower()}-{platform.python_version()}",
         }
+        # Absence distinguishes tool-free calls from invalid declarations.
+        if tool_definitions_value is not None:
+            row["tool_definitions"] = tool_definitions_value
         try:
             self.runtime.writer.enqueue(row)
         except Exception:
