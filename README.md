@@ -319,39 +319,16 @@ collector is unreachable, capture drops and your application carries on.
 
 ### Declared tools and tool-only replies
 
-A request that declares tools is captured twice: as the provider wrote it, and
-as a canonical `tool_definitions` view that records every declaration in one
-shape across the Anthropic, OpenAI Chat, OpenAI Responses, Gemini and Vercel AI
-SDK dialects. Each record keeps the declared schema exactly as written and
-states what could be read from it, so a declaration that is incomplete,
-malformed, ambiguous, duplicated, provider-native or unsupported says so rather
-than appearing as a schema nobody declared. The envelope's `fidelity` is
-`verbatim` until a redaction hook or a downstream scrub changes something, at
-which point it becomes `filtered` and stays that way. Declarations are request
-content: they follow the same text capture switch, redaction hook and size
-bound as the rest of the request, and are omitted rather than clipped.
+Requests that declare tools include a canonical `tool_definitions` view with
+names, descriptions, and schemas in declaration order. It supports Anthropic,
+OpenAI, Gemini, Vercel AI SDK, and OpenTelemetry GenAI spans. Incomplete or
+unsupported declarations are identified without inventing missing schemas.
+Tool definitions are request content and follow the same capture, redaction,
+and size controls as the rest of the request.
 
-The same canonical view is produced for applications that reach MeterGraph
-through OpenTelemetry rather than an SDK, from the GenAI convention's
-`gen_ai.tool.definitions` attribute. Those records carry the dialect `otel`,
-because the dialect names the shape a declaration was read in rather than the
-provider that served the call. The convention requires only a tool's type and
-name and permits omitting the parameter schema, so an OTEL record that omits it
-reports `incomplete` rather than presenting an empty schema as a declared one.
-Losses belonging to the declaration set rather than to a single declaration,
-an unreadable attribute and reported upstream attribute loss, are recorded in
-the envelope's optional `limitations` array. That path has no redaction hook,
-since there is no SDK on it.
-
-An Anthropic reply whose whole content is client tool calls records
-`"content": null` with its tool calls intact, instead of a serialized list of
-provider block objects. The rule is deliberately narrow: it applies to the
-direct `messages` seams, and requires every block to match exactly one
-recorded tool event. Where a stop reason is observable it must be `tool_use`;
-a reply that carries no stop reason at all is not disqualified by its absence.
-Anything else, including a reply truncated at `max_tokens`, mixed text,
-thinking blocks, provider-executed tools and unknown block types, keeps
-exactly the representation it has today.
+Anthropic responses containing only client tool calls record `content: null`
+with their tool calls intact. Mixed text, incomplete responses, and
+provider-executed tools retain their provider representation.
 
 See [`examples/`](examples) for runnable per-provider examples, including an offline fake-provider demo that needs no API keys. The [instrumentation coverage contract](docs/instrumentation-coverage.md) is the source of truth for supported providers, frameworks, package anchors, and unsupported-path behavior.
 
