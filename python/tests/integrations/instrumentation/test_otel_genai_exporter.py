@@ -781,10 +781,22 @@ def test_operation_route_is_derived_and_a_span_route_is_explicit(monkeypatch):
     exporter.export([
         _span(attributes),
         _span({**attributes, "metergraph.route": "ticket-triage"}),
+        _span({**attributes, "gen_ai.prompt.name": "classify-ticket"}),
+        _span({
+            **attributes,
+            "metergraph.route": "ticket-triage",
+            "gen_ai.prompt.name": "classify-ticket",
+        }),
+        _span({**attributes, "metergraph.route": "  ", "gen_ai.prompt.name": "classify-ticket"}),
+        _span({**attributes, "metergraph.route": 7, "gen_ai.prompt.name": ""}),
     ])
 
     assert [(row["route"], row["route_source"]) for row in rows.rows] == [
         ("chat", "derived"),
         ("ticket-triage", "explicit"),
+        ("classify-ticket", "explicit"),
+        ("ticket-triage", "explicit"),
+        ("classify-ticket", "explicit"),
+        ("chat", "derived"),
     ]
     _capture.set_runtime(None)

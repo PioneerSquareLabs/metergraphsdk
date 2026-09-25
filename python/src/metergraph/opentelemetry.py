@@ -155,9 +155,17 @@ class MetergraphGenAIExporter(SpanExporter):
             response["cost"] = mapped.cost
             gateway = mapped.cost_source
 
-        named_route = attributes.get("metergraph.route")
-        if not isinstance(named_route, str) or not named_route.strip():
-            named_route = None
+        named_route = next(
+            (
+                value
+                for value in (
+                    attributes.get("metergraph.route"),
+                    attributes.get("gen_ai.prompt.name"),
+                )
+                if isinstance(value, str) and value.strip()
+            ),
+            None,
+        )
         call = runtime.call_state(
             provider,
             mapped.operation,
