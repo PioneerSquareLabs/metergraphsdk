@@ -3,6 +3,8 @@ import { randomBytes } from "node:crypto";
 
 export interface CaptureContext {
   route?: string;
+  /** "explicit" when the developer named the route, "derived" when filled in. */
+  routeSource?: "explicit" | "derived";
   sessionId?: string;
   tags: Record<string, string>;
   unitName?: string;
@@ -80,6 +82,7 @@ export async function route<T>(
   const child: CaptureContext = {
     ...parent,
     route: name,
+    routeSource: "explicit",
     tags: {
       ...parent.tags,
       ...Object.fromEntries(

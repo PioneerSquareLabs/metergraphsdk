@@ -763,3 +763,28 @@ def test_non_llm_openinference_kind_skipped(monkeypatch, caplog):
     assert exporter.skipped["ineligible-kind"] == 1
     assert [r for r in caplog.records if r.name == "metergraph"] == []
     _capture.set_runtime(None)
+
+
+def test_operation_route_is_derived_and_a_span_route_is_explicit(monkeypatch):
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root="")))
+    monkeypatch.setattr(metergraph, "init", lambda: None)
+    exporter = MetergraphGenAIExporter()
+    attributes = {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.provider.name": "openai",
+        "gen_ai.request.model": "gpt-test",
+        "gen_ai.usage.input_tokens": 12,
+        "gen_ai.usage.output_tokens": 4,
+    }
+
+    exporter.export([
+        _span(attributes),
+        _span({**attributes, "metergraph.route": "ticket-triage"}),
+    ])
+
+    assert [(row["route"], row["route_source"]) for row in rows.rows] == [
+        ("chat", "derived"),
+        ("ticket-triage", "explicit"),
+    ]
+    _capture.set_runtime(None)

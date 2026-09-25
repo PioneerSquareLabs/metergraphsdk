@@ -1713,3 +1713,29 @@ def test_template_hash_still_ignores_credential_names_at_any_depth():
         }},
     }]}
     assert template_hash(with_names) == template_hash(without)
+
+
+def test_a_named_route_is_declared_explicit():
+    rows = Rows()
+    _capture.set_runtime(
+        Runtime(rows, Options(app_root=str(Path(__file__).parents[1])))
+    )
+
+    class Completions:
+        def create(self, **kwargs):
+            return response()
+
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=Completions()), responses=None
+    )
+    metergraph.wrap(client, provider="openai")
+    messages = [{"role": "user", "content": "classify ticket 123"}]
+    with metergraph.route("chat.completions"):
+        client.chat.completions.create(model="gpt-test", messages=messages)
+    client.chat.completions.create(model="gpt-test", messages=messages)
+
+    assert [(row["route"], row.get("route_source")) for row in rows.rows] == [
+        ("chat.completions", "explicit"),
+        (None, None),
+    ]
+    _capture.set_runtime(None)
