@@ -1380,3 +1380,20 @@ test("typescript seam endpoints match shared fixture", () => {
     assert.deepEqual(actual, [...endpoints].sort(), provider);
   }
 });
+
+test("a named route is declared explicit", async () => {
+  const rows = [];
+  const runtime = stubRuntime(rows);
+
+  await route("chat.completions", async () => {
+    const named = runtime.start("openai", "chat.completions", { model: "gpt-test" });
+    runtime.finish(named, {});
+  });
+  const unnamed = runtime.start("openai", "chat.completions", { model: "gpt-test" });
+  runtime.finish(unnamed, {});
+
+  assert.deepEqual(
+    rows.map((row) => [row.route, row.route_source]),
+    [["chat.completions", "explicit"], [undefined, undefined]],
+  );
+});

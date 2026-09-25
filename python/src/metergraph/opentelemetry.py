@@ -155,12 +155,24 @@ class MetergraphGenAIExporter(SpanExporter):
             response["cost"] = mapped.cost
             gateway = mapped.cost_source
 
+        named_route = next(
+            (
+                value
+                for value in (
+                    attributes.get("metergraph.route"),
+                    attributes.get("gen_ai.prompt.name"),
+                )
+                if isinstance(value, str) and value.strip()
+            ),
+            None,
+        )
         call = runtime.call_state(
             provider,
             mapped.operation,
             mapped.request,
             context=CaptureContext(
-                route=mapped.operation,
+                route=named_route or mapped.operation,
+                route_source="explicit" if named_route else "derived",
                 session_id=mapped.session_id,
                 trace_id=trace_id,
                 trace_name=mapped.trace_name or span.name,
