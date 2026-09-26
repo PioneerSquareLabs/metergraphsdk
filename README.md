@@ -168,8 +168,17 @@ def summarize_invoice(invoice):
 Attribution is automatic in Python: the SDK walks the stack to the nearest application function. `@metergraph.track` pins an explicit, stable name instead. Sync and async clients both work, streaming included. To configure in code rather than env vars, call `metergraph.init(token=..., ...)` before the first `wrap()`.
 
 Use `with metergraph.trace("checkout"):` or the equivalent decorator to group
-multiple provider calls. Set `capture_text=False` on `init()`, `route()`, or
-`trace()` when an operation must remain metadata-only.
+the calls in one user-visible workflow. Use `with metergraph.route("name"):`
+inside that trace to decide which product surfaces appear as separate
+workloads. A trace answers "which calls belonged to this workflow?" A route
+answers "which workload should these calls be measured with?" Keep the route
+stable when calls should be analyzed together. The SDK marks routes created by
+`route()` as explicit developer metadata so workload classification can honor
+that boundary. See the runnable
+[Python Gemini workflow example](examples/python-gemini/) for three calls in
+one trace that intentionally produce two workloads. Set `capture_text=False`
+on `init()`, `route()`, or `trace()` when an operation must remain
+metadata-only.
 
 For concurrent requests, background jobs, or reused workers, keep session and
 tag identity inside a bounded context:
@@ -231,8 +240,13 @@ const summarizeInvoice = mg.track("billing.summarize_invoice", async (invoice) =
 
 In TypeScript, use `track()` for attribution. It stays reliable across bundlers and minifiers, where stack parsing does not. Provider SDKs and the Vercel AI SDK are optional peer dependencies, and Metergraph itself has no runtime dependencies. To configure in code, call `mg.init({ repository: "owner/repository", token, ... })` before the first `wrap()`.
 
-Use `await mg.trace("checkout", async () => { ... })` to group multiple calls,
-and pass `{ captureText: false }` for a metadata-only operation.
+Use `await mg.trace("checkout", async () => { ... })` to group the calls in one
+user-visible workflow. Put `mg.route("name", ...)` around each product
+surface that should appear as its own workload. A trace identifies the
+workflow; a route identifies the workload. Keep the route stable for calls
+that should be analyzed together. The SDK marks `route()` scopes as explicit
+developer metadata so workload classification can honor that boundary. Pass
+`{ captureText: false }` for a metadata-only operation.
 
 Vercel AI SDK models use the same capture and trace path through middleware:
 

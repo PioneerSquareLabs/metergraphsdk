@@ -34,6 +34,11 @@ events while keeping MeterGraph running.
 | `python-openrouter/main.py` | `pip install metergraph openai`, `OPENROUTER_API_KEY` |
 | `node-openrouter/` | self-contained package: `cd` in, `npm install`, `npm start`; `OPENROUTER_API_KEY` |
 
+For a customer-perspective workflow, read the
+[`python-gemini/`](python-gemini/) example. It shows how one `trace()` can
+contain several calls while separate `route()` scopes keep product surfaces
+in separate workloads.
+
 `node-vercel-ai/main.mjs` uses AI SDK 7 and therefore requires Node.js 22+. It
 wraps a language model with `mg.vercelAISDKMiddleware()` instead of a provider
 client. It calls a direct OpenAI model by default, or the Vercel AI Gateway

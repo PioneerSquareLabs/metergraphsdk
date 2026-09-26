@@ -204,6 +204,7 @@ test("wrap captures usage/context and config assignment is sticky", async (t) =>
   assert.equal(batches[0].schema_version, 1);
   const row = batches[0].rows[0];
   assert.equal(row.route, "classify");
+  assert.equal(row.route_source, "explicit");
   assert.equal(row.session_id, "session-1");
   assert.equal(row.input_tokens, 8);
   assert.equal(row.cache_read_tokens, 2);

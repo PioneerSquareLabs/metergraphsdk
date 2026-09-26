@@ -172,6 +172,7 @@ def test_wrap_sync_records_usage_context_and_preserves_response(tmp_path):
     assert len(rows.rows) == 1
     row = rows.rows[0]
     assert row["route"] == "ticket-classifier"
+    assert row["route_source"] == "explicit"
     assert row["session_id"] == "conversation-7"
     assert row["input_tokens"] == 12
     assert row["cache_read_tokens"] == 3

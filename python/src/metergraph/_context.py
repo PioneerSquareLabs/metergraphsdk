@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping
 @dataclass(frozen=True)
 class CaptureContext:
     route: str | None = None
+    route_source: str | None = None
     session_id: str | None = None
     tags: Mapping[str, str] = field(default_factory=dict)
     unit_name: str | None = None
@@ -153,6 +154,7 @@ class route:
             replace(
                 current,
                 route=self.name,
+                route_source="explicit",
                 tags=merged,
                 unit_name=self.unit if self.unit is not None else current.unit_name,
                 unit_count=self.unit_count
