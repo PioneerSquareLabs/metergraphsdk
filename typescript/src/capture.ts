@@ -872,7 +872,7 @@ export class CaptureRuntime {
     this.transport.enqueue({
       ts: state.ts,
       route: state.context.route,
-      route_source: state.context.routeSource,
+      route_source: state.context.route ? state.context.routeSource : undefined,
       provider: state.provider,
       model: state.request.model,
       ...usage(response),

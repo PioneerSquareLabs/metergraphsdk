@@ -3,7 +3,8 @@ import { randomBytes } from "node:crypto";
 
 export interface CaptureContext {
   route?: string;
-  routeSource?: "explicit";
+  /** "explicit" when the developer named the route, "derived" when filled in. */
+  routeSource?: "explicit" | "derived";
   sessionId?: string;
   tags: Record<string, string>;
   unitName?: string;

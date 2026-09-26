@@ -14,7 +14,7 @@ provider supplies them:
 | --- | --- |
 | Provider | Canonical provider identity. Gateway or proxy identity is separate from the direct provider when the path exposes both. |
 | Model | The requested model, plus the provider response model when the provider returns one. |
-| Route | Explicit `metergraph.route`, prompt name, framework route, or the documented operation fallback. |
+| Route | Explicit `metergraph.route`, prompt name, framework route, or the documented operation fallback, with `route_source` declaring `explicit` for a name the developer chose and `derived` for a fallback. |
 | Usage | Input and output tokens. Cache and reasoning counters remain distinct when the source exposes them. |
 | Timing | Start timestamp and call latency. |
 | Trace identity | Trace and span identity when the source emits it. Wrapped clients receive deterministic single-call identity when no parent trace exists. |

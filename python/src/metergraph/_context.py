@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping
 @dataclass(frozen=True)
 class CaptureContext:
     route: str | None = None
+    # "explicit" when the developer named the route, "derived" when filled in.
     route_source: str | None = None
     session_id: str | None = None
     tags: Mapping[str, str] = field(default_factory=dict)

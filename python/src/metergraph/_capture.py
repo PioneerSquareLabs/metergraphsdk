@@ -1093,7 +1093,7 @@ class CallState:
         row: dict[str, Any] = {
             "ts": self.ts,
             "route": self.context.route,
-            "route_source": self.context.route_source,
+            "route_source": self.context.route_source if self.context.route else None,
             "provider": self.provider,
             "model": self.request.get("model"),
             **_usage(response),

@@ -204,7 +204,6 @@ test("wrap captures usage/context and config assignment is sticky", async (t) =>
   assert.equal(batches[0].schema_version, 1);
   const row = batches[0].rows[0];
   assert.equal(row.route, "classify");
-  assert.equal(row.route_source, "explicit");
   assert.equal(row.session_id, "session-1");
   assert.equal(row.input_tokens, 8);
   assert.equal(row.cache_read_tokens, 2);
@@ -501,7 +500,7 @@ test("wrap captures gemini usage from non-stream and cumulative stream responses
     status: "requested",
     idempotency: "non_idempotent",
   });
-  assert.equal(row.sdk_version, "0.6.8");
+  assert.equal(row.sdk_version, "0.6.9");
   assert.equal(streamed.provider, "google");
   assert.equal(streamed.endpoint, "models.generate_content.stream");
   assert.equal(streamed.stream, true);
@@ -1380,4 +1379,21 @@ test("typescript seam endpoints match shared fixture", () => {
     const actual = [...new Set(SEAM_TABLES[provider].map((seam) => seam.endpoint))].sort();
     assert.deepEqual(actual, [...endpoints].sort(), provider);
   }
+});
+
+test("a named route is declared explicit", async () => {
+  const rows = [];
+  const runtime = stubRuntime(rows);
+
+  await route("chat.completions", async () => {
+    const named = runtime.start("openai", "chat.completions", { model: "gpt-test" });
+    runtime.finish(named, {});
+  });
+  const unnamed = runtime.start("openai", "chat.completions", { model: "gpt-test" });
+  runtime.finish(unnamed, {});
+
+  assert.deepEqual(
+    rows.map((row) => [row.route, row.route_source]),
+    [["chat.completions", "explicit"], [undefined, undefined]],
+  );
 });
