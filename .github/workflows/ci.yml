@@ -41,7 +41,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e "python[otel]" "litellm[proxy]>=1.96.2,<2" pytest
-      - run: pytest examples/python-litellm-otel/test_example.py -q
+      - run: pytest examples/integrations/telemetry/litellm/python/test_litellm_example.py -q
 
   python-phoenix-otel:
     runs-on: ubuntu-latest
@@ -51,7 +51,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e "python[otel]" pytest
-      - run: pytest examples/python-phoenix-otel/test_example.py -q
+      - run: pytest examples/integrations/telemetry/phoenix/python/test_phoenix_example.py -q
 
   python-langfuse-otel:
     runs-on: ubuntu-latest
@@ -61,7 +61,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e "python[otel]" pytest
-      - run: pytest examples/python-langfuse-otel/test_example.py -q
+      - run: pytest examples/integrations/telemetry/langfuse/python/test_langfuse_example.py -q
 
   typescript:
     runs-on: ubuntu-latest
@@ -111,13 +111,13 @@ jobs:
         working-directory: typescript
       - if: matrix.ai == 7
         run: npm install
-        working-directory: examples/node-vercel-ai-registry
+        working-directory: examples/integrations/frameworks/vercel-ai/provider-registry
       - if: matrix.ai == 7
         run: npm test
-        working-directory: examples/node-vercel-ai-registry
+        working-directory: examples/integrations/frameworks/vercel-ai/provider-registry
       - if: matrix.ai == 7
         run: npm install
-        working-directory: examples/node-vercel-ai-existing-factory
+        working-directory: examples/integrations/frameworks/vercel-ai/existing-factory
       - if: matrix.ai == 7
         run: npm test
-        working-directory: examples/node-vercel-ai-existing-factory
+        working-directory: examples/integrations/frameworks/vercel-ai/existing-factory

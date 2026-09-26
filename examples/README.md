@@ -1,8 +1,8 @@
 # Examples
 
-These examples show supported provider wrappers, Vercel AI SDK middleware,
-LiteLLM OpenTelemetry export, and BatchFirst execution. Capture examples send
-usage metadata to your MeterGraph server.
+Start with the customer workflow you want to instrument. The workflow examples
+show how traces and routes map to product behavior. The integration examples
+then show provider, framework, and telemetry-specific setup.
 
 Setup for all of them:
 
@@ -19,39 +19,41 @@ events while keeping MeterGraph running.
 
 | Example | Needs |
 |---|---|
-| `fake-providers/run_e2e.py` | nothing — offline demo traffic |
-| `python-openai/main.py` | `pip install metergraph openai`, `OPENAI_API_KEY` |
-| `python-anthropic/main.py` | `pip install metergraph anthropic`, `ANTHROPIC_API_KEY` |
-| `python-gemini/main.py` | `pip install metergraph google-genai`, `GEMINI_API_KEY` |
-| `python-batch-first/main.py` | Opt-in OpenAI Batch API with a deadline and direct fallback; read its warning first |
-| `python-litellm-otel/` | Export LiteLLM's OpenTelemetry GenAI spans without changing call sites |
-| `node-openai/main.mjs` | `npm i metergraph openai`, `OPENAI_API_KEY` |
-| `node-anthropic/main.mjs` | `npm i metergraph @anthropic-ai/sdk`, `ANTHROPIC_API_KEY` |
-| `node-gemini/main.mjs` | `npm i metergraph @google/genai`, `GEMINI_API_KEY` |
-| `node-vercel-ai/main.mjs` | `npm i metergraph ai @ai-sdk/openai`, `OPENAI_API_KEY` or `AI_GATEWAY_API_KEY` |
-| `node-vercel-ai-registry/` | New or adaptable multi-provider AI SDK applications |
-| `node-vercel-ai-existing-factory/` | Applications that already have a custom model factory |
-| `python-openrouter/main.py` | `pip install metergraph openai`, `OPENROUTER_API_KEY` |
-| `node-openrouter/` | self-contained package: `cd` in, `npm install`, `npm start`; `OPENROUTER_API_KEY` |
+| `test-fixtures/fake-providers/run_e2e.py` | Nothing required. Offline demo traffic |
+| `integrations/providers/openai/` | Native OpenAI wrappers for Python and TypeScript |
+| `integrations/providers/anthropic/` | Native Anthropic wrappers for Python and TypeScript |
+| `integrations/providers/gemini/` | Native Gemini wrapper for TypeScript |
+| `integrations/providers/openrouter/` | OpenRouter gateway examples for Python and TypeScript |
+| `integrations/frameworks/vercel-ai/` | Vercel AI SDK middleware patterns |
+| `integrations/telemetry/` | Langfuse, LiteLLM, Phoenix, and Bedrock/Azure OpenTelemetry |
+| `execution/batch-first/` | Opt-in Batch API with a deadline and direct fallback |
 
-`node-vercel-ai/main.mjs` uses AI SDK 7 and therefore requires Node.js 22+. It
-wraps a language model with `mg.vercelAISDKMiddleware()` instead of a provider
-client. It calls a direct OpenAI model by default, or the Vercel AI Gateway
-when `AI_GATEWAY_API_KEY` is set:
+## Workflows
+
+For a customer-perspective workflow, start with
+[`workflows/content-generation/draft-review/`](workflows/content-generation/draft-review/).
+It shows one `trace()` containing three calls while separate `route()` scopes
+keep the draft and review workloads distinct.
+
+`integrations/frameworks/vercel-ai/direct/main.mjs` uses AI SDK 7 and therefore
+requires Node.js 22+. It wraps a language model with
+`mg.vercelAISDKMiddleware()` instead of a provider client. It calls a direct
+OpenAI model by default, or the Vercel AI Gateway when `AI_GATEWAY_API_KEY` is
+set:
 
 ```bash
 npm i metergraph ai @ai-sdk/openai
-OPENAI_API_KEY=... node examples/node-vercel-ai/main.mjs
-AI_GATEWAY_API_KEY=... node examples/node-vercel-ai/main.mjs
+OPENAI_API_KEY=... node examples/integrations/frameworks/vercel-ai/direct/main.mjs
+AI_GATEWAY_API_KEY=... node examples/integrations/frameworks/vercel-ai/direct/main.mjs
 ```
 
 ## Choose a multi-provider example
 
 | Your application | Start here | MeterGraph integration point |
 |---|---|---|
-| Calls one provider or model directly | [`node-vercel-ai/`](node-vercel-ai/) | Wrap that model with `vercelAISDKMiddleware()` |
-| Uses or can adopt `createProviderRegistry()` | [`node-vercel-ai-registry/`](node-vercel-ai-registry/) | Add middleware once to the registry |
-| Already has a custom model factory | [`node-vercel-ai-existing-factory/`](node-vercel-ai-existing-factory/) | Wrap the factory's controlled exit |
+| Calls one provider or model directly | [`direct/`](integrations/frameworks/vercel-ai/direct/) | Wrap that model with `vercelAISDKMiddleware()` |
+| Uses or can adopt `createProviderRegistry()` | [`provider-registry/`](integrations/frameworks/vercel-ai/provider-registry/) | Add middleware once to the registry |
+| Already has a custom model factory | [`existing-factory/`](integrations/frameworks/vercel-ai/existing-factory/) | Wrap the factory's controlled exit |
 
 Use the provider registry for new multi-provider integrations. Do not create a
 custom factory solely for MeterGraph. Each detailed README identifies the
@@ -60,23 +62,23 @@ uses matching `MeterGraph integration` comments.
 
 ## OpenRouter (OpenAI-compatible gateway)
 
-[`python-openrouter/`](python-openrouter/) and [`node-openrouter/`](node-openrouter/)
-wrap an ordinary OpenAI client pointed at OpenRouter. `https://openrouter.ai` is
-auto-detected; a trusted custom domain uses the `gateway="openrouter"` override.
-Captured rows add `served_model` and the gateway-reported `reported_cost_usd`
-(the OpenRouter account charge) alongside the requested model and catalog cost.
-Each folder's README explains requested-vs-served model, reported-vs-catalog
-cost, final streaming usage, and the BYOK limitation.
+[`integrations/providers/openrouter/python/`](integrations/providers/openrouter/python/)
+and [`integrations/providers/openrouter/typescript/`](integrations/providers/openrouter/typescript/)
+wrap an ordinary OpenAI client pointed at OpenRouter. `https://openrouter.ai`
+is auto-detected; a trusted custom domain uses the `gateway="openrouter"`
+override. Each README explains requested versus served model, reported versus
+catalog cost, final streaming usage, and the BYOK limitation.
 
 ## Batch-first execution
 
-[`python-batch-first/`](python-batch-first/) is a separately opt-in execution
-example, not a capture example. Use it only when the request may run through a
-provider Batch API and you explicitly accept that a deadline fallback can
-execute and bill the same request twice.
+[`execution/batch-first/`](execution/batch-first/) is a separately opt-in
+execution example, not a capture example. Use it only when the request may run
+through a provider Batch API and you explicitly accept that a deadline fallback
+can execute and bill the same request twice.
 
 ## LiteLLM with OpenTelemetry
 
-[`python-litellm-otel/`](python-litellm-otel/) attaches MeterGraph as LiteLLM's
-custom OpenTelemetry exporter. Use it when LiteLLM already emits GenAI semantic-
-convention spans; do not also wrap the same calls with `metergraph.wrap()`.
+[`integrations/telemetry/litellm/python/`](integrations/telemetry/litellm/python/)
+attaches MeterGraph as LiteLLM's custom OpenTelemetry exporter. Use it when
+LiteLLM already emits GenAI semantic-convention spans; do not also wrap the
+same calls with `metergraph.wrap()`.

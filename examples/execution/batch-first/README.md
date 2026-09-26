@@ -51,5 +51,5 @@ decoded JSON, while a direct fallback returns the provider SDK's response
 object. This is a live example and can incur both batch and direct-request
 charges.
 
-See the [Python SDK BatchFirst reference](../../python/README.md#batch-first-execution-opt-in)
+See the [Python SDK BatchFirst reference](../../../python/README.md#batch-first-execution-opt-in)
 for late-batch callbacks, provider details, and current limitations.

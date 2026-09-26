@@ -145,7 +145,7 @@ For OpenRouter, wrap an ordinary OpenAI client pointed at
 `served_model` and, when OpenRouter supplies a valid `usage.cost`, the
 gateway-reported `reported_cost_usd`. A trusted custom domain uses
 `metergraph.wrap(client, gateway="openrouter")`. See the runnable
-[Python OpenRouter example](examples/python-openrouter/).
+[Python OpenRouter example](examples/integrations/providers/openrouter/python/).
 
 MeterGraph provides a standard OpenTelemetry GenAI span exporter that also
 reads OpenInference (Arize Phoenix), Langfuse SDK and LangSmith spans, so an
@@ -155,7 +155,7 @@ See
 below. LiteLLM is
 the currently qualified integration and can attach the exporter without
 changing individual model calls. See the
-[LiteLLM OpenTelemetry example](examples/python-litellm-otel/).
+[LiteLLM OpenTelemetry example](examples/integrations/telemetry/litellm/python/).
 
 Then use the wrapped client exactly as before:
 
@@ -168,8 +168,17 @@ def summarize_invoice(invoice):
 Attribution is automatic in Python: the SDK walks the stack to the nearest application function. `@metergraph.track` pins an explicit, stable name instead. Sync and async clients both work, streaming included. To configure in code rather than env vars, call `metergraph.init(token=..., ...)` before the first `wrap()`.
 
 Use `with metergraph.trace("checkout"):` or the equivalent decorator to group
-multiple provider calls. Set `capture_text=False` on `init()`, `route()`, or
-`trace()` when an operation must remain metadata-only.
+the calls in one user-visible workflow. Use `with metergraph.route("name"):`
+inside that trace to decide which product surfaces appear as separate
+workloads. A trace answers "which calls belonged to this workflow?" A route
+answers "which workload should these calls be measured with?" Keep the route
+stable when calls should be analyzed together. The SDK marks routes created by
+`route()` as explicit developer metadata so workload classification can honor
+that boundary. See the runnable
+[Python Gemini workflow example](examples/workflows/content-generation/draft-review/)
+for three calls in one trace that intentionally produce two workloads. Set `capture_text=False`
+on `init()`, `route()`, or `trace()` when an operation must remain
+metadata-only.
 
 For concurrent requests, background jobs, or reused workers, keep session and
 tag identity inside a bounded context:
@@ -221,7 +230,7 @@ For OpenRouter, wrap an ordinary OpenAI client pointed at
 `served_model` and, when OpenRouter supplies a valid `usage.cost`, the
 gateway-reported `reported_cost_usd`. A trusted custom domain uses
 `mg.wrap(client, { gateway: "openrouter" })`. See the runnable
-[Node OpenRouter example](examples/node-openrouter/).
+[Node OpenRouter example](examples/integrations/providers/openrouter/typescript/).
 
 ```ts
 const summarizeInvoice = mg.track("billing.summarize_invoice", async (invoice) => {
@@ -231,8 +240,13 @@ const summarizeInvoice = mg.track("billing.summarize_invoice", async (invoice) =
 
 In TypeScript, use `track()` for attribution. It stays reliable across bundlers and minifiers, where stack parsing does not. Provider SDKs and the Vercel AI SDK are optional peer dependencies, and Metergraph itself has no runtime dependencies. To configure in code, call `mg.init({ repository: "owner/repository", token, ... })` before the first `wrap()`.
 
-Use `await mg.trace("checkout", async () => { ... })` to group multiple calls,
-and pass `{ captureText: false }` for a metadata-only operation.
+Use `await mg.trace("checkout", async () => { ... })` to group the calls in one
+user-visible workflow. Put `mg.route("name", ...)` around each product
+surface that should appear as its own workload. A trace identifies the
+workflow; a route identifies the workload. Keep the route stable for calls
+that should be analyzed together. The SDK marks `route()` scopes as explicit
+developer metadata so workload classification can honor that boundary. Pass
+`{ captureText: false }` for a metadata-only operation.
 
 Vercel AI SDK models use the same capture and trace path through middleware:
 
@@ -330,7 +344,11 @@ Anthropic responses containing only client tool calls record `content: null`
 with their tool calls intact. Mixed text, incomplete responses, and
 provider-executed tools retain their provider representation.
 
-See [`examples/`](examples) for runnable per-provider examples, including an offline fake-provider demo that needs no API keys. The [instrumentation coverage contract](docs/instrumentation-coverage.md) is the source of truth for supported providers, frameworks, package anchors, and unsupported-path behavior.
+See [`examples/`](examples) for runnable customer workflows and integration
+examples, including an offline fake-provider demo that needs no API keys. The
+[instrumentation coverage contract](docs/instrumentation-coverage.md) is the
+source of truth for supported providers, frameworks, package anchors, and
+unsupported-path behavior.
 
 
 ## Capture from existing telemetry (Phoenix, Langfuse, LangSmith)
@@ -411,8 +429,8 @@ named after it — `openinference.instrumentation.openai` and so on; the Langfus
 SDK publishes everything under the single scope `langfuse-sdk`. When nothing arrives, read the exporter's public
 `exporter.skipped` counters (`"scope"`, `"not-genai"`, `"ineligible-kind"`,
 `"no-model"`, plus the `"parse-degraded"` diagnostic). Runnable offline
-examples: [`examples/python-phoenix-otel/`](examples/python-phoenix-otel/),
-[`examples/python-langfuse-otel/`](examples/python-langfuse-otel/).
+examples: [`examples/integrations/telemetry/phoenix/python/`](examples/integrations/telemetry/phoenix/python/),
+[`examples/integrations/telemetry/langfuse/python/`](examples/integrations/telemetry/langfuse/python/).
 
 Vendor-reported cost lands on rows as `reported_cost_usd` with a fixed
 `reported_cost_source`; the SDK never computes cost itself. Note that Phoenix
