@@ -78,7 +78,7 @@ OpenRouter is captured the same way: point an OpenAI client at
 `reported_cost_usd` to Chat Completions rows without changing the requested model
 or the capture provider. A trusted custom domain uses
 `metergraph.wrap(client, gateway="openrouter")`. The runnable
-[Python OpenRouter example](../examples/python-openrouter/) covers requested-vs-
+[Python OpenRouter example](../examples/integrations/providers/openrouter/python/) covers requested-vs-
 served model, reported-vs-catalog cost, streaming usage, and the BYOK limitation.
 
 ## OpenTelemetry GenAI export
@@ -110,7 +110,7 @@ Message content is explicitly enabled because it may be sensitive. Text parts
 are retained and replayable in the current POC pipeline. Calls containing other
 part types retain their model, usage, timing, and status metadata, but those
 parts are not replayable yet. See the runnable
-[`python-litellm-otel` example](../examples/python-litellm-otel/).
+[`LiteLLM OpenTelemetry example`](../examples/integrations/telemetry/litellm/python/).
 
 The exporter reads the OpenTelemetry `gen_ai.*` conventions, OpenInference
 (Arize Phoenix), Langfuse and LangSmith spans. Dialects that label span kind

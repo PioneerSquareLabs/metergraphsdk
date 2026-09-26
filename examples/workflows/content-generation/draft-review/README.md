@@ -1,4 +1,4 @@
-# Python Gemini: name workflows and workloads
+# Content generation: draft and review
 
 This example shows how to make the dashboard match the way your product works.
 It makes three Gemini calls for one haiku-writing request:
@@ -24,13 +24,23 @@ python -m pip install metergraph google-genai
 export GEMINI_API_KEY=<your-gemini-key>
 export METERGRAPH_APP_TOKEN=<your-ingest-key>
 export METERGRAPH_INGEST_URL=<your-metergraph-ingest-url>
-python examples/python-gemini/main.py
+python examples/workflows/content-generation/draft-review/python-gemini/main.py
 ```
 
 For a local self-hosted Metergraph server, set
 `METERGRAPH_INGEST_URL=http://localhost:8787` for the public OSS server, or
 use the URL and ingest key issued by your customer-local deployment. The SDK
 uses the same route and trace fields for both targets.
+
+## Route map
+
+| Customer workflow step | Route | Calls |
+|---|---|---|
+| Create the first draft | `haiku-draft` | `haiku_about()` |
+| Review and finalize | `haiku-review` | `review_haiku()`, `finalize_haiku()` |
+
+All three calls share the `haiku-workflow` trace. The route is the workload
+boundary that the dashboard should use.
 
 ## Choose the scope that answers the question
 
