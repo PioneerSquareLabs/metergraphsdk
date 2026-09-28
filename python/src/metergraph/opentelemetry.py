@@ -18,7 +18,12 @@ from opentelemetry.trace import StatusCode
 from ._capture import _get_runtime
 from ._context import CaptureContext
 from ._failure_log import FailureLogger
-from ._genai_attrs import SkipReason, map_span_attributes
+from ._genai_attrs import (
+    LITELLM_SCOPE,
+    SkipReason,
+    litellm_route,
+    map_span_attributes,
+)
 
 _SKIP_SCOPE = "scope"
 
@@ -166,6 +171,8 @@ class MetergraphGenAIExporter(SpanExporter):
             ),
             None,
         )
+        if named_route is None and scope_name == LITELLM_SCOPE:
+            named_route = litellm_route(span.name, attributes)
         call = runtime.call_state(
             provider,
             mapped.operation,

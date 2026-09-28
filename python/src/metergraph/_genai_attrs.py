@@ -687,6 +687,158 @@ _PRECEDENCE = (
 )
 
 
+# LiteLLM's OpenTelemetry callback writes this on every call span it produces.
+_LITELLM_CALL_ID = "litellm.call_id"
+# LiteLLM's tracer, which names its spans after the caller's generation_name.
+LITELLM_SCOPE = "litellm"
+# Span names LiteLLM uses when the caller did not name the call.
+_LITELLM_DEFAULT_SPAN_NAMES = frozenset({"litellm_request", "raw_gen_ai_request"})
+
+
+def _is_litellm(attributes: Mapping[str, Any]) -> bool:
+    return _LITELLM_CALL_ID in attributes
+
+
+def litellm_route(span_name: Any, attributes: Mapping[str, Any]) -> str | None:
+    """The caller's ``generation_name``, which LiteLLM writes as the span name.
+
+    None for a LiteLLM default name: ``litellm_request``, ``raw_gen_ai_request``
+    or the semantic-convention ``"<operation> <model>"``.
+    """
+    if not _is_litellm(attributes) or not isinstance(span_name, str):
+        return None
+    name = span_name.strip()
+    if not name or name in _LITELLM_DEFAULT_SPAN_NAMES:
+        return None
+    operations = {"chat", _string(attributes.get("gen_ai.operation.name")) or "chat"}
+    if any(name == op or name.startswith(op + " ") for op in operations):
+        return None
+    return name
+
+
+def _indexed(attributes: Mapping[str, Any], prefix: str) -> dict[int, dict[str, Any]]:
+    """Group ``<prefix>.<i>.<field>`` attributes by index."""
+    grouped: dict[int, dict[str, Any]] = {}
+    lead = prefix + "."
+    for key, value in attributes.items():
+        if not key.startswith(lead):
+            continue
+        index, separator, rest = key[len(lead) :].partition(".")
+        if separator and index.isdigit() and rest:
+            grouped.setdefault(int(index), {})[rest] = value
+    return grouped
+
+
+def _litellm_tools(attributes: Mapping[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+    """Request tools from ``llm.request.functions.<i>.*``, in OpenAI chat shape."""
+    tools: list[dict[str, Any]] = []
+    degraded = False
+    for _, fields in sorted(_indexed(attributes, "llm.request.functions").items()):
+        name = _string(fields.get("name"))
+        if name is None:
+            continue
+        function: dict[str, Any] = {"name": name}
+        description = fields.get("description")
+        if isinstance(description, str):
+            function["description"] = description
+        parameters = fields.get("parameters")
+        if isinstance(parameters, str):
+            decoded, ok = _load_json(parameters)
+            function["parameters"] = decoded if ok else parameters
+            degraded = degraded or not ok
+        tools.append({"type": "function", "function": function})
+    return tools, degraded
+
+
+def _has_output_tool_call(attributes: Mapping[str, Any]) -> bool:
+    messages, ok = _load_json(attributes.get("gen_ai.output.messages"))
+    if not ok or not isinstance(messages, list):
+        return False
+    return any(
+        isinstance(part, Mapping) and part.get("type") == "tool_call"
+        for message in messages
+        if isinstance(message, Mapping) and isinstance(message.get("parts"), list)
+        for part in message["parts"]
+    )
+
+
+def _litellm_tool_calls(
+    attributes: Mapping[str, Any], response_id: str | None
+) -> list[dict[str, Any]]:
+    """Output tool calls from ``gen_ai.completion.<i>.function_call`` or ``.tool_calls``.
+
+    The legacy attributes carry no call id, so one is derived from the response
+    id and completion index exactly as the MeterGraph OTLP ingest does.
+    """
+    prefix = response_id or "completion"
+    calls: list[dict[str, Any]] = []
+
+    def add(call_id: Any, name: Any, arguments: Any) -> None:
+        name = _string(name)
+        if name is None or not name.strip():
+            return
+        calls.append(
+            {
+                "id": str(call_id),
+                "type": "function",
+                "function": {
+                    "name": name.strip(),
+                    "arguments": arguments if isinstance(arguments, str) else "",
+                },
+            }
+        )
+
+    for index, fields in sorted(_indexed(attributes, "gen_ai.completion").items()):
+        add(
+            f"{prefix}-{index}",
+            fields.get("function_call.name"),
+            fields.get("function_call.arguments"),
+        )
+        for position, call in sorted(_indexed(fields, "tool_calls").items()):
+            add(
+                _string(call.get("id")) or f"{prefix}-{index}-{position}",
+                call.get("name"),
+                call.get("arguments"),
+            )
+    return calls
+
+
+def _apply_litellm(
+    attributes: Mapping[str, Any],
+    request: dict[str, Any],
+    response: dict[str, Any],
+) -> bool:
+    """Add what LiteLLM writes outside the attributes the dialects read.
+
+    Fills the provider request id, request tools and output tool calls only
+    where nothing else supplied them. Returns whether any JSON was malformed.
+    """
+    response_id = _string(attributes.get("gen_ai.response.id"))
+    if response_id is not None and not any(
+        response.get(key) for key in ("_request_id", "response_id", "responseId", "id")
+    ):
+        response["id"] = response_id
+
+    degraded = False
+    if "tools" not in request and "gen_ai.tool.definitions" not in attributes:
+        tools, degraded = _litellm_tools(attributes)
+        if tools:
+            request["tools"] = tools
+
+    if not _has_output_tool_call(attributes):
+        tool_calls = _litellm_tool_calls(attributes, response_id)
+        if tool_calls:
+            choices = response.get("choices") or [{}]
+            response["choices"] = [
+                {
+                    **choices[0],
+                    "message": {"role": "assistant", "tool_calls": tool_calls},
+                },
+                *choices[1:],
+            ]
+    return degraded
+
+
 def _first_value(contributions: list[_Fields], name: str) -> Any:
     for contribution in contributions:
         value = getattr(contribution, name)
@@ -749,6 +901,12 @@ def map_span_attributes(
     if output_structure is not None and response_text is None:
         response["output"] = output_structure
 
+    litellm_degraded = (
+        _apply_litellm(attributes, request, response)
+        if _is_litellm(attributes)
+        else False
+    )
+
     priced = next((c for c in contributions if c.cost is not None), None)
 
     dropped: set[str] = set()
@@ -769,12 +927,17 @@ def map_span_attributes(
         completion_start_time=_first_value(contributions, "completion_start_time"),
         error_message=_first_value(contributions, "error_message"),
         dialects=tuple(eligible),
-        parse_degraded=any(
-            contribution.parse_degraded for contribution in contributions
-        ),
+        parse_degraded=litellm_degraded
+        or any(contribution.parse_degraded for contribution in contributions),
         usage_absent=usage_absent,
         dropped_usage_keys=tuple(sorted(dropped)),
     )
 
 
-__all__ = ["MappedCall", "SkipReason", "map_span_attributes"]
+__all__ = [
+    "LITELLM_SCOPE",
+    "MappedCall",
+    "SkipReason",
+    "litellm_route",
+    "map_span_attributes",
+]
