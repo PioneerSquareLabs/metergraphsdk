@@ -1,4 +1,4 @@
-"""Offline contract test for the runnable examples/python-openrouter example.
+"""Offline contract test for the runnable Python OpenRouter example.
 
 A local HTTP server plays two roles: an OpenRouter-compatible Chat Completions
 endpoint that a real ``openai`` client talks to, and the MeterGraph ingest that
@@ -22,7 +22,13 @@ SERVED_MODEL = "anthropic/claude-sonnet-4.6"
 REPORTED_COST = 0.00482
 UPSTREAM_COST = 0.00131
 EXAMPLE_MAIN = (
-    Path(__file__).resolve().parents[2] / "examples" / "python-openrouter" / "main.py"
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "integrations"
+    / "providers"
+    / "openrouter"
+    / "python"
+    / "main.py"
 )
 
 

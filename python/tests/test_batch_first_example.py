@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-EXAMPLE_DIR = REPO_ROOT / "examples" / "python-batch-first"
+EXAMPLE_DIR = REPO_ROOT / "examples" / "execution" / "batch-first"
 
 
 def test_batch_first_example_is_valid_and_explicitly_accepts_duplicate_execution():

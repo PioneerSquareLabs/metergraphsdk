@@ -2,7 +2,7 @@
 
 Use this pattern when your application already has a function that selects
 among providers or models. Do not introduce a custom factory solely for
-MeterGraph; use the [provider-registry example](../node-vercel-ai-registry/)
+MeterGraph; use the [provider-registry example](../provider-registry/)
 for a new multi-provider integration. This example requires Node.js 22+ and
 AI SDK 7.
 

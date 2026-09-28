@@ -3,12 +3,12 @@
   "type": "module",
   "engines": { "node": ">=18" },
   "scripts": {
-    "preinstall": "npm --prefix ../../typescript install --ignore-scripts && npm --prefix ../../typescript run build",
+    "preinstall": "npm --prefix ../../../../../typescript install --ignore-scripts && npm --prefix ../../../../../typescript run build",
     "start": "node main.mjs",
     "test": "node --test main.test.mjs"
   },
   "dependencies": {
     "openai": "^7",
-    "metergraph": "file:../../typescript"
+    "metergraph": "file:../../../../../typescript"
   }
 }

@@ -58,7 +58,7 @@ the host, adding `served_model` and — when OpenRouter supplies a valid
 requested model or the capture provider. A trusted custom domain uses
 `wrap(client, { gateway: "openrouter" })`;
 the existing `wrap(client, "openai")` form is unchanged. The runnable
-[Node OpenRouter example](../examples/node-openrouter/) covers requested-vs-served
+[Node OpenRouter example](../examples/integrations/providers/openrouter/typescript/) covers requested-vs-served
 model, reported-vs-catalog cost, streaming usage, and the BYOK limitation.
 
 ## Vercel AI SDK
