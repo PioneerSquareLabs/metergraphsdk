@@ -13,10 +13,9 @@ from metergraph.opentelemetry import MetergraphGenAIExporter
 litellm.callbacks.append(
     OpenTelemetry(
         OpenTelemetryConfig(
+            # LiteLLM logs message content on its spans by default; MeterGraph
+            # needs it, so do not set litellm.turn_off_message_logging.
             exporter=MetergraphGenAIExporter(),
-            # GenAI content is sensitive and opt-in. LiteLLM emits the standard
-            # gen_ai.input.messages and gen_ai.output.messages span attributes.
-            capture_message_content="SPAN_ONLY",
         )
     )
 )
@@ -31,6 +30,9 @@ def run_example() -> str:
             {"role": "system", "content": "Use synthetic data only."},
             {"role": "user", "content": "Return a synthetic response."},
         ],
+        # LiteLLM names the span after generation_name; MeterGraph uses it as
+        # the route. Pass a new metadata dict on every call.
+        metadata={"generation_name": "synthetic-example"},
         mock_response="Synthetic LiteLLM response",
     )
     return response.choices[0].message.content

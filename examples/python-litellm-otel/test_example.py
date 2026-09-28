@@ -39,6 +39,7 @@ def test_litellm_example_emits_replayable_text_trace(monkeypatch):
     row = rows.rows[0]
     assert row["provider"] == "openai"
     assert row["model"] == "gpt-5-mini"
+    assert (row["route"], row["route_source"]) == ("synthetic-example", "explicit")
     request = json.loads(row["request_json"])
     assert json.loads(request["system_instructions"]) == [
         {"type": "text", "content": "Use synthetic data only."}
