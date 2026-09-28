@@ -45,12 +45,21 @@ On spans, instructions and messages may be JSON text. Ordered messages use
 `{"type":"text","content":"..."}`. See the
 [OpenTelemetry GenAI span conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans/).
 
+The exporter also reads what LiteLLM writes outside those conventions:
+`gen_ai.response.id` becomes the call's request id,
+`llm.request.functions.<i>.*` becomes the request's tool definitions, and
+`gen_ai.completion.<i>.function_call.*` becomes the response's tool calls. A
+LiteLLM span named after the caller's `generation_name` sets the call's route.
+
 ## What MeterGraph adds
 
 Open [`main.py`](main.py) and search for `MeterGraph integration`. The only
 integration block adds `MetergraphGenAIExporter` to LiteLLM's existing
-OpenTelemetry callback. It opts into message content on GenAI spans because
-OpenTelemetry and LiteLLM treat prompt and response content as sensitive.
+OpenTelemetry callback, and each call is named with
+`metadata={"generation_name": ...}`, which MeterGraph records as its route.
+Keep LiteLLM's default content logging on; the
+[Python SDK README](../../python/README.md) lists the LiteLLM settings that
+affect what MeterGraph can analyse.
 
 MeterGraph currently retains text parts for replay analysis. Calls containing
 other GenAI part types still retain their model, usage, timing, and status

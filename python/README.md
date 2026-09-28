@@ -100,13 +100,36 @@ from metergraph.opentelemetry import MetergraphGenAIExporter
 
 litellm.callbacks.append(OpenTelemetry(OpenTelemetryConfig(
     exporter=MetergraphGenAIExporter(),
-    capture_message_content="SPAN_ONLY",
 )))
+
+response = litellm.completion(
+    model="openai/gpt-5-mini",
+    messages=messages,
+    metadata={"generation_name": "ticket-triage"},
+)
 ```
+
+- LiteLLM logs message content on its spans by default. Releases before 1.85
+  have no `capture_message_content` option, so leave it out.
+- Do not set `litellm.turn_off_message_logging`. It removes messages, tool
+  definitions and outputs from the spans, so MeterGraph can count the calls but
+  cannot analyse them.
+- Name each call with `metadata={"generation_name": "<workload name>"}`.
+  LiteLLM uses it as the span name and MeterGraph records it as the call's
+  route. Without it every call is stored under the route `chat`. A
+  `metergraph.route` or `gen_ai.prompt.name` span attribute still takes
+  precedence.
+- To group the calls of a multi-step agent run into one trace, make them inside
+  one application span and set `USE_OTEL_LITELLM_REQUEST_SPAN=true`. Without
+  that variable LiteLLM writes each call onto the application span itself, and
+  only one of the calls is recorded.
+- Pass a new `metadata` dict to each call. Reusing one dict across calls makes
+  LiteLLM 1.103 drop spans.
 
 The exporter preserves OpenTelemetry trace identity, model/provider metadata,
 token usage, latency, system instructions, ordered messages, and text output.
-Message content is explicitly enabled because it may be sensitive. Text parts
+From LiteLLM spans it also records the provider response id as the request id,
+the request's tool definitions, and the tool calls in the response. Text parts
 are retained and replayable in the current POC pipeline. Calls containing other
 part types retain their model, usage, timing, and status metadata, but those
 parts are not replayable yet. See the runnable
