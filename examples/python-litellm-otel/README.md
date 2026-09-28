@@ -55,20 +55,11 @@ LiteLLM span named after the caller's `generation_name` sets the call's route.
 
 Open [`main.py`](main.py) and search for `MeterGraph integration`. The only
 integration block adds `MetergraphGenAIExporter` to LiteLLM's existing
-OpenTelemetry callback. LiteLLM logs message content on its spans by default,
-and MeterGraph needs that content to analyse the calls:
-
-- Leave out `capture_message_content`. Releases before 1.85 do not accept it.
-- Do not set `litellm.turn_off_message_logging`. It removes messages, tool
-  definitions and outputs from the spans.
-- Name each call with `metadata={"generation_name": "<workload name>"}`, as
-  the example does. Without it every call is stored under the route `chat`.
-- Make the calls of one agent run inside one application span and set
-  `USE_OTEL_LITELLM_REQUEST_SPAN=true` to keep them in one trace. Without that
-  variable LiteLLM writes each call onto the application span itself, and only
-  one of the calls is recorded.
-- Pass a new `metadata` dict to each call. Reusing one dict across calls makes
-  LiteLLM 1.103 drop spans.
+OpenTelemetry callback, and each call is named with
+`metadata={"generation_name": ...}`, which MeterGraph records as its route.
+Keep LiteLLM's default content logging on; the
+[Python SDK README](../../python/README.md) lists the LiteLLM settings that
+affect what MeterGraph can analyse.
 
 MeterGraph currently retains text parts for replay analysis. Calls containing
 other GenAI part types still retain their model, usage, timing, and status

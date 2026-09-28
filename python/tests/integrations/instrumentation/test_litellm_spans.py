@@ -8,17 +8,16 @@ from __future__ import annotations
 
 import json
 
-import pytest
-from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import ReadableSpan
-from opentelemetry.sdk.util.instrumentation import InstrumentationScope
-from opentelemetry.trace import SpanContext, Status, StatusCode, TraceFlags
-
 import metergraph
+import pytest
 from metergraph import _capture
 from metergraph._capture import Options, Runtime
 from metergraph._genai_attrs import MappedCall, map_span_attributes
 from metergraph.opentelemetry import MetergraphGenAIExporter
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import ReadableSpan
+from opentelemetry.sdk.util.instrumentation import InstrumentationScope
+from opentelemetry.trace import SpanContext, Status, StatusCode, TraceFlags
 
 RESPONSE_ID = "chatcmpl-fake-45a636ef3a5d42d4a7d093f8e3e62528"
 PARAMETERS = {
@@ -228,7 +227,11 @@ def test_standard_tool_attributes_win_over_the_legacy_ones():
 
     assert isinstance(mapped, MappedCall)
     assert "tools" not in mapped.request
-    assert all("message" not in choice for choice in mapped.response["choices"])
+    # The standard part wins and keeps its real call id.
+    (call,) = mapped.response["choices"][0]["message"]["tool_calls"]
+    assert call["id"] == "call_1"
+    assert call["function"]["name"] == "lookup_weather"
+    assert json.loads(call["function"]["arguments"]) == {"city": "Springfield"}
 
 
 def test_malformed_function_parameters_are_kept_and_flagged():

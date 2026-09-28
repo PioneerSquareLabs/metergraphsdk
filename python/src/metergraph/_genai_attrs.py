@@ -750,16 +750,35 @@ def _litellm_tools(attributes: Mapping[str, Any]) -> tuple[list[dict[str, Any]],
     return tools, degraded
 
 
-def _has_output_tool_call(attributes: Mapping[str, Any]) -> bool:
+def _output_message_tool_calls(attributes: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Output tool calls from ``tool_call`` parts of ``gen_ai.output.messages``."""
     messages, ok = _load_json(attributes.get("gen_ai.output.messages"))
     if not ok or not isinstance(messages, list):
-        return False
-    return any(
-        isinstance(part, Mapping) and part.get("type") == "tool_call"
-        for message in messages
-        if isinstance(message, Mapping) and isinstance(message.get("parts"), list)
-        for part in message["parts"]
-    )
+        return []
+    calls: list[dict[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, Mapping) or not isinstance(message.get("parts"), list):
+            continue
+        for part in message["parts"]:
+            if not isinstance(part, Mapping) or part.get("type") != "tool_call":
+                continue
+            name = _string(part.get("name"))
+            if name is None or not name.strip():
+                continue
+            arguments = part.get("arguments")
+            calls.append(
+                {
+                    "id": str(part.get("id") or part.get("call_id") or f"call-{len(calls)}"),
+                    "type": "function",
+                    "function": {
+                        "name": name.strip(),
+                        "arguments": arguments
+                        if isinstance(arguments, str)
+                        else json.dumps(arguments if arguments is not None else {}),
+                    },
+                }
+            )
+    return calls
 
 
 def _litellm_tool_calls(
@@ -808,10 +827,10 @@ def _apply_litellm(
     request: dict[str, Any],
     response: dict[str, Any],
 ) -> bool:
-    """Add what LiteLLM writes outside the attributes the dialects read.
+    """Fill the request id, request tools and output tool calls from LiteLLM's
+    non-standard attributes, only where the standard ones are absent.
 
-    Fills the provider request id, request tools and output tool calls only
-    where nothing else supplied them. Returns whether any JSON was malformed.
+    Returns whether any JSON was malformed.
     """
     response_id = _string(attributes.get("gen_ai.response.id"))
     if response_id is not None and not any(
@@ -825,17 +844,16 @@ def _apply_litellm(
         if tools:
             request["tools"] = tools
 
-    if not _has_output_tool_call(attributes):
-        tool_calls = _litellm_tool_calls(attributes, response_id)
-        if tool_calls:
-            choices = response.get("choices") or [{}]
-            response["choices"] = [
-                {
-                    **choices[0],
-                    "message": {"role": "assistant", "tool_calls": tool_calls},
-                },
-                *choices[1:],
-            ]
+    # The standard part carries the real call id; the legacy attributes do not.
+    tool_calls = _output_message_tool_calls(attributes) or _litellm_tool_calls(
+        attributes, response_id
+    )
+    if tool_calls:
+        choices = response.get("choices") or [{}]
+        response["choices"] = [
+            {**choices[0], "message": {"role": "assistant", "tool_calls": tool_calls}},
+            *choices[1:],
+        ]
     return degraded
 
 
