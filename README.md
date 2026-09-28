@@ -175,7 +175,7 @@ answers "which workload should these calls be measured with?" Keep the route
 stable when calls should be analyzed together. The SDK marks routes created by
 `route()` as explicit developer metadata so workload classification can honor
 that boundary. See the runnable
-[Python Gemini workflow example](examples/workflows/content-generation/draft-review/)
+[manual route-grouping example](examples/route-grouping/content-generation/one-trace-two-workloads/)
 for three calls in one trace that intentionally produce two workloads. Set `capture_text=False`
 on `init()`, `route()`, or `trace()` when an operation must remain
 metadata-only.

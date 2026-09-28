@@ -1,7 +1,7 @@
-# Content generation: draft and review
+# Manual route grouping: one trace, two workloads
 
-This example shows how to make the dashboard match the way your product works.
-It makes three Gemini calls for one haiku-writing request:
+Start here if you want an example of manually grouping routes by customer use
+case. One haiku-writing request makes three Gemini calls:
 
 1. `haiku-draft` creates the first draft.
 2. `haiku-review` reviews the draft.
@@ -24,7 +24,7 @@ python -m pip install metergraph google-genai
 export GEMINI_API_KEY=<your-gemini-key>
 export METERGRAPH_APP_TOKEN=<your-ingest-key>
 export METERGRAPH_INGEST_URL=<your-metergraph-ingest-url>
-python examples/workflows/content-generation/draft-review/python-gemini/main.py
+python examples/route-grouping/content-generation/one-trace-two-workloads/main.py
 ```
 
 For a local self-hosted Metergraph server, set

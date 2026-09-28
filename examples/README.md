@@ -1,8 +1,8 @@
 # Examples
 
-Start with the customer workflow you want to instrument. The workflow examples
-show how traces and routes map to product behavior. The integration examples
-then show provider, framework, and telemetry-specific setup.
+If you want to decide which calls appear together as workloads, start with the
+manual route-grouping example. The other examples are implementation references
+for providers, frameworks, telemetry, and execution.
 
 Setup for all of them:
 
@@ -19,6 +19,7 @@ events while keeping MeterGraph running.
 
 | Example | Needs |
 |---|---|
+| `route-grouping/content-generation/one-trace-two-workloads/` | Manually group calls into named routes inside one trace |
 | `test-fixtures/fake-providers/run_e2e.py` | Nothing required. Offline demo traffic |
 | `integrations/providers/openai/` | Native OpenAI wrappers for Python and TypeScript |
 | `integrations/providers/anthropic/` | Native Anthropic wrappers for Python and TypeScript |
@@ -28,12 +29,26 @@ events while keeping MeterGraph running.
 | `integrations/telemetry/` | Langfuse, LiteLLM, Phoenix, and Bedrock/Azure OpenTelemetry |
 | `execution/batch-first/` | Opt-in Batch API with a deadline and direct fallback |
 
-## Workflows
+## Manual route grouping
 
-For a customer-perspective workflow, start with
-[`workflows/content-generation/draft-review/`](workflows/content-generation/draft-review/).
-It shows one `trace()` containing three calls while separate `route()` scopes
-keep the draft and review workloads distinct.
+Start with
+[`route-grouping/content-generation/one-trace-two-workloads/`](route-grouping/content-generation/one-trace-two-workloads/).
+It shows the exact customer pattern: one user action, one `trace()`, and two
+named `route()` scopes that become two workloads.
+
+```text
+route-grouping/
+└── content-generation/
+    └── one-trace-two-workloads/
+        ├── main.py
+        └── routes/
+            ├── haiku-draft/
+            └── haiku-review/
+```
+
+Use this example when the question is, "Which calls should the dashboard group
+together?" Use the integration directories below only after choosing that
+workload shape.
 
 `integrations/frameworks/vercel-ai/direct/main.mjs` uses AI SDK 7 and therefore
 requires Node.js 22+. It wraps a language model with
