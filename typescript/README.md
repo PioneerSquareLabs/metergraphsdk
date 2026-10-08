@@ -179,8 +179,10 @@ route. Job-management polls are deliberately not counted as model calls.
 OpenAI Responses created with `background: true` are recorded once, when a
 wrapped `client.responses.retrieve()` or `cancel()` first returns a terminal
 status (`completed`, `failed`, `cancelled` or `incomplete`), with that
-response's usage and output. A `retrieve(id, { stream: true })` resume is
-observed through its terminal `response.*` event. Polls that still report
+response's usage and output. A `retrieve(id, { stream: true })` or
+`responses.stream({ response_id })` resume is observed through its terminal
+`response.*` event when the stream is iterated directly; `tee()` and
+`toReadableStream()` copies are not observed. Polls that still report
 `queued` or `in_progress` add no rows, and latency runs from `create` to the
 observed terminal response. A background response whose terminal status the
 process never observes is recorded at `shutdown()` with status `abandoned`

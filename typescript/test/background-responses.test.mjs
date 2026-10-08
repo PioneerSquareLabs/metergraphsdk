@@ -234,3 +234,26 @@ test("a result that cannot be inspected never breaks the caller", async (t) => {
   assert.equal(finishBackgroundCalls(), 0);
   assert.ok(rows.length <= 1);
 });
+
+test("resuming with responses.stream({ response_id }) records one row", async (t) => {
+  const rows = setup(t);
+  const id = "resp_bg10";
+  const openai = wrap(new OpenAI({
+    apiKey: "test",
+    fetch: async (url, init) => {
+      if ((init?.method ?? "GET") === "POST") return json(body(id, "queued"));
+      return sse([
+        { type: "response.created", sequence_number: 0, response: body(id, "in_progress") },
+        { type: "response.in_progress", sequence_number: 1, response: body(id, "in_progress") },
+        { type: "response.completed", sequence_number: 2, response: finished(id, "completed") },
+      ]);
+    },
+  }), "openai");
+  await openai.responses.create({ model: "gpt-4o-mini", input: "hi", background: true });
+  const stream = openai.responses.stream({ response_id: id });
+  for await (const _event of stream) {
+    // consume
+  }
+  await stream.finalResponse().catch(() => undefined);
+  assert.deepEqual(rows.map((row) => [row.endpoint, row.status, row.output_tokens]), [["responses", "completed", 45]]);
+});

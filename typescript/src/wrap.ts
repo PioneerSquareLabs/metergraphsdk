@@ -546,10 +546,19 @@ function patchBackgroundObserver(owner: AnyRecord | undefined, method: string): 
   const wrapped = function (this: unknown, ...args: unknown[]) {
     const result = original.apply(owner, args);
     // retrieve(id, { stream: true }) resumes a background response as a stream.
-    const streamed = get(args[1], "stream") === true;
+    let streamed = false;
+    try {
+      streamed = get(args[1], "stream") === true;
+    } catch {
+      // fail-open
+    }
     const observe = (value: any) => {
       if (streamed) {
-        return value && value[Symbol.asyncIterator] ? observedBackgroundStream(value) : value;
+        try {
+          return value && value[Symbol.asyncIterator] ? observedBackgroundStream(value) : value;
+        } catch {
+          return value;
+        }
       }
       observeBackground(value);
       return value;
@@ -611,6 +620,12 @@ function patch(
       return original.apply(owner, args);
     }
     const incoming = requestFrom(args);
+    if (endpoint === "responses.stream" && incoming.response_id != null) {
+      // Resuming an existing (background) response is not a new model call:
+      // it retrieves with stream: true, and the retrieve observer records the
+      // held create once from its terminal event.
+      return original.apply(owner, args);
+    }
     const patchUsage = typeof process === "undefined"
       || process.env.METERGRAPH_PATCH_STREAM_USAGE !== "0";
     let injectedUsage = false;
