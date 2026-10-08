@@ -176,6 +176,21 @@ inference while iterating a wrapped `client.messages.batches.results()` result.
 Consume results inside `route()` so the asynchronous batch retains its product
 route. Job-management polls are deliberately not counted as model calls.
 
+OpenAI Responses created with `background: true` are recorded once, when a
+wrapped `client.responses.retrieve()` or `cancel()` first returns a terminal
+status (`completed`, `failed`, `cancelled` or `incomplete`), with that
+response's usage and output. A `retrieve(id, { stream: true })` or
+`responses.stream({ response_id })` resume is observed through its terminal
+`response.*` event when the stream is iterated directly; `tee()` and
+`toReadableStream()` copies are not observed. Polls that still report
+`queued` or `in_progress` add no rows, and latency runs from `create` to the
+observed terminal response. A background response whose terminal status the
+process never observes is recorded at `shutdown()` with status `abandoned`
+and unknown usage, never as a completed call with zero tokens. Only retrieves
+made through the same wrapped client in the same process are observed; a
+client derived with `withOptions()` or polling from a different process leaves
+the call to be recorded as `abandoned`.
+
 ## Batch-first execution (opt-in)
 
 `batchFirst()` is a separate, explicitly opt-in code path from `wrap()`/capture: submit one request through a provider's Batch API, wait up to a caller-chosen deadline, and fall back to exactly one direct call if the batch hasn't finished in time.
