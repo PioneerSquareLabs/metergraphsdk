@@ -442,6 +442,144 @@ function preserveProviderPromise(
   });
 }
 
+// Background Responses ({ background: true }) return a queued or in-progress
+// response from create(); output and usage arrive on a later retrieve() or
+// cancel(). The capture is held until the client observes a terminal status,
+// then recorded once from that response. A held call the client never sees
+// finish is recorded as "abandoned" at shutdown (or when the bound is
+// exceeded), so it is never stored as a completed call with zero usage.
+const BACKGROUND_PENDING = new Set(["queued", "in_progress"]);
+const BACKGROUND_TERMINAL = new Set(["completed", "failed", "cancelled", "incomplete"]);
+const BACKGROUND_MAX_PENDING = 1024;
+interface HeldBackgroundCall {
+  capture: CaptureRuntime;
+  state: CallState;
+  last: unknown;
+}
+const backgroundCalls = new Map<string, HeldBackgroundCall>();
+
+function shouldHoldBackground(endpoint: string, request: Record<string, unknown>, response: unknown): boolean {
+  try {
+    return (endpoint === "responses" || endpoint === "responses.parse")
+      && BACKGROUND_PENDING.has(get(response, "status"))
+      && (request.background === true || get(response, "background") === true)
+      && typeof get(response, "id") === "string"
+      && get(response, "id") !== "";
+  } catch {
+    return false;
+  }
+}
+
+function holdBackground(capture: CaptureRuntime, state: CallState, response: unknown): void {
+  const id = get(response, "id") as string;
+  backgroundCalls.delete(id);
+  backgroundCalls.set(id, { capture, state, last: response });
+  while (backgroundCalls.size > BACKGROUND_MAX_PENDING) {
+    const [oldest, held] = backgroundCalls.entries().next().value as [string, HeldBackgroundCall];
+    backgroundCalls.delete(oldest);
+    finishCapture(held.capture, held.state, held.last, { status: "abandoned" });
+  }
+}
+
+function observeBackground(response: unknown): void {
+  try {
+    const id = get(response, "id");
+    if (typeof id !== "string") return;
+    const held = backgroundCalls.get(id);
+    if (!held) return;
+    const status = get(response, "status");
+    if (BACKGROUND_PENDING.has(status)) {
+      held.last = response;
+      return;
+    }
+    if (!BACKGROUND_TERMINAL.has(status)) return;
+    backgroundCalls.delete(id);
+    finishCapture(held.capture, held.state, response);
+  } catch {
+    // Observation is telemetry-only and fail-open.
+  }
+}
+
+function observeBackgroundEvent(event: unknown): void {
+  try {
+    const type = get(event, "type");
+    if (typeof type === "string" && type.startsWith("response.")) {
+      const response = get(event, "response");
+      if (response) observeBackground(response);
+    }
+  } catch {
+    // fail-open
+  }
+}
+
+// Pass a resumed background stream through unchanged, observing its response
+// events so the terminal one finishes the held call.
+function observedBackgroundStream(stream: AnyRecord): AnyRecord {
+  return new Proxy(stream, {
+    get(target, property, receiver) {
+      if (property === Symbol.asyncIterator) {
+        return async function* () {
+          for await (const event of target as AsyncIterable<unknown>) {
+            observeBackgroundEvent(event);
+            yield event;
+          }
+        };
+      }
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+/** Record every held background call whose final result was never observed. */
+export function finishBackgroundCalls(status = "abandoned"): number {
+  const held = [...backgroundCalls.values()];
+  backgroundCalls.clear();
+  for (const call of held) finishCapture(call.capture, call.state, call.last, { status });
+  return held.length;
+}
+
+function patchBackgroundObserver(owner: AnyRecord | undefined, method: string): boolean {
+  if (!owner || typeof owner[method] !== "function") return false;
+  if (owner[method].__metergraph__) return true;
+  const original = owner[method];
+  const wrapped = function (this: unknown, ...args: unknown[]) {
+    const result = original.apply(owner, args);
+    // retrieve(id, { stream: true }) resumes a background response as a stream.
+    const streamed = get(args[1], "stream") === true;
+    const observe = (value: any) => {
+      if (streamed) {
+        return value && value[Symbol.asyncIterator] ? observedBackgroundStream(value) : value;
+      }
+      observeBackground(value);
+      return value;
+    };
+    if (result && typeof (result as Promise<unknown>).then === "function") {
+      return preserveProviderPromise(result as AnyRecord, observe, (error: unknown): never => {
+        throw error;
+      });
+    }
+    return observe(result);
+  };
+  wrapped.__metergraph__ = true;
+  owner[method] = wrapped;
+  return true;
+}
+
+function applyBackgroundObservers(client: AnyRecord): number {
+  let patched = 0;
+  for (const path of ["responses", "beta.responses"]) {
+    let owner: AnyRecord | undefined;
+    try {
+      owner = resolveSeam(client, path);
+    } catch {
+      continue;
+    }
+    for (const method of ["retrieve", "cancel"]) patched += Number(patchBackgroundObserver(owner, method));
+  }
+  return patched;
+}
+
 function patch(
   owner: AnyRecord | undefined,
   method: string,
@@ -520,7 +658,11 @@ function patch(
       }
       if (!settled) {
         settled = true;
-        finishCapture(capture, state, response);
+        if (shouldHoldBackground(endpoint, request, response)) {
+          holdBackground(capture, state, response);
+        } else {
+          finishCapture(capture, state, response);
+        }
       }
       return response;
     };
@@ -674,7 +816,8 @@ export function wrap<T extends AnyRecord>(client: T, providerOrOptions?: Provide
     const name = provider ?? detectProvider(client);
     const gatewayName = overrideGateway ?? (name === "openai" ? detectGateway(client) : undefined);
     const patched = applySeams(client, name, gatewayName);
-    const patchedCount = patched.length + applyBatchExtras(client, name);
+    const patchedCount = patched.length + applyBatchExtras(client, name)
+      + (name === "openai" ? applyBackgroundObservers(client) : 0);
     const label = gatewayName ? `${gatewayName} gateway via ${name}` : name;
     if (!patchedCount) {
       console.warn(`Metergraph found no supported methods on ${label} client`);
