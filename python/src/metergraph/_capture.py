@@ -1695,6 +1695,11 @@ def _patch(
         runtime = _runtime
         if runtime is None:
             return original(*args, **kwargs)
+        if endpoint == "responses.stream" and kwargs.get("response_id") is not None:
+            # Resuming an existing (background) response is not a new model
+            # call: it retrieves with stream=True, and the retrieve observer
+            # records the held create once from its terminal event.
+            return original(*args, **kwargs)
         if (
             provider == "openai"
             and endpoint == "chat.completions"

@@ -660,3 +660,44 @@ def test_real_async_openai_background_response_records_final_usage(tmp_path):
     [row] = rows.rows
     assert row["status"] == "completed"
     assert row["output_tokens"] == 45
+
+
+def test_real_openai_stream_resume_records_one_row(tmp_path):
+    from openai import OpenAI
+
+    def sse(events):
+        text = "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events)
+        return httpx.Response(200, text=text, headers={"content-type": "text/event-stream"})
+
+    base = {
+        "id": "resp_resume", "object": "response", "created_at": 0, "model": "gpt-4o-mini",
+        "background": True, "parallel_tool_calls": True, "tool_choice": "auto", "tools": [],
+        "output": [], "usage": None,
+    }
+    done = {
+        **base, "status": "completed",
+        "usage": {"input_tokens": 120, "output_tokens": 45, "total_tokens": 165,
+                  "input_tokens_details": {"cached_tokens": 0},
+                  "output_tokens_details": {"reasoning_tokens": 0}},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(200, json={**base, "status": "queued"})
+        return sse([
+            {"type": "response.created", "sequence_number": 0, "response": {**base, "status": "in_progress"}},
+            {"type": "response.in_progress", "sequence_number": 1, "response": {**base, "status": "in_progress"}},
+            {"type": "response.completed", "sequence_number": 2, "response": done},
+        ])
+
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root=str(tmp_path))))
+    client = metergraph.wrap(OpenAI(api_key="test", http_client=httpx.Client(transport=httpx.MockTransport(handler))))
+    client.responses.create(model="gpt-4o-mini", input="hi", background=True)
+    with client.responses.stream(response_id="resp_resume") as stream:
+        for _event in stream:
+            pass
+    _capture.set_runtime(None)
+    assert [(r["endpoint"], r["status"], r["output_tokens"]) for r in rows.rows] == [
+        ("responses", "completed", 45)
+    ]
