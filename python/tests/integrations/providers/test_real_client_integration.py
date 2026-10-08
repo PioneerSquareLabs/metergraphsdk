@@ -565,3 +565,98 @@ def test_real_anthropic_truncated_stream_keeps_its_content(tmp_path):
     _, envelope = _captured(rows)
     assert not ("content" in envelope and envelope["content"] is None)
     _capture.set_runtime(None)
+
+
+def _background_handler(final_status: str):
+    """A Responses endpoint whose background job finishes on the second poll."""
+    polls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        base = {
+            "id": "resp_background",
+            "object": "response",
+            "created_at": 0,
+            "model": "gpt-4o-mini",
+            "background": True,
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        if request.method == "POST":
+            return httpx.Response(200, json={**base, "status": "queued", "output": [], "usage": None})
+        polls["count"] += 1
+        if polls["count"] < 2:
+            return httpx.Response(200, json={**base, "status": "in_progress", "output": [], "usage": None})
+        return httpx.Response(
+            200,
+            json={
+                **base,
+                "status": final_status,
+                "usage": {
+                    "input_tokens": 120,
+                    "output_tokens": 45,
+                    "total_tokens": 165,
+                    "input_tokens_details": {"cached_tokens": 0},
+                    "output_tokens_details": {"reasoning_tokens": 0},
+                },
+                "output": [
+                    {
+                        "type": "message",
+                        "id": "msg_1",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "done", "annotations": []}],
+                    }
+                ],
+            },
+        )
+
+    return handler
+
+
+def test_real_openai_background_response_records_final_usage(tmp_path):
+    from openai import OpenAI
+
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root=str(tmp_path))))
+    client = metergraph.wrap(
+        OpenAI(
+            api_key="test",
+            http_client=httpx.Client(transport=httpx.MockTransport(_background_handler("completed"))),
+        )
+    )
+    queued = client.responses.create(model="gpt-4o-mini", input="hi", background=True)
+    assert queued.status == "queued"
+    assert client.responses.retrieve(queued.id).status == "in_progress"
+    assert rows.rows == []
+    assert client.responses.retrieve(queued.id).status == "completed"
+    _capture.set_runtime(None)
+
+    [row] = rows.rows
+    assert row["endpoint"] == "responses"
+    assert row["status"] == "completed"
+    assert row["input_tokens"] == 120
+    assert row["output_tokens"] == 45
+
+
+def test_real_async_openai_background_response_records_final_usage(tmp_path):
+    rows = Rows()
+    _capture.set_runtime(Runtime(rows, Options(app_root=str(tmp_path))))
+    client = metergraph.wrap(
+        AsyncOpenAI(
+            api_key="test",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(_background_handler("completed"))),
+        )
+    )
+
+    async def run():
+        queued = await client.responses.create(model="gpt-4o-mini", input="hi", background=True)
+        await client.responses.retrieve(queued.id)
+        assert rows.rows == []
+        await client.responses.retrieve(queued.id)
+
+    asyncio.run(run())
+    _capture.set_runtime(None)
+    [row] = rows.rows
+    assert row["status"] == "completed"
+    assert row["output_tokens"] == 45

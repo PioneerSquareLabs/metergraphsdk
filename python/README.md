@@ -210,6 +210,15 @@ message batches are captured per inference while iterating a wrapped
 rows carry real per-result usage and the batch pricing flag; job-management
 polls themselves are not miscounted as model calls.
 
+OpenAI Responses created with `background=True` are recorded once, when a
+wrapped `client.responses.retrieve()` or `cancel()` first returns a terminal
+status (`completed`, `failed`, `cancelled` or `incomplete`), with that
+response's usage and output. Polls that still report `queued` or
+`in_progress` add no rows, and latency runs from `create` to the observed
+terminal response. A background response whose terminal status the process
+never observes is recorded at `shutdown()` with status `abandoned` and
+unknown usage, never as a completed call with zero tokens.
+
 ## Batch-first execution (opt-in)
 
 `metergraph.batch_first()` is a separate, explicitly opt-in code path from `wrap()`/capture: submit one request through a provider's Batch API, wait up to a caller-chosen deadline, and fall back to exactly one direct call if the batch hasn't finished in time. It is synchronous/blocking, matching this SDK's own background-work model — a daemon thread, not asyncio.

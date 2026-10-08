@@ -10,7 +10,13 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from ._capture import DEFAULT_TEXT_MAX_BYTES, Options, Runtime, set_runtime
+from ._capture import (
+    DEFAULT_TEXT_MAX_BYTES,
+    Options,
+    Runtime,
+    finish_background_calls,
+    set_runtime,
+)
 from ._capture import wrap as _wrap
 from ._config import ConfigPoller
 from ._context import (
@@ -289,6 +295,12 @@ def flush(timeout: float = 3.0) -> bool:
 
 def shutdown() -> None:
     global _writer, _config, _session_manager
+    # Background responses whose final result was never retrieved are
+    # recorded as abandoned before the writer drains, never as zero usage.
+    try:
+        finish_background_calls()
+    except Exception:
+        pass
     if _config:
         _config.stop()
         _config = None
