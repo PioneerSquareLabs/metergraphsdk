@@ -149,7 +149,7 @@ def test_unobserved_background_call_is_recorded_as_abandoned_not_zero(rows):
     assert row["status"] == "abandoned"
     assert row["input_tokens"] is None
     assert row["output_tokens"] is None
-    # The last status the client saw, so the row says why usage is unknown.
+    # The last status seen (here, the create's), so the row says why usage is unknown.
     assert row["finish_reason"] == "queued"
     assert row["status_code"] == "unset"
 
@@ -218,3 +218,100 @@ def test_fork_child_does_not_inherit_held_calls(rows):
     _capture._clear_background_after_fork()
     assert _capture.finish_background_calls() == 0
     assert rows.rows == []
+
+
+def test_background_parse_is_held_until_the_terminal_retrieve(rows):
+    class ParsingResponses(Responses):
+        def parse(self, **kwargs):
+            return self._next()
+
+    client = metergraph.wrap(
+        SimpleNamespace(responses=ParsingResponses(["queued", "completed"])), provider="openai"
+    )
+    client.responses.parse(model="gpt-test", input="hi", background=True)
+    assert rows.rows == []
+    client.responses.retrieve("resp_1")
+    [row] = rows.rows
+    assert row["endpoint"] == "responses.parse"
+    assert row["status"] == "completed"
+    assert row["input_tokens"] == 120
+
+
+def test_abandoned_row_reports_the_last_polled_status(rows):
+    client = wrapped(["queued", "in_progress"])
+    client.responses.create(model="gpt-test", input="hi", background=True)
+    client.responses.retrieve("resp_1")
+    _capture.finish_background_calls()
+    [row] = rows.rows
+    assert row["status"] == "abandoned"
+    assert row["finish_reason"] == "in-progress"
+
+
+class StreamingResponses(Responses):
+    def retrieve(self, response_id, stream=False, **kwargs):
+        if not stream:
+            return self._next()
+        events = [
+            SimpleNamespace(type="response.in_progress", response=response("in_progress", response_id)),
+            SimpleNamespace(type="response.output_text.delta", delta="do"),
+            SimpleNamespace(type="response.completed", response=response("completed", response_id, USAGE)),
+        ]
+
+        class Stream:
+            def __iter__(self):
+                return iter(events)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        return Stream()
+
+
+def test_streamed_resume_is_observed_through_its_terminal_event(rows):
+    client = metergraph.wrap(SimpleNamespace(responses=StreamingResponses(["queued"])), provider="openai")
+    client.responses.create(model="gpt-test", input="hi", background=True)
+    seen = [event.type for event in client.responses.retrieve("resp_1", stream=True)]
+    assert seen == ["response.in_progress", "response.output_text.delta", "response.completed"]
+    [row] = rows.rows
+    assert row["status"] == "completed"
+    assert row["output_tokens"] == 45
+
+
+def test_streamed_resume_works_as_a_context_manager(rows):
+    client = metergraph.wrap(SimpleNamespace(responses=StreamingResponses(["queued"])), provider="openai")
+    client.responses.create(model="gpt-test", input="hi", background=True)
+    with client.responses.retrieve("resp_1", stream=True) as stream:
+        for _event in stream:
+            pass
+    assert [row["status"] for row in rows.rows] == ["completed"]
+
+
+def test_a_non_streamed_result_is_returned_unchanged(rows):
+    client = wrapped(["queued", "completed"])
+    client.responses.create(model="gpt-test", input="hi", background=True)
+    result = client.responses.retrieve("resp_1")
+    assert isinstance(result, SimpleNamespace)
+
+
+def test_a_broken_result_never_raises_into_the_caller(rows):
+    class Broken:
+        id = "resp_1"
+
+        @property
+        def status(self):
+            raise RuntimeError("broken status")
+
+    class BrokenResponses:
+        def create(self, **kwargs):
+            return Broken()
+
+    client = metergraph.wrap(SimpleNamespace(responses=BrokenResponses()), provider="openai")
+    result = client.responses.create(model="gpt-test", input="hi", background=True)
+    assert isinstance(result, Broken)
+
+
+def test_the_background_drain_is_not_public_api():
+    assert not hasattr(metergraph, "finish_background_calls")

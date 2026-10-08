@@ -1798,12 +1798,20 @@ def _hold_background(call: CallState, response: Any) -> bool:
 
 
 def _observe_background(response: Any) -> None:
-    """Record a held background call once its response reaches a terminal status."""
+    """Record a held background call once its response reaches a terminal
+    status; a non-terminal poll only updates the last status seen."""
     try:
-        if _get(response, "status") not in _BACKGROUND_TERMINAL_STATUSES:
-            return
+        status = _get(response, "status")
         response_id = _get(response, "id")
         if not isinstance(response_id, str):
+            return
+        if status in _BACKGROUND_PENDING_STATUSES:
+            with _background_lock:
+                held = _background.get(response_id)
+                if held is not None:
+                    _background[response_id] = (held[0], response)
+            return
+        if status not in _BACKGROUND_TERMINAL_STATUSES:
             return
         with _background_lock:
             held = _background.pop(response_id, None)
@@ -1811,6 +1819,80 @@ def _observe_background(response: Any) -> None:
             _safe_finish(held[0], response)
     except Exception:
         pass
+
+
+def _observe_background_event(event: Any) -> None:
+    """Observe a streamed Responses event (``retrieve(..., stream=True)``)."""
+    try:
+        if str(_get(event, "type") or "").startswith("response."):
+            response = _get(event, "response")
+            if response is not None:
+                _observe_background(response)
+    except Exception:
+        pass
+
+
+class _ObservedStream:
+    """Pass a resumed background stream through unchanged, observing its
+    response events so the terminal one finishes the held call."""
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
+
+    def __iter__(self):
+        for event in self._stream:
+            _observe_background_event(event)
+            yield event
+
+    def __next__(self):
+        event = next(self._stream)
+        _observe_background_event(event)
+        return event
+
+    def __enter__(self):
+        entered = self._stream.__enter__()
+        if entered is not self._stream:
+            self._stream = entered
+        return self
+
+    def __exit__(self, *exc: Any) -> Any:
+        return self._stream.__exit__(*exc)
+
+    async def __aiter__(self):
+        async for event in self._stream:
+            _observe_background_event(event)
+            yield event
+
+    async def __anext__(self):
+        event = await self._stream.__anext__()
+        _observe_background_event(event)
+        return event
+
+    async def __aenter__(self):
+        entered = await self._stream.__aenter__()
+        if entered is not self._stream:
+            self._stream = entered
+        return self
+
+    async def __aexit__(self, *exc: Any) -> Any:
+        return await self._stream.__aexit__(*exc)
+
+
+def _observed(result: Any, streamed: bool) -> Any:
+    # Only a call that asked for a stream is wrapped, so a Response model
+    # (which is itself iterable) is always returned unchanged.
+    if streamed:
+        try:
+            if hasattr(result, "__iter__") or hasattr(result, "__aiter__"):
+                return _ObservedStream(result)
+        except Exception:
+            pass
+        return result
+    _observe_background(result)
+    return result
 
 
 def finish_background_calls(status: str = "abandoned") -> int:
@@ -1833,16 +1915,14 @@ def _patch_background_observer(owner: Any, method_name: str) -> bool:
     @functools.wraps(original)
     def wrapped(*args, **kwargs):
         result = original(*args, **kwargs)
+        streamed = kwargs.get("stream") is True
         if inspect.isawaitable(result):
 
             async def await_result():
-                resolved = await result
-                _observe_background(resolved)
-                return resolved
+                return _observed(await result, streamed)
 
             return await_result()
-        _observe_background(result)
-        return result
+        return _observed(result, streamed)
 
     wrapped.__metergraph__ = True  # type: ignore[attr-defined]
     try:
@@ -1880,12 +1960,16 @@ def _finish_or_stream(
         or (hasattr(result, "__enter__") and hasattr(result, "__exit__"))
     ):
         return SyncStream(result, call)
-    if (
-        endpoint == "responses"
-        and _get(result, "status") in _BACKGROUND_PENDING_STATUSES
-        and (request.get("background") is True or _get(result, "background") is True)
-        and _hold_background(call, result)
-    ):
+    try:
+        held = (
+            endpoint in {"responses", "responses.parse"}
+            and _get(result, "status") in _BACKGROUND_PENDING_STATUSES
+            and (request.get("background") is True or _get(result, "background") is True)
+            and _hold_background(call, result)
+        )
+    except Exception:
+        held = False
+    if held:
         return result
     _safe_finish(call, result)
     return result

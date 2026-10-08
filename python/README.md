@@ -217,7 +217,12 @@ response's usage and output. Polls that still report `queued` or
 `in_progress` add no rows, and latency runs from `create` to the observed
 terminal response. A background response whose terminal status the process
 never observes is recorded at `shutdown()` with status `abandoned` and
-unknown usage, never as a completed call with zero tokens.
+unknown usage, never as a completed call with zero tokens. A streamed
+`retrieve(..., stream=True)` resume is observed through its terminal response
+event. Only retrieves made through the same wrapped client in the same process
+are observed: a client derived with `with_options()` or `copy()`,
+`with_raw_response`/`with_streaming_response` retrieves, and polling from a
+different process leave the call to be recorded as `abandoned`.
 
 ## Batch-first execution (opt-in)
 

@@ -14,9 +14,9 @@ from ._capture import (
     DEFAULT_TEXT_MAX_BYTES,
     Options,
     Runtime,
-    finish_background_calls,
     set_runtime,
 )
+from ._capture import finish_background_calls as _finish_background_calls
 from ._capture import wrap as _wrap
 from ._config import ConfigPoller
 from ._context import (
@@ -298,7 +298,7 @@ def shutdown() -> None:
     # Background responses whose final result was never retrieved are
     # recorded as abandoned before the writer drains, never as zero usage.
     try:
-        finish_background_calls()
+        _finish_background_calls()
     except Exception:
         pass
     if _config:
