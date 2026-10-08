@@ -11,7 +11,9 @@ import os
 import platform
 import secrets
 import sys
+import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1693,6 +1695,11 @@ def _patch(
         runtime = _runtime
         if runtime is None:
             return original(*args, **kwargs)
+        if endpoint == "responses.stream" and kwargs.get("response_id") is not None:
+            # Resuming an existing (background) response is not a new model
+            # call: it retrieves with stream=True, and the retrieve observer
+            # records the held create once from its terminal event.
+            return original(*args, **kwargs)
         if (
             provider == "openai"
             and endpoint == "chat.completions"
@@ -1756,6 +1763,194 @@ def _safe_finish(call: CallState, response: Any = None, **kwargs: Any) -> None:
         pass
 
 
+# Background Responses (``background=True``) return a queued or in-progress
+# response from ``create``; output and usage arrive on a later ``retrieve`` or
+# ``cancel``. The capture is held until the client observes a terminal status,
+# then recorded once from that response. A held call the client never sees
+# finish is recorded as ``abandoned`` at shutdown (or when the bound is
+# exceeded), so it is never stored as a completed call with zero usage.
+_BACKGROUND_PENDING_STATUSES = frozenset({"queued", "in_progress"})
+_BACKGROUND_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "incomplete"})
+_BACKGROUND_MAX_PENDING = 1024
+_background_lock = threading.Lock()
+_background: "OrderedDict[str, tuple[CallState, Any]]" = OrderedDict()
+
+
+def _clear_background_after_fork() -> None:
+    # Held calls belong to the parent; the child must not record them again.
+    global _background_lock
+    _background_lock = threading.Lock()
+    _background.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_clear_background_after_fork)
+
+
+def _hold_background(call: CallState, response: Any) -> bool:
+    response_id = _get(response, "id")
+    if not isinstance(response_id, str) or not response_id:
+        return False
+    evicted: list[tuple[CallState, Any]] = []
+    with _background_lock:
+        _background[response_id] = (call, response)
+        _background.move_to_end(response_id)
+        while len(_background) > _BACKGROUND_MAX_PENDING:
+            evicted.append(_background.popitem(last=False)[1])
+    for held, last_seen in evicted:
+        _safe_finish(held, last_seen, status="abandoned")
+    return True
+
+
+def _observe_background(response: Any) -> None:
+    """Record a held background call once its response reaches a terminal
+    status; a non-terminal poll only updates the last status seen."""
+    try:
+        status = _get(response, "status")
+        response_id = _get(response, "id")
+        if not isinstance(response_id, str):
+            return
+        if status in _BACKGROUND_PENDING_STATUSES:
+            with _background_lock:
+                held = _background.get(response_id)
+                if held is not None:
+                    _background[response_id] = (held[0], response)
+            return
+        if status not in _BACKGROUND_TERMINAL_STATUSES:
+            return
+        with _background_lock:
+            held = _background.pop(response_id, None)
+        if held is not None:
+            _safe_finish(held[0], response)
+    except Exception:
+        pass
+
+
+def _observe_background_event(event: Any) -> None:
+    """Observe a streamed Responses event (``retrieve(..., stream=True)``)."""
+    try:
+        if str(_get(event, "type") or "").startswith("response."):
+            response = _get(event, "response")
+            if response is not None:
+                _observe_background(response)
+    except Exception:
+        pass
+
+
+class _ObservedStream:
+    """Pass a resumed background stream through unchanged, observing its
+    response events so the terminal one finishes the held call."""
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
+
+    def __iter__(self):
+        for event in self._stream:
+            _observe_background_event(event)
+            yield event
+
+    def __next__(self):
+        event = next(self._stream)
+        _observe_background_event(event)
+        return event
+
+    def __enter__(self):
+        entered = self._stream.__enter__()
+        if entered is not self._stream:
+            self._stream = entered
+        return self
+
+    def __exit__(self, *exc: Any) -> Any:
+        return self._stream.__exit__(*exc)
+
+    async def __aiter__(self):
+        async for event in self._stream:
+            _observe_background_event(event)
+            yield event
+
+    async def __anext__(self):
+        event = await self._stream.__anext__()
+        _observe_background_event(event)
+        return event
+
+    async def __aenter__(self):
+        entered = await self._stream.__aenter__()
+        if entered is not self._stream:
+            self._stream = entered
+        return self
+
+    async def __aexit__(self, *exc: Any) -> Any:
+        return await self._stream.__aexit__(*exc)
+
+
+def _observed(result: Any, streamed: bool) -> Any:
+    # Only a call that asked for a stream is wrapped, so a Response model
+    # (which is itself iterable) is always returned unchanged.
+    if streamed:
+        try:
+            if hasattr(result, "__iter__") or hasattr(result, "__aiter__"):
+                return _ObservedStream(result)
+        except Exception:
+            pass
+        return result
+    _observe_background(result)
+    return result
+
+
+def finish_background_calls(status: str = "abandoned") -> int:
+    """Record every held background call whose final result was never observed."""
+    with _background_lock:
+        held = list(_background.values())
+        _background.clear()
+    for call, last_seen in held:
+        _safe_finish(call, last_seen, status=status)
+    return len(held)
+
+
+def _patch_background_observer(owner: Any, method_name: str) -> bool:
+    original = getattr(owner, method_name, None)
+    if not callable(original):
+        return False
+    if getattr(original, "__metergraph__", False):
+        return True
+
+    @functools.wraps(original)
+    def wrapped(*args, **kwargs):
+        result = original(*args, **kwargs)
+        streamed = kwargs.get("stream") is True
+        if inspect.isawaitable(result):
+
+            async def await_result():
+                return _observed(await result, streamed)
+
+            return await_result()
+        return _observed(result, streamed)
+
+    wrapped.__metergraph__ = True  # type: ignore[attr-defined]
+    try:
+        setattr(owner, method_name, wrapped)
+    except Exception:
+        return False
+    return True
+
+
+def _apply_background_observers(client: Any) -> int:
+    patched = 0
+    for path in ("responses", "beta.responses"):
+        try:
+            owner = _resolve(client, path)
+        except Exception:
+            continue
+        if owner is None:
+            continue
+        for method in ("retrieve", "cancel"):
+            patched += int(_patch_background_observer(owner, method))
+    return patched
+
+
 def _finish_or_stream(
     result: Any, call: CallState, endpoint: str, request: Mapping[str, Any]
 ):
@@ -1770,6 +1965,17 @@ def _finish_or_stream(
         or (hasattr(result, "__enter__") and hasattr(result, "__exit__"))
     ):
         return SyncStream(result, call)
+    try:
+        held = (
+            endpoint in {"responses", "responses.parse"}
+            and _get(result, "status") in _BACKGROUND_PENDING_STATUSES
+            and (request.get("background") is True or _get(result, "background") is True)
+            and _hold_background(call, result)
+        )
+    except Exception:
+        held = False
+    if held:
+        return result
     _safe_finish(call, result)
     return result
 
@@ -1944,6 +2150,8 @@ def wrap(
         patched_count = len(patched)
         if not vercel:
             patched_count += _apply_batch_extras(client, resolved_provider)
+        if resolved_provider == "openai":
+            patched_count += _apply_background_observers(client)
         if vercel:
             client_label = f"Vercel AI Gateway via {resolved_provider}"
         elif gateway_name is not None:
