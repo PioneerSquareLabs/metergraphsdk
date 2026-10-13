@@ -146,7 +146,7 @@ export function init(options: MetergraphOptions = {}): void {
     if (!repoConfig && !warnedNoRepository) {
       warnedNoRepository = true;
       console.warn(
-        "Metergraph repository identity is not configured; set init({ repository: \"owner/repository\" }), METERGRAPH_REPOSITORY, or provide .metergraph/config.json. Continuing with legacy ingestion.",
+        "Metergraph is capturing calls normally. Repository identity is optional and not set, so traces are not linked to a source repository. To link them, commit .metergraph/config.json containing {\"repository\": \"owner/name\"}, set METERGRAPH_REPOSITORY=owner/name, pass init({ repository: \"owner/name\" }), or run `metergraph setup` in the project.",
       );
     }
     sessionManager = repoConfig

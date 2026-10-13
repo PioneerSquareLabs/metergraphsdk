@@ -10,7 +10,13 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from ._capture import DEFAULT_TEXT_MAX_BYTES, Options, Runtime, set_runtime
+from ._capture import (
+    DEFAULT_TEXT_MAX_BYTES,
+    Options,
+    Runtime,
+    set_runtime,
+)
+from ._capture import finish_background_calls as _finish_background_calls
 from ._capture import wrap as _wrap
 from ._config import ConfigPoller
 from ._context import (
@@ -114,9 +120,12 @@ def init(
         if repo_config is None and not _warned_no_repository:
             _warned_no_repository = True
             log.warning(
-                "Metergraph repository identity is not configured; set "
-                "init(repository='owner/repository'), METERGRAPH_REPOSITORY, "
-                "or provide .metergraph/config.json. Continuing with legacy ingestion."
+                "Metergraph is capturing calls normally. Repository identity is "
+                "optional and not set, so traces are not linked to a source "
+                "repository. To link them, commit .metergraph/config.json "
+                'containing {"repository": "owner/name"}, set '
+                "METERGRAPH_REPOSITORY=owner/name, pass init(repository='owner/name'), "
+                "or run `metergraph setup` in the project."
             )
         session = (
             SessionManager(
@@ -289,6 +298,12 @@ def flush(timeout: float = 3.0) -> bool:
 
 def shutdown() -> None:
     global _writer, _config, _session_manager
+    # Background responses whose final result was never retrieved are
+    # recorded as abandoned before the writer drains, never as zero usage.
+    try:
+        _finish_background_calls()
+    except Exception:
+        pass
     if _config:
         _config.stop()
         _config = None
