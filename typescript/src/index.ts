@@ -31,7 +31,7 @@ import { SessionManager } from "./session.js";
 import { track } from "./track.js";
 import { Transport, type TransportMode, type WaitUntil } from "./transport.js";
 import { SDK_VERSION } from "./version.js";
-import { setCaptureRuntime, wrap as wrapProvider, type WrapOptions } from "./wrap.js";
+import { finishBackgroundCalls, setCaptureRuntime, wrap as wrapProvider, type WrapOptions } from "./wrap.js";
 import {
   createVercelAISDKMiddleware,
   type VercelAISDKMiddleware,
@@ -246,6 +246,13 @@ export async function flush(timeoutMs = 3_000): Promise<boolean> {
 }
 
 export async function shutdown(): Promise<void> {
+  // Background responses whose final result was never retrieved are recorded
+  // as abandoned before the transport drains, never as zero usage.
+  try {
+    finishBackgroundCalls();
+  } catch {
+    // fail-open
+  }
   config?.stop();
   config = undefined;
   await transport?.shutdown();
