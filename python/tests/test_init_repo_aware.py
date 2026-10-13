@@ -100,7 +100,13 @@ def test_missing_repository_warns_once_and_never_writes(caplog, tmp_path):
 
     assert metergraph._session_manager is None
     assert not (tmp_path / ".metergraph").exists()
-    assert sum("repository identity is not configured" in r.message for r in caplog.records) == 1
+    notices = [r.message for r in caplog.records if "Repository identity is optional" in r.message]
+    assert len(notices) == 1
+    # The notice must not read as a failure, and must say how to set it.
+    assert "capturing calls normally" in notices[0]
+    assert "legacy" not in notices[0]
+    for way in (".metergraph/config.json", "METERGRAPH_REPOSITORY", "metergraph setup"):
+        assert way in notices[0]
     _reset_metergraph_state()
 
 
